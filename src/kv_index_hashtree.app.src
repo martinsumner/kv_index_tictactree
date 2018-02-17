@@ -1,0 +1,11 @@
+{application, kv_index_hashtree,
+ [
+  {description, "AAE helper service for KV vnode"},
+  {vsn, "1"},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib
+                 ]},
+  {env, [{root_path, "test"}]}
+ ]}.
