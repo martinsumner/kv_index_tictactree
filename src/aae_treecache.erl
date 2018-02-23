@@ -139,6 +139,9 @@ handle_call(close, _From, State) ->
 
 handle_cast({alter, Key, CurrentHash, OldHash}, State) ->
     BinExtractFun = 
+        % TODO: Should move this function to leveled_tictac
+        % - requires secret knowledge of implementation to perform
+        % alter
         fun(K, {CH, OH}) ->
             RemoveH = 
                 case {CH, OH} of 
@@ -150,7 +153,7 @@ handle_cast({alter, Key, CurrentHash, OldHash}, State) ->
                         0;
                     _ ->
                         % Alter - need to account for hashing with key
-                        % to rmeove the original
+                        % to remove the original
                         OH bxor leveled_tictac:keyto_segment32(K)
                 end,
             {K, {is_hash, CH bxor RemoveH}}
