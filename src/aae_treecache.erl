@@ -22,6 +22,8 @@
             cache_root/1,
             cache_leaves/2,
             cache_destroy/1,
+            cache_startload/1,
+            cache_completeload/2,
             cache_close/1]).
 
 -include_lib("eunit/include/eunit.hrl").
@@ -35,7 +37,9 @@
                 is_restored :: boolean(),
                 tree :: leveled_tictac:tictactree(),
                 root_path :: list(),
-                partition_id :: integer()}).
+                partition_id :: integer(),
+                loading = false :: boolean(),
+                change_queue :: list()}).
 
 % -type treecache_state() :: #state{}.
 
@@ -85,13 +89,32 @@ cache_alter(AAECache, Key, CurrentHash, OldHash) ->
 %% @doc
 %% Fetch the root of the cache tree to compare
 cache_root(Pid) -> 
-    gen_server:call(Pid, fetch_root, 2000).
+    gen_server:call(Pid, fetch_root, infinity).
 
 -spec cache_leaves(pid(), list(integer())) -> list().
 %% @doc
 %% Fetch the root of the cache tree to compare
 cache_leaves(Pid, BranchIDs) -> 
-    gen_server:call(Pid, {fetch_leaves, BranchIDs}, 2000).
+    gen_server:call(Pid, {fetch_leaves, BranchIDs}, infinity).
+
+-spec cache_startload(pid()) -> ok.
+%% @doc
+%% Sets the cache loading state to true, now as well as maintaining the 
+%% current tree the cache should keep a queue of all the changes from this
+%% point.
+%%
+%% Eventually cache_completeload hsould be called with a tree built from 
+%% a loading process snapshotted at the startload point, and the changes can
+%% all be applied
+cache_startload(Pid) ->
+    gen_server:cast(Pid, start_load).
+
+-spec cache_completeload(pid(), leveled_tictac:tictactree()) -> ok.
+%% @doc
+%% Take a tree which has been produced from a fold of the KeyStore, and make 
+%% this thenew tree
+cache_completeload(Pid, LoadedTree) ->
+    gen_server:cast(Pid, {complete_load, LoadedTree}).
 
 %%%============================================================================
 %%% gen_server callbacks
@@ -138,32 +161,35 @@ handle_call(close, _From, State) ->
     {stop, normal, ok, State}.
 
 handle_cast({alter, Key, CurrentHash, OldHash}, State) ->
-    BinExtractFun = 
-        % TODO: Should move this function to leveled_tictac
-        % - requires secret knowledge of implementation to perform
-        % alter
-        fun(K, {CH, OH}) ->
-            RemoveH = 
-                case {CH, OH} of 
-                    {0, _} ->
-                        % Remove - treat like adding abcking
-                        OH;
-                    {_, 0} ->
-                        % Add 
-                        0;
-                    _ ->
-                        % Alter - need to account for hashing with key
-                        % to remove the original
-                        OH bxor leveled_tictac:keyto_segment32(K)
-                end,
-            {K, {is_hash, CH bxor RemoveH}}
-        end,
     Tree0 = 
         leveled_tictac:add_kv(State#state.tree, 
                                 Key, 
                                 {CurrentHash, OldHash}, 
-                                BinExtractFun),
-    {noreply, State#state{tree = Tree0}};
+                                fun binary_extractfun/2),
+    State0 = 
+        case State#state.loading of 
+            true ->
+                CQ = State#state.change_queue,
+                State#state{change_queue = [{Key, CurrentHash, OldHash}|CQ]};
+            false ->
+                State 
+        end,
+    {noreply, State0#state{tree = Tree0}};
+handle_cast(start_load, State=#state{loading=Loading}) 
+                                                    when Loading == false ->
+    {noreply, State#state{loading = true, change_queue = []}};
+handle_cast({complete_load, Tree}, State=#state{loading=Loading}) 
+                                                    when Loading == true ->
+    LoadFun = 
+        fun({Key, CH, OH}, AccTree) ->
+            leveled_tictac:add_kv(AccTree, 
+                                    Key, 
+                                    {CH, OH}, 
+                                    fun binary_extractfun/2)
+        end,
+    Tree0 = 
+        lists:foldl(LoadFun, Tree, lists:reverse(State#state.change_queue)),
+    {noreply, State#state{loading = false, change_queue = [], tree = Tree0}};
 handle_cast(destroy, State) ->
     aae_util:log("C0004", [State#state.partition_id], logs()),
     {stop, normal, State}.
@@ -254,6 +280,30 @@ form_cache_filename(RootPath, SaveSQN) ->
     filename:join(RootPath, integer_to_list(SaveSQN) ++ ?FINAL_EXT).
 
 
+-spec binary_extractfun(binary(), {integer(), integer()}) -> 
+                                            {binary(), {is_hash, integer()}}.
+%% @doc 
+%% Function to calulate the hash change need to make an alter into a straight
+%% add as the BinExtractfun in leveled_tictac
+binary_extractfun(Key, {CurrentHash, OldHash}) ->
+    % TODO: Should move this function to leveled_tictac
+    % - requires secret knowledge of implementation to perform
+    % alter
+    RemoveH = 
+        case {CurrentHash, OldHash} of 
+            {0, _} ->
+                % Remove - treat like adding abcking
+                OldHash;
+            {_, 0} ->
+                % Add 
+                0;
+            _ ->
+                % Alter - need to account for hashing with key
+                % to remove the original
+                OldHash bxor leveled_tictac:keyto_segment32(Key)
+        end,
+    {Key, {is_hash, CurrentHash bxor RemoveH}}.
+
 %%%============================================================================
 %%% log definitions
 %%%============================================================================
@@ -311,41 +361,15 @@ simple_test() ->
     RootPath = "test/cache1/",
     PartitionID = 99,
     clean_subdir(RootPath ++ "/" ++ integer_to_list(PartitionID)),
-    GenerateKeyFun =
-        fun(I) ->
-            Key = <<"Key", I:32/integer>>,
-            Value = random:uniform(100000),
-            <<Hash:32/integer, _Rest/binary>> =
-                crypto:hash(md5, <<Value:32/integer>>),
-            {Key, Hash}
-        end,
-
+    
+    GenerateKeyFun = tets_key_generator(),
     InitialKeys = lists:map(GenerateKeyFun, lists:seq(1,100)),
     AlternateKeys = lists:map(GenerateKeyFun, lists:seq(61, 80)),
     RemoveKeys = lists:map(GenerateKeyFun, lists:seq(81, 100)),
 
     {ok, AAECache0} = cache_new(RootPath, PartitionID),
-    AddFun = 
-        fun(CachePid) ->
-            fun({K, H}) ->
-                cache_alter(CachePid, K, H, 0)
-            end
-        end,
-    AlterFun =
-        fun(CachePid) -> 
-            fun({K, H}) ->
-                {K, OH} = lists:keyfind(K, 1, InitialKeys),
-                io:format("Alter ~w to ~w for ~w~n", [OH, H, K]),
-                cache_alter(CachePid, K, H, OH)
-            end
-        end,
-    RemoveFun = 
-        fun(CachePid) ->
-            fun({K, _H}) ->
-                {K, OH} = lists:keyfind(K, 1, InitialKeys),
-                cache_alter(CachePid, K, 0, OH)
-            end
-        end,
+    
+    {AddFun, AlterFun, RemoveFun} = test_setup_funs(InitialKeys),
     
     lists:foreach(AddFun(AAECache0), InitialKeys),
     
@@ -379,5 +403,96 @@ simple_test() ->
     ok = cache_destroy(AAECache1).
 
 
+replace_test() ->
+    RootPath = "test/cache1/",
+    PartitionID = 99,
+    clean_subdir(RootPath ++ "/" ++ integer_to_list(PartitionID)),
+    GenerateKeyFun = tets_key_generator(),
+
+    InitialKeys = lists:map(GenerateKeyFun, lists:seq(1,100)),
+    AlternateKeys = lists:map(GenerateKeyFun, lists:seq(61, 80)),
+    RemoveKeys = lists:map(GenerateKeyFun, lists:seq(81, 100)),
+    
+    {ok, AAECache0} = cache_new(RootPath, PartitionID),
+    
+    {AddFun, AlterFun, RemoveFun} = test_setup_funs(InitialKeys),
+    
+    lists:foreach(AddFun(AAECache0), InitialKeys),
+    ok = cache_startload(AAECache0),
+
+    lists:foreach(AlterFun(AAECache0), AlternateKeys),
+    lists:foreach(RemoveFun(AAECache0), RemoveKeys),
+
+    %% Now build the equivalent outside of the process
+    %% Accouting up-fron for the removals and the alterations
+    KHL0 = lists:sublist(InitialKeys, 60) ++ AlternateKeys,
+    DirectAddFun =
+        fun({K, H}, TreeAcc) ->
+            leveled_tictac:add_kv(TreeAcc, 
+                                    K, H, 
+                                    fun(Key, Value) -> 
+                                        {Key, {is_hash, Value}} 
+                                    end)
+        end,
+    CompareTree = 
+        lists:foldl(DirectAddFun, 
+                        leveled_tictac:new_tree(raw, ?TREE_SIZE), 
+                        KHL0),
+    
+    %% The load tree is a tree as would have been produced by a fold over a 
+    %% snapshot taken at the time all the initial keys added.
+    %%
+    %% If we now complete the load using this tree, the comparison should 
+    %% still match.  The cache should be replaced by one playing the stored
+    %% alterations ont the load tree. 
+
+    LoadTree = 
+        lists:foldl(DirectAddFun, 
+                        leveled_tictac:new_tree(raw, ?TREE_SIZE), 
+                        InitialKeys),
+    
+    ok = cache_completeload(AAECache0, LoadTree),
+    
+    CompareRoot = leveled_tictac:fetch_root(CompareTree),
+    Root = cache_root(AAECache0),
+    ?assertMatch(Root, CompareRoot),
+
+
+    ok = cache_destroy(AAECache0).
+
+
+
+test_setup_funs(InitialKeys) ->
+    AddFun = 
+        fun(CachePid) ->
+            fun({K, H}) ->
+                cache_alter(CachePid, K, H, 0)
+            end
+        end,
+    AlterFun =
+        fun(CachePid) -> 
+            fun({K, H}) ->
+                {K, OH} = lists:keyfind(K, 1, InitialKeys),
+                io:format("Alter ~w to ~w for ~w~n", [OH, H, K]),
+                cache_alter(CachePid, K, H, OH)
+            end
+        end,
+    RemoveFun = 
+        fun(CachePid) ->
+            fun({K, _H}) ->
+                {K, OH} = lists:keyfind(K, 1, InitialKeys),
+                cache_alter(CachePid, K, 0, OH)
+            end
+        end,
+    {AddFun, AlterFun, RemoveFun}.
+
+tets_key_generator() -> 
+    fun(I) ->
+        Key = <<"Key", I:32/integer>>,
+        Value = random:uniform(100000),
+        <<Hash:32/integer, _Rest/binary>> =
+            crypto:hash(md5, <<Value:32/integer>>),
+        {Key, Hash}
+    end.
 
 -endif.
