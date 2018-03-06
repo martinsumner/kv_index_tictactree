@@ -11,7 +11,10 @@
 -export([log/3,
             log_timer/4,
             get_opt/2,
-            get_opt/3]).         
+            get_opt/3]).
+
+-export([clean_subdir/1,
+            test_key_generator/0]).         
 
 -define(LOG_LEVEL, [info, warn, error, critical]).
 -define(DEFAULT_LOGBASE, [
@@ -128,6 +131,39 @@ format_time({{Y, M, D}, {H, Mi, S, Ms}}) ->
 %%% Test
 %%%============================================================================
 
+
+
+test_key_generator() -> 
+    fun(I) ->
+        Key = <<"Key", I:32/integer>>,
+        Value = random:uniform(100000),
+        <<Hash:32/integer, _Rest/binary>> =
+            crypto:hash(md5, <<Value:32/integer>>),
+        {Key, Hash}
+    end.
+
+
+clean_subdir(DirPath) ->
+    case filelib:is_dir(DirPath) of
+        true ->
+            {ok, Files} = file:list_dir(DirPath),
+            lists:foreach(fun(FN) ->
+                                File = filename:join(DirPath, FN),
+                                io:format("Attempting deletion ~s~n", [File]),
+                                ok = 
+                                    case filelib:is_dir(File) of 
+                                        true -> 
+                                            clean_subdir(File),
+                                            file:del_dir(File);
+                                        false -> 
+                                            file:delete(File) 
+                                    end,
+                                io:format("Success deleting ~s~n", [File])
+                                end,
+                            Files);
+        false ->
+            ok
+    end.
 
 -ifdef(TEST).
 

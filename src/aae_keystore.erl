@@ -34,11 +34,10 @@
 
 -export([store_parallelstart/2,
             store_isempty/1,
-            store_drop/1,
             store_close/1,
             store_mput/2,
             store_mload/2,
-            store_build/1,
+            store_prompt/2,
             store_fold/4]).
 
 
@@ -47,7 +46,18 @@
                 id = "KeyStore" :: any(),
                 store_type :: supported_stores(),
                 change_queue = [] :: list(),
-                change_queue_counter = 0 :: integer()}).
+                change_queue_counter = 0 :: integer(),
+                current_guid :: list(),
+                root_path :: list(),
+                last_rebuild :: os:timestamp()|never,
+                load_store :: pid(),
+                load_guid :: list(),
+                backend_opts :: list()}).
+
+-record(manifest, {current_guid :: list(), 
+                    pending_guid :: list(), 
+                    last_rebuild = never :: erlang:timestamp()|never, 
+                    safe_shutdown  = false :: boolean()}).
 
 -include_lib("eunit/include/eunit.hrl").
 
@@ -56,38 +66,43 @@
                         {head_only, no_lookup},
                         {max_journalsize, 1000000}]).
 -define(CHANGEQ_LOGFREQ, 10000).
--define(HEAD_TAG, h). % Used in leveled as a Tag for head-only objects
+-define(HEAD_TAG, h). 
+    % Used in leveled as a Tag for head-only objects
+-define(STATE_BUCKET, <<"state">>).
+-define(MANIFEST_FN, "keystore"). 
+    % filename for Keystore manifes
+-define(COMLPETE_EXT, ".man"). 
+    % file extension to be used once manifest write is complete
+-define(PENDING_EXT, ".pnd").
+    % file extension to be used once manifest write is pending
 
 -type supported_stores() :: leveled. 
-
-% -type keystore_state() :: #state{}.
-
+    % Stores supported for parallel running
+-type manifest() :: #manifest{}.
+    % Saves state of what store is currently active
 
 %%%============================================================================
 %%% API
 %%%============================================================================
 
--spec store_parallelstart(list(), supported_stores()) -> {ok, pid()}.
+-spec store_parallelstart(list(), supported_stores()) -> 
+                                        {ok, os:timestamp()|never, pid()}.
 %% @doc
 %% Start a store to be run in parallel mode
-store_parallelstart(Path, StoreType) ->
+store_parallelstart(Path, leveled) ->
     Opts = 
         [{root_path, Path}, 
-            {native, {false, StoreType}}, 
+            {native, {false, leveled}}, 
             {backend_opts, ?BACKEND_OPTS}],
-    gen_fsm:start(?MODULE, [Opts], []).
+    {ok, Pid} = gen_fsm:start(?MODULE, [Opts], []),
+    LastRebuild = gen_fsm:sync_send_event(Pid, last_rebuild, 2000),
+    {ok, LastRebuild, Pid}.
 
 -spec store_isempty(pid()) -> boolean().
 %% @doc
 %% Is the key store empty
 store_isempty(Pid) ->
     gen_fsm:sync_send_event(Pid, is_empty, 2000).
-
--spec store_drop(pid()) -> ok.
-%% @doc
-%% Drop the store, and remove from disk
-store_drop(Pid) ->
-    gen_fsm:send_event(Pid, drop).
 
 -spec store_close(pid()) -> ok.
 %% @doc
@@ -120,11 +135,16 @@ store_mput(Pid, ObjectSpecs) ->
 store_mload(Pid, ObjectSpecs) ->
     gen_fsm:send_event(Pid, {mload, ObjectSpecs}).
 
--spec store_build(pid()) -> ok.
+-spec store_prompt(pid(), rebuild_start|rebuild_complete) -> ok.
 %% @doc
-%% When load is complete, send a signal to finish the build of the store
-store_build(Pid) ->
-    gen_fsm:send_event(Pid, build).
+%% Prompt the store to either commence a rebuild, or complete a rebuild.
+%% Commencing a rebuild should happen between a snapshot for a fold being 
+%% taken, and the fold commencing with no new updates to be received between
+%% the snapshot and the prompt.  The complete prompt should be made after 
+%% the fold is complete
+store_prompt(Pid, Prompt) ->
+    gen_fsm:send_event(Pid, {prompt, Prompt}).
+
 
 -spec store_fold(pid(), tuple(), fun(), any()) -> any()|{async, fun()}.
 %% @doc
@@ -146,11 +166,45 @@ init([Opts]) ->
             {stop, not_yet_implemented};
         {false, leveled} ->
             RootPath = aae_util:get_opt(root_path, Opts),
-            BackendOpts = 
-                [{root_path, RootPath}|aae_util:get_opt(backend_opts, Opts)],
-            {ok, Store} = leveled_bookie:book_start(BackendOpts),
-
-            {ok, loading, #state{store = Store, store_type = leveled}}
+            Manifest0 =
+                case open_manifest(RootPath) of 
+                    false ->
+                        GUID = leveled_codec:generate_uuid(),
+                        #manifest{current_guid = GUID};
+                    {ok, M} ->
+                        M 
+                end,
+            
+            Manifest1 = clear_pendingpath(Manifest0),
+                
+            BackendOpts0 = aae_util:get_opt(backend_opts, Opts),
+            {ok, Store} = open_store(leveled, 
+                                        BackendOpts0, 
+                                        RootPath,
+                                        Manifest1#manifest.current_guid),
+            
+            LastRebuild = 
+                % Need to determine when the store was last rebuilt, if it 
+                % can't be determined that the store has been safely rebuilt, 
+                % then an "immediate" rebuild should be triggered
+                case Manifest1#manifest.safe_shutdown of 
+                    true ->
+                        Manifest1#manifest.last_rebuild;
+                    _ ->
+                        never
+                end,
+            Manifest2 = 
+                Manifest1#manifest{safe_shutdown = false, 
+                                    last_rebuild = LastRebuild},
+            ok = store_manifest(RootPath, Manifest2),
+            {ok, 
+                parallel, 
+                #state{store = Store, 
+                        store_type = leveled,
+                        root_path = RootPath,
+                        current_guid = Manifest2#manifest.current_guid,
+                        last_rebuild = LastRebuild,
+                        backend_opts = BackendOpts0}}
     end.
 
 loading(is_empty, _From, State) ->
@@ -159,7 +213,8 @@ loading(is_empty, _From, State) ->
         loading, 
         State};
 loading(close, _From, State) ->
-    ok = delete_store(State#state.store_type, State#state.store),
+    ok = delete_store(State#state.store_type, State#state.load_store),
+    ok = close_store(State#state.store_type, State#state.store),
     {stop, normal, ok, State}.
 
 parallel({fold, Limiter, FoldObjectsFun, InitAcc}, _From, State) ->
@@ -168,16 +223,16 @@ parallel({fold, Limiter, FoldObjectsFun, InitAcc}, _From, State) ->
     {reply, Result, parallel, State};
 parallel(close, _From, State) ->
     ok = close_store(State#state.store_type, State#state.store),
-    {stop, normal, ok, State}.
+    {stop, normal, ok, State};
+parallel(last_rebuild, _From, State) ->
+    {reply, State#state.last_rebuild, parallel, State}.
 
 native(_Msg, _From, State) ->
     {reply, ok, native, State}.
 
 
-loading(drop, State) ->
-    ok = delete_store(State#state.store_type, State#state.store),
-    {stop, normal, State};
 loading({mput, ObjectSpecs}, State) ->
+    ok = do_load(State#state.store_type, State#state.store, ObjectSpecs),
     ObjectCount0 = State#state.change_queue_counter,
     ObjectCount1 = State#state.change_queue_counter + length(ObjectSpecs),
     ToLog = 
@@ -194,31 +249,44 @@ loading({mput, ObjectSpecs}, State) ->
             State#state{change_queue_counter = ObjectCount1, 
                         change_queue = ChangeQueue1}};
 loading({mload, ObjectSpecs}, State) ->
-    ok = do_load(State#state.store_type, State#state.store, ObjectSpecs),
+    ok = do_load(State#state.store_type, State#state.load_store, ObjectSpecs),
     {next_state, loading, State};
-loading(build, State) ->
-    LoadFun = 
-        fun(OS) -> 
-            do_load(State#state.store_type, State#state.store, OS)
-        end,
+loading({prompt, rebuild_complete}, State) ->
+    StoreType = State#state.store_type,
+    LoadStore = State#state.load_store,
+    GUID = State#state.load_guid,
+    LoadFun = fun(OS) -> do_load(StoreType, LoadStore, OS) end,
     lists:foreach(LoadFun, lists:reverse(State#state.change_queue)),
+    ok = store_manifest(State#state.root_path, 
+                        #manifest{current_guid = GUID}),
+    ok = delete_store(StoreType, State#state.store),
     {next_state, 
         parallel, 
-        State#state{change_queue = [], change_queue_counter = 0}}.
+        State#state{change_queue = [], 
+                    change_queue_counter = 0,
+                    store = LoadStore,
+                    current_guid = GUID}}.
 
-parallel(drop, State) ->
-    ok = delete_store(State#state.store_type, State#state.store),
-    {stop, normal, State};
 parallel({mput, ObjectSpecs}, State) ->
     ok = do_load(State#state.store_type, State#state.store, ObjectSpecs),
-    {next_state, parallel, State}.
+    {next_state, parallel, State};
+parallel({prompt, rebuild_start}, State) ->
+    GUID = leveled_codec:generate_uuid(),
+    {ok, Store} =  open_store(leveled, 
+                                State#state.backend_opts, 
+                                State#state.root_path, 
+                                GUID),
+    ok = store_manifest(State#state.root_path, 
+                        #manifest{current_guid = State#state.current_guid,
+                                    pending_guid = GUID}),
+    {next_state, loading, State#state{load_store = Store, load_guid = GUID}}.
 
 native(_Msg, State) ->
     {next_state, native, State}.
 
 
-handle_sync_event(_Msg, _From, StateName, State) ->
-    {reply, ok, StateName, State}.
+handle_sync_event(current_status, _From, StateName, State) ->
+    {reply, {StateName, State#state.current_guid}, StateName, State}.
 
 handle_event(_Msg, StateName, State) ->
     {next_state, StateName, State}.
@@ -226,7 +294,10 @@ handle_event(_Msg, StateName, State) ->
 handle_info(_Msg, StateName, State) ->
     {next_state, StateName, State}.
 
-terminate(_Reason, _StateName, _State) ->
+terminate(normal, _StateName, State) ->
+    ok = store_manifest(State#state.root_path, 
+                        #manifest{current_guid = State#state.current_guid, 
+                                    safe_shutdown = true}),
     ok.
 
 code_change(_OldVsn, StateName, State, _Extra) ->
@@ -260,6 +331,15 @@ is_empty(leveled, Store) ->
 close_store(leveled, Store) ->
     leveled_bookie:book_close(Store).
 
+-spec open_store(supported_stores(), list(), list(), list()) -> {ok, pid()}.
+%% @doc
+%% Open a parallel backend key store
+open_store(leveled, BackendOpts0, RootPath, GUID) ->
+    Path = filename:join(RootPath, GUID),
+    ok = filelib:ensure_dir(Path),
+    BackendOpts = [{root_path, Path}|BackendOpts0],
+    leveled_bookie:book_start(BackendOpts).
+
 -spec delete_store(supported_stores(), pid()) -> ok.
 %% @doc
 %% delete the store - as it has been replaced by a rebuild
@@ -272,7 +352,6 @@ delete_store(leveled, Store) ->
 do_load(leveled, Store, ObjectSpecs) ->
     leveled_bookie:book_mput(Store, ObjectSpecs),
     ok.
-
 
 -spec do_fold(supported_stores(), pid(), tuple(), fun(), any()) 
                                                             -> {async, fun()}.
@@ -332,6 +411,61 @@ populate_query(leveled, SegList, FoldFun) ->
             false, true, false}.
 
 
+-spec open_manifest(list()) -> {ok, manifest()}|false.
+%% @doc
+%% Open the manifest file, check the CRC and return the active folder 
+%% reference
+open_manifest(RootPath) ->
+    FN = filename:join(RootPath, ?MANIFEST_FN ++ ?COMLPETE_EXT),
+    case filelib:is_file(FN) of 
+        true ->
+            {ok, <<CRC32:32/integer, Manifest/binary>>} = file:read_file(FN),
+            case erlang:crc32(Manifest) of 
+                CRC32 ->
+                    {ok, binary_to_term(Manifest)};
+                _ ->
+                    aae_util:log("KS002", [RootPath, "crc32"], logs()),
+                    false
+            end;
+        false ->
+            aae_util:log("KS002", [RootPath, "missing"], logs()),
+            false
+    end.
+            
+-spec store_manifest(list(), manifest()) -> ok.
+%% @doc
+%% Store tham manifest file, adding a CRC, and ensuring it is readable before
+%% returning
+store_manifest(RootPath, Manifest) ->
+    aae_util:log("KS003", [Manifest], logs()),
+    ManBin = term_to_binary(Manifest),
+    CRC32 = erlang:crc32(ManBin),
+    PFN = filename:join(RootPath, ?MANIFEST_FN ++ ?PENDING_EXT),
+    CFN = filename:join(RootPath, ?MANIFEST_FN ++ ?COMLPETE_EXT),
+    ok = file:write_file(PFN, <<CRC32:32/integer, ManBin/binary>>, [raw]),
+    ok = file:rename(PFN, CFN),
+    {ok, <<CRC32:32/integer, ManBin/binary>>} = file:read_file(CFN),
+    ok.
+
+
+-spec clear_pendingpath(manifest()) -> manifest().
+%% @doc
+%% Clear any Keystore that had been aprtially loaded at the last shutdown
+clear_pendingpath(Manifest) ->
+    case Manifest#manifest.pending_guid of 
+        undefined ->
+            Manifest;
+        PendingPath ->
+            case filelib:is_dir(PendingPath) of
+                true ->
+                    ok = file:del_dir(PendingPath);
+                false ->
+                    ok 
+            end,
+            Manifest#manifest{pending_guid = undefined}
+    end.
+
+
 %%%============================================================================
 %%% log definitions
 %%%============================================================================
@@ -341,7 +475,13 @@ populate_query(leveled, SegList, FoldFun) ->
 %% Define log lines for this module
 logs() ->
     [{"KS001", 
-        {info, "Key Store building with id=~w has reached deferred count=~w"}}].
+            {info, "Key Store building with id=~w has reached " 
+                    ++ "deferred count=~w"}},
+        {"KS002",
+            {warn, "No valid manifest found for AAE keystore at ~s "
+                    ++ "reason ~s"}},
+        {"KS003",
+            {info, "Storing manifest of ~w"}}].
 
 
 %%%============================================================================
@@ -349,5 +489,34 @@ logs() ->
 %%%============================================================================
 
 -ifdef(TEST).
+
+
+-spec store_currentstatus(pid()) -> {atom(), list()}.
+%% @doc
+%% Included for test functions only - get the manifest
+store_currentstatus(Pid) ->
+    gen_fsm:sync_send_all_state_event(Pid, current_status).
+
+
+empty_buildandclose_test() ->
+    RootPath = "test/keystore0/",
+    aae_util:clean_subdir(RootPath),
+    {ok, never, Store0} = store_parallelstart(RootPath, leveled),
+    
+    {ok, Manifest0} = open_manifest(RootPath),
+    {parallel, CurrentGUID} = store_currentstatus(Store0),
+    ?assertMatch(CurrentGUID, Manifest0#manifest.current_guid),
+    ?assertMatch(false, Manifest0#manifest.safe_shutdown),
+    
+    ok = store_close(Store0),
+    {ok, Manifest1} = open_manifest(RootPath),
+    ?assertMatch(CurrentGUID, Manifest1#manifest.current_guid),
+    ?assertMatch(true, Manifest1#manifest.safe_shutdown),
+    
+    {ok, never, Store1} = store_parallelstart(RootPath, leveled),
+    ?assertMatch({parallel, CurrentGUID}, store_currentstatus(Store1)),
+    ok = store_close(Store1),
+    
+    aae_util:clean_subdir(RootPath).
 
 -endif.

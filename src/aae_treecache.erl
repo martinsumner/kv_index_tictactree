@@ -323,23 +323,9 @@ logs() ->
 
 -ifdef(TEST).
 
-clean_subdir(DirPath) ->
-    case filelib:is_dir(DirPath) of
-        true ->
-            {ok, Files} = file:list_dir(DirPath),
-            lists:foreach(fun(FN) ->
-                                File = filename:join(DirPath, FN),
-                                ok = file:delete(File),
-                                io:format("Success deleting ~s~n", [File])
-                                end,
-                            Files);
-        false ->
-            ok
-    end.
-
 clean_saveopen_test() ->
     RootPath = "test/cache0/",
-    clean_subdir(RootPath),
+    aae_util:clean_subdir(RootPath),
     Tree0 = leveled_tictac:new_tree(test),
     Tree1 = 
         leveled_tictac:add_kv(Tree0, 
@@ -360,9 +346,9 @@ clean_saveopen_test() ->
 simple_test() ->
     RootPath = "test/cache1/",
     PartitionID = 99,
-    clean_subdir(RootPath ++ "/" ++ integer_to_list(PartitionID)),
+    aae_util:clean_subdir(RootPath ++ "/" ++ integer_to_list(PartitionID)),
     
-    GenerateKeyFun = tets_key_generator(),
+    GenerateKeyFun = aae_util:test_key_generator(),
     InitialKeys = lists:map(GenerateKeyFun, lists:seq(1,100)),
     AlternateKeys = lists:map(GenerateKeyFun, lists:seq(61, 80)),
     RemoveKeys = lists:map(GenerateKeyFun, lists:seq(81, 100)),
@@ -406,8 +392,8 @@ simple_test() ->
 replace_test() ->
     RootPath = "test/cache1/",
     PartitionID = 99,
-    clean_subdir(RootPath ++ "/" ++ integer_to_list(PartitionID)),
-    GenerateKeyFun = tets_key_generator(),
+    aae_util:clean_subdir(RootPath ++ "/" ++ integer_to_list(PartitionID)),
+    GenerateKeyFun = aae_util:test_key_generator(),
 
     InitialKeys = lists:map(GenerateKeyFun, lists:seq(1,100)),
     AlternateKeys = lists:map(GenerateKeyFun, lists:seq(61, 80)),
@@ -486,13 +472,5 @@ test_setup_funs(InitialKeys) ->
         end,
     {AddFun, AlterFun, RemoveFun}.
 
-tets_key_generator() -> 
-    fun(I) ->
-        Key = <<"Key", I:32/integer>>,
-        Value = random:uniform(100000),
-        <<Hash:32/integer, _Rest/binary>> =
-            crypto:hash(md5, <<Value:32/integer>>),
-        {Key, Hash}
-    end.
 
 -endif.
