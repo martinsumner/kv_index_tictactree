@@ -40,6 +40,12 @@
             store_prompt/2,
             store_fold/4]).
 
+-export([define_objectspec/5,
+            generate_value/5,
+            value_clock/1,
+            value_hash/1,
+            value_size/1,
+            value_sibcount/1]).
 
 -record(state, {vnode :: pid(),
                 store :: pid(),
@@ -75,6 +81,7 @@
     % file extension to be used once manifest write is complete
 -define(PENDING_EXT, ".pnd").
     % file extension to be used once manifest write is pending
+-define(VALUE_VERSION, 1).
 
 -type supported_stores() :: leveled. 
     % Stores supported for parallel running
@@ -146,7 +153,7 @@ store_prompt(Pid, Prompt) ->
     gen_fsm:send_event(Pid, {prompt, Prompt}).
 
 
--spec store_fold(pid(), tuple(), fun(), any()) -> any()|{async, fun()}.
+-spec store_fold(pid(), tuple()|all, fun(), any()) -> any()|{async, fun()}.
 %% @doc
 %% Return a fold function to asynchronously run a fold over a snapshot of the
 %% store
@@ -212,6 +219,10 @@ loading(is_empty, _From, State) ->
         is_empty(State#state.store_type, State#state.store), 
         loading, 
         State};
+loading({fold, Limiter, FoldObjectsFun, InitAcc}, _From, State) ->
+    Result = do_fold(State#state.store_type, State#state.store,
+                        Limiter, FoldObjectsFun, InitAcc),
+    {reply, Result, loading, State};
 loading(close, _From, State) ->
     ok = delete_store(State#state.store_type, State#state.load_store),
     ok = close_store(State#state.store_type, State#state.store),
@@ -303,10 +314,34 @@ terminate(normal, _StateName, State) ->
 code_change(_OldVsn, StateName, State, _Extra) ->
     {ok, StateName, State}.
 
+
+
+%%%============================================================================
+%%% Key Codec
+%%%============================================================================
+
+define_objectspec(Op, SegmentID, Bucket, Key, Value) ->
+    {Op, <<SegmentID:24/integer>>, {Bucket, Key}, null, Value}.
+
+generate_value(Clock, Hash, Size, SibCount, _Head) ->
+    {?VALUE_VERSION, {Clock, Hash, Size, SibCount}}.
+
+value_clock({1, ValueItems}) ->
+    element(1, ValueItems).
+
+value_hash({1, ValueItems}) ->
+    element(2, ValueItems).
+
+value_size({1, ValueItems}) ->
+    element(3, ValueItems).
+
+value_sibcount({1, ValueItems}) ->
+    element(4, ValueItems).
+
+
 %%%============================================================================
 %%% Store functions
 %%%============================================================================
-
 
 -spec is_empty(supported_stores(), pid()) -> boolean().
 %% @doc
@@ -353,7 +388,7 @@ do_load(leveled, Store, ObjectSpecs) ->
     leveled_bookie:book_mput(Store, ObjectSpecs),
     ok.
 
--spec do_fold(supported_stores(), pid(), tuple(), fun(), any()) 
+-spec do_fold(supported_stores(), pid(), tuple()|all, fun(), any()) 
                                                             -> {async, fun()}.
 %% @doc
 %% Fold over the store applying FoldObjectsFun to each object and the 
@@ -392,7 +427,10 @@ do_fold(leveled, Store, all, FoldObjectsFun, InitAcc) ->
     Query = 
         populate_query(leveled,
                         all,
-                        {FoldObjectsFun, InitAcc}),
+                        {fun(_S, {B, K}, V, Acc) -> 
+                                FoldObjectsFun({B, K, V}, Acc)
+                            end, 
+                            InitAcc}),
     leveled_bookie:book_returnfolder(Store, Query).
 
 
@@ -405,8 +443,10 @@ populate_query(leveled, all, FoldFun) ->
             FoldFun,
             false, true, false};
 populate_query(leveled, SegList, FoldFun) ->
+    SegList0 = lists:map(fun(S) -> <<S:24/integer>> end, SegList),
     {foldheads_bybucket,
-            ?HEAD_TAG, SegList,
+            ?HEAD_TAG, 
+            SegList0, bucket_list,
             FoldFun,
             false, true, false}.
 
@@ -518,5 +558,157 @@ empty_buildandclose_test() ->
     ok = store_close(Store1),
     
     aae_util:clean_subdir(RootPath).
+
+bad_manifest_test() ->
+    RootPath = "test/keystore1/",
+    ok = filelib:ensure_dir(RootPath),
+    aae_util:clean_subdir(RootPath),
+    ?assertMatch(false, open_manifest(RootPath)),
+    Manifest = #manifest{current_guid = "aaa-111"},
+    ok = store_manifest(RootPath, Manifest),
+    ?assertMatch({ok, Manifest}, open_manifest(RootPath)),
+    ManifestFN = filename:join(RootPath, ?MANIFEST_FN ++ ?COMLPETE_EXT),
+    {ok, Bin0} = file:read_file(ManifestFN),
+    Bin1 = aae_util:flip_byte(Bin0, 0, byte_size(Bin0)),
+    ok = file:delete(ManifestFN),
+    ok = file:write_file(ManifestFN, Bin1),
+    ?assertMatch(false, open_manifest(RootPath)),
+    ok = file:delete(ManifestFN),
+    ok = file:write_file(ManifestFN, Bin0),
+    ?assertMatch({ok, Manifest}, open_manifest(RootPath)),
+    aae_util:clean_subdir(RootPath).
+
+load_test() ->
+    RootPath = "test/keystore2/",
+    ok = filelib:ensure_dir(RootPath),
+    aae_util:clean_subdir(RootPath),
+
+    GenerateKeyFun = aae_util:test_key_generator(v1),
+
+    InitialKeys = lists:map(GenerateKeyFun, lists:seq(1,100)),
+    AlternateKeys = lists:map(GenerateKeyFun, lists:seq(61, 80)),
+    RemoveKeys = lists:map(GenerateKeyFun, lists:seq(81, 100)),
+
+    FinalState = 
+        lists:map(fun({K, V}) -> {<<"B1">>, K, element(1, V)} end, 
+                    lists:sublist(InitialKeys, 60) ++ AlternateKeys),
+    
+
+    ObjectSpecs = 
+        generate_objectspecs(add, <<"B1">>, InitialKeys) ++
+        generate_objectspecs(add, <<"B1">>, AlternateKeys) ++
+        generate_objectspecs(remove, <<"B1">>, RemoveKeys),
+    
+    {L1, R1} = lists:split(32, ObjectSpecs),
+    {L2, R2} = lists:split(32, R1),
+    {L3, R3} = lists:split(32, R2),
+    {L4, L5} = lists:split(32, R3),
+
+    {ok, never, Store0} = store_parallelstart(RootPath, leveled),
+    ok = store_mput(Store0, L1),
+    ok = store_mput(Store0, L2),
+    ok = store_mput(Store0, L3),
+
+    FoldObjectsFun =
+        fun({B, K, V}, Acc) ->
+            [{B, K, value_clock(V)}|Acc]
+        end,
+    
+    {async, Folder0} = store_fold(Store0, all, FoldObjectsFun, []),
+    Res0 = lists:usort(Folder0()),
+    ?assertMatch(96, length(Res0)),
+    
+    ok = store_prompt(Store0, rebuild_start),
+
+    {async, Folder1} = store_fold(Store0, all, FoldObjectsFun, []),
+    Res1 = lists:usort(Folder1()),
+    ?assertMatch(Res0, Res1),
+
+    ok = store_mput(Store0, L4),
+
+    % 4 adds, 20 alterations, 8 removes -> 92 entries
+    {async, Folder2} = store_fold(Store0, all, FoldObjectsFun, []),
+    Res2 = lists:usort(Folder2()),
+    ?assertMatch(92, length(Res2)),
+
+    ok = store_mload(Store0, L1),
+    ok = store_mload(Store0, L2),
+    ok = store_mload(Store0, L3),
+
+    {async, Folder3} = store_fold(Store0, all, FoldObjectsFun, []),
+    Res3 = lists:usort(Folder3()),
+    ?assertMatch(Res2, Res3),
+
+    ok = store_prompt(Store0, rebuild_complete),
+
+    {async, Folder4} = store_fold(Store0, all, FoldObjectsFun, []),
+    Res4 = lists:usort(Folder4()),
+    ?assertMatch(Res2, Res4),
+
+    ok = store_mput(Store0, L5),
+
+    % Removes now complete so only 80 entries
+    {async, Folder5} = store_fold(Store0, all, FoldObjectsFun, []),
+    Res5 = lists:usort(Folder5()),
+    ?assertMatch(FinalState, Res5),
+
+    ok = store_close(Store0),
+
+    {ok, never, Store1} = store_parallelstart(RootPath, leveled),
+   
+    {async, Folder6} = store_fold(Store1, all, FoldObjectsFun, []),
+    Res6 = lists:usort(Folder6()),
+    ?assertMatch(Res5, Res6),
+
+    {async, Folder7} = 
+        store_fold(Store1, {buckets, [<<"B1">>]}, FoldObjectsFun, []),
+    Res7 = lists:usort(Folder7()),
+    ?assertMatch(Res5, Res7),
+
+    {async, Folder8} = 
+        store_fold(Store1, {buckets, [<<"B2">>]}, FoldObjectsFun, []),
+    Res8 = lists:usort(Folder8()),
+    ?assertMatch([], Res8),
+
+    [{B1, K1, _V1}|_Rest] = FinalState,
+    {BL, KL, _VL} = lists:last(FinalState),
+    SegList = [aae_util:get_segmentid(B1, K1), aae_util:get_segmentid(BL, KL)],
+    CheckSegFun = 
+        fun({B, K, V}, Acc) ->
+            S = aae_util:get_segmentid(B, K),
+            case lists:member(S, SegList) of 
+                true ->
+                    [{B, K, V}|Acc];
+                false ->
+                    Acc
+            end
+        end,
+    FinalStateSL = lists:usort(lists:foldl(CheckSegFun, [], FinalState)),
+
+    {async, Folder9} = 
+        store_fold(Store1, {segments, SegList}, FoldObjectsFun, []),
+    Res9 = lists:usort(Folder9()),
+    ?assertMatch(FinalStateSL, Res9),
+
+    ok = store_close(Store1),
+    aae_util:clean_subdir(RootPath).
+
+
+
+
+generate_objectspecs(Op, Bucket, KeyList) ->
+    FoldFun = 
+        fun({K, V}) ->
+            {Clock, Hash, Size, SibCount} = V,
+            Value = generate_value(Clock, Hash, Size, SibCount, null),
+            define_objectspec(Op, 
+                                aae_util:get_segmentid(Bucket, K), 
+                                Bucket, 
+                                K, 
+                                Value)
+        end,
+    lists:map(FoldFun, KeyList).
+            
+
 
 -endif.

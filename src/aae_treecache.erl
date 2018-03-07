@@ -348,7 +348,8 @@ simple_test() ->
     PartitionID = 99,
     aae_util:clean_subdir(RootPath ++ "/" ++ integer_to_list(PartitionID)),
     
-    GenerateKeyFun = aae_util:test_key_generator(),
+    GenerateKeyFun = aae_util:test_key_generator(hash),
+
     InitialKeys = lists:map(GenerateKeyFun, lists:seq(1,100)),
     AlternateKeys = lists:map(GenerateKeyFun, lists:seq(61, 80)),
     RemoveKeys = lists:map(GenerateKeyFun, lists:seq(81, 100)),
@@ -393,7 +394,7 @@ replace_test() ->
     RootPath = "test/cache1/",
     PartitionID = 99,
     aae_util:clean_subdir(RootPath ++ "/" ++ integer_to_list(PartitionID)),
-    GenerateKeyFun = aae_util:test_key_generator(),
+    GenerateKeyFun = aae_util:test_key_generator(hash),
 
     InitialKeys = lists:map(GenerateKeyFun, lists:seq(1,100)),
     AlternateKeys = lists:map(GenerateKeyFun, lists:seq(61, 80)),

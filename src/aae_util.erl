@@ -5,7 +5,6 @@
 
 -module(aae_util).
 
-
 -include_lib("eunit/include/eunit.hrl").
 
 -export([log/3,
@@ -14,7 +13,9 @@
             get_opt/3]).
 
 -export([clean_subdir/1,
-            test_key_generator/0]).         
+            test_key_generator/1,
+            flip_byte/3,
+            get_segmentid/2]).         
 
 -define(LOG_LEVEL, [info, warn, error, critical]).
 -define(DEFAULT_LOGBASE, [
@@ -131,16 +132,48 @@ format_time({{Y, M, D}, {H, Mi, S, Ms}}) ->
 %%% Test
 %%%============================================================================
 
+flip_byte(Binary, Offset, Length) ->
+    Byte1 = leveled_rand:uniform(Length) + Offset - 1,
+    <<PreB1:Byte1/binary, A:8/integer, PostByte1/binary>> = Binary,
+    case A of 
+        0 ->
+            <<PreB1:Byte1/binary, 255:8/integer, PostByte1/binary>>;
+        _ ->
+            <<PreB1:Byte1/binary, 0:8/integer, PostByte1/binary>>
+    end.
 
+test_key_generator(hash) -> 
+    ValueFun = 
+        fun() -> 
+            V = random:uniform(1000),
+            <<Hash:32/integer, _Rest/binary>> 
+                = crypto:hash(md5, <<V:32/integer>>),
+            Hash
+        end,
+    internal_generator(ValueFun);
+test_key_generator(v1) ->
+    ValueFun = 
+        fun() -> 
+            Clock = {random:uniform(1000), random:uniform(1000)},
+            BClock = term_to_binary(Clock),
+            Size = random:uniform(100000),
+            SibCount = random:uniform(3),
+            <<Hash:32/integer, _Rest/binary>> = crypto:hash(md5, BClock),
+            {Clock, Hash, Size, SibCount}
+        end,
+    internal_generator(ValueFun).
 
-test_key_generator() -> 
+internal_generator(ValueFun) ->
     fun(I) ->
         Key = <<"Key", I:32/integer>>,
-        Value = random:uniform(100000),
-        <<Hash:32/integer, _Rest/binary>> =
-            crypto:hash(md5, <<Value:32/integer>>),
-        {Key, Hash}
+        Value = ValueFun(),
+        {Key, Value}
     end.
+
+get_segmentid(Bucket, Key) ->
+    <<SegmentID:20/integer, _Rest/bitstring>> = 
+        crypto:hash(md5, <<Bucket/binary, Key/binary>>),
+    SegmentID.
 
 
 clean_subdir(DirPath) ->
@@ -177,6 +210,9 @@ log_warn_test() ->
     ok = log_timer("G0001", [], os:timestamp(), [], [warn, error]),
     ok = log_timer("G8888", [], os:timestamp(), [], [info, warn, error]).
 
-
+flipbyte_test() ->
+    Bin = <<0:256/integer>>,
+    Bin0 = flip_byte(Bin, 0, 32),
+    ?assertMatch(false, Bin == Bin0).
 
 -endif.
