@@ -33,19 +33,20 @@
             native/3]).
 
 -export([store_parallelstart/2,
-            store_isempty/1,
-            store_close/1,
+            store_close/2,
             store_mput/2,
             store_mload/2,
             store_prompt/2,
             store_fold/4]).
 
 -export([define_objectspec/5,
-            generate_value/5,
+            generate_value/7,
+            value_preflist/1,
             value_clock/1,
             value_hash/1,
             value_size/1,
-            value_sibcount/1]).
+            value_sibcount/1,
+            value_indexhash/1]).
 
 -record(state, {vnode :: pid(),
                 store :: pid(),
@@ -58,19 +59,20 @@
                 last_rebuild :: os:timestamp()|never,
                 load_store :: pid(),
                 load_guid :: list(),
-                backend_opts :: list()}).
+                backend_opts :: list(),
+                shutdown_guid = none :: list()|none}).
 
 -record(manifest, {current_guid :: list(), 
                     pending_guid :: list(), 
                     last_rebuild = never :: erlang:timestamp()|never, 
-                    safe_shutdown  = false :: boolean()}).
+                    shutdown_guid = none :: list()|none}).
 
 -include_lib("eunit/include/eunit.hrl").
 
--define(BACKEND_OPTS, [{max_pencillercachesize, 16000},
-                        {sync_strategy, none},
-                        {head_only, no_lookup},
-                        {max_journalsize, 1000000}]).
+-define(LEVELED_BACKEND_OPTS, [{max_pencillercachesize, 16000},
+                                {sync_strategy, none},
+                                {head_only, no_lookup},
+                                {max_journalsize, 1000000}]).
 -define(CHANGEQ_LOGFREQ, 10000).
 -define(HEAD_TAG, h). 
     % Used in leveled as a Tag for head-only objects
@@ -93,29 +95,30 @@
 %%%============================================================================
 
 -spec store_parallelstart(list(), supported_stores()) -> 
-                                        {ok, os:timestamp()|never, pid()}.
+                {ok, {os:timestamp()|never, list()|none, boolean()}, pid()}.
 %% @doc
 %% Start a store to be run in parallel mode
 store_parallelstart(Path, leveled) ->
     Opts = 
         [{root_path, Path}, 
             {native, {false, leveled}}, 
-            {backend_opts, ?BACKEND_OPTS}],
+            {backend_opts, ?LEVELED_BACKEND_OPTS}],
     {ok, Pid} = gen_fsm:start(?MODULE, [Opts], []),
-    LastRebuild = gen_fsm:sync_send_event(Pid, last_rebuild, 2000),
-    {ok, LastRebuild, Pid}.
+    {LastRebuild, ShutdownGUID, IsEmpty} 
+        = gen_fsm:sync_send_event(Pid, startup_metadata),
+    {ok, {LastRebuild, ShutdownGUID, IsEmpty}, Pid}.
 
--spec store_isempty(pid()) -> boolean().
+-spec store_close(pid(), list()|none) -> ok.
 %% @doc
-%% Is the key store empty
-store_isempty(Pid) ->
-    gen_fsm:sync_send_event(Pid, is_empty, 2000).
-
--spec store_close(pid()) -> ok.
-%% @doc
-%% Close the store neatly
-store_close(Pid) ->
-    gen_fsm:sync_send_event(Pid, close, 10000).
+%% Close the store neatly.  If a GUID is past it will be returned when the 
+%% Store is opened.  This can be used to ensure that the backend and the AAE
+%% KeyStore both closed neatly (by making the storing of the GUID in the 
+%% vnode backend the lasta ct before closing), if both vnode and aae backends
+%% report the same GUID at startup.
+%%
+%% Startup should always delete the Shutdown GUID in both stores.
+store_close(Pid, ShutdownGUID) ->
+    gen_fsm:sync_send_event(Pid, {close, ShutdownGUID}, 10000).
 
 -spec store_mput(pid(), list()) -> ok.
 %% @doc
@@ -194,14 +197,14 @@ init([Opts]) ->
                 % Need to determine when the store was last rebuilt, if it 
                 % can't be determined that the store has been safely rebuilt, 
                 % then an "immediate" rebuild should be triggered
-                case Manifest1#manifest.safe_shutdown of 
-                    true ->
-                        Manifest1#manifest.last_rebuild;
-                    _ ->
-                        never
+                case Manifest1#manifest.shutdown_guid of 
+                    none ->
+                        never;
+                    _GUID ->
+                        Manifest1#manifest.last_rebuild
                 end,
             Manifest2 = 
-                Manifest1#manifest{safe_shutdown = false, 
+                Manifest1#manifest{shutdown_guid = none, 
                                     last_rebuild = LastRebuild},
             ok = store_manifest(RootPath, Manifest2),
             {ok, 
@@ -209,34 +212,34 @@ init([Opts]) ->
                 #state{store = Store, 
                         store_type = leveled,
                         root_path = RootPath,
-                        current_guid = Manifest2#manifest.current_guid,
+                        current_guid = Manifest0#manifest.current_guid,
+                        shutdown_guid = Manifest0#manifest.shutdown_guid,
                         last_rebuild = LastRebuild,
                         backend_opts = BackendOpts0}}
     end.
 
-loading(is_empty, _From, State) ->
-    {reply, 
-        is_empty(State#state.store_type, State#state.store), 
-        loading, 
-        State};
 loading({fold, Limiter, FoldObjectsFun, InitAcc}, _From, State) ->
     Result = do_fold(State#state.store_type, State#state.store,
                         Limiter, FoldObjectsFun, InitAcc),
     {reply, Result, loading, State};
-loading(close, _From, State) ->
+loading({close, ShutdownGUID}, _From, State) ->
     ok = delete_store(State#state.store_type, State#state.load_store),
     ok = close_store(State#state.store_type, State#state.store),
-    {stop, normal, ok, State}.
+    {stop, normal, ok, State#state{shutdown_guid = ShutdownGUID}}.
 
 parallel({fold, Limiter, FoldObjectsFun, InitAcc}, _From, State) ->
     Result = do_fold(State#state.store_type, State#state.store,
                         Limiter, FoldObjectsFun, InitAcc),
     {reply, Result, parallel, State};
-parallel(close, _From, State) ->
+parallel({close, ShutdownGUID}, _From, State) ->
     ok = close_store(State#state.store_type, State#state.store),
-    {stop, normal, ok, State};
-parallel(last_rebuild, _From, State) ->
-    {reply, State#state.last_rebuild, parallel, State}.
+    {stop, normal, ok, State#state{shutdown_guid = ShutdownGUID}};
+parallel(startup_metadata, _From, State) ->
+    IsEmpty = is_empty(State#state.store_type, State#state.store),
+    {reply, 
+        {State#state.last_rebuild, State#state.shutdown_guid, IsEmpty}, 
+        parallel, 
+        State#state{shutdown_guid = none}}.
 
 native(_Msg, _From, State) ->
     {reply, ok, native, State}.
@@ -306,10 +309,9 @@ handle_info(_Msg, StateName, State) ->
     {next_state, StateName, State}.
 
 terminate(normal, _StateName, State) ->
-    ok = store_manifest(State#state.root_path, 
-                        #manifest{current_guid = State#state.current_guid, 
-                                    safe_shutdown = true}),
-    ok.
+    store_manifest(State#state.root_path, 
+                    #manifest{current_guid = State#state.current_guid, 
+                                shutdown_guid = State#state.shutdown_guid}).
 
 code_change(_OldVsn, StateName, State, _Extra) ->
     {ok, StateName, State}.
@@ -320,23 +322,51 @@ code_change(_OldVsn, StateName, State, _Extra) ->
 %%% Key Codec
 %%%============================================================================
 
+-spec define_objectspec(add|remove, integer(), binary(), binary(), tuple()) 
+                                                                    -> tuple().
+%% @doc
+%% Create an ObjectSpec for adding to the backend store
 define_objectspec(Op, SegmentID, Bucket, Key, Value) ->
-    {Op, <<SegmentID:24/integer>>, {Bucket, Key}, null, Value}.
+    {Op, <<SegmentID:24/integer>>, term_to_binary({Bucket, Key}), null, Value}.
 
-generate_value(Clock, Hash, Size, SibCount, _Head) ->
-    {?VALUE_VERSION, {Clock, Hash, Size, SibCount}}.
+-spec generate_value(tuple(), list(tuple()), 
+                        integer(), integer(), integer(), integer(), 
+                        any()) -> tuple().
+%% @doc
+%% Create a value based on the current active version number
+%% Currently the "head" is ignored.  This may eb changed to support other 
+%% coverage fold features in the future.  Other items:
+%% PreflistID - {Partition, NVal} - although this is largeish, compression 
+%% should minimise the disk footprint
+%% Clock - A Riak dotted version vector of {Actor, Seqn}
+%% Hash - In this case a hash of the VClock
+%% Size - The byte size of the binary Riak object (uncompressed)
+%% SibCount - the count of siblings for the object (on this vnode only)
+%% IndexHash - A Hash of all the index fields and terms for this object
+generate_value(PreflistID, Clock, Hash, Size, SibCount, IndexHash, _Head) ->
+    {?VALUE_VERSION, {PreflistID, Clock, Hash, Size, SibCount, IndexHash}}.
 
-value_clock({1, ValueItems}) ->
+%% Some helper functions for accessing individual value elements by version, 
+%% intended to make it easier to uplift the version of the value format at a
+%% later date
+
+value_preflist({1, ValueItems}) ->
     element(1, ValueItems).
 
-value_hash({1, ValueItems}) ->
+value_clock({1, ValueItems}) ->
     element(2, ValueItems).
 
-value_size({1, ValueItems}) ->
+value_hash({1, ValueItems}) ->
     element(3, ValueItems).
 
-value_sibcount({1, ValueItems}) ->
+value_size({1, ValueItems}) ->
     element(4, ValueItems).
+
+value_sibcount({1, ValueItems}) ->
+    element(5, ValueItems).
+    
+value_indexhash({1, ValueItems}) ->
+    element(6, ValueItems).
 
 
 %%%============================================================================
@@ -404,7 +434,8 @@ do_fold(leveled, Store, {segments, SegList}, FoldObjectsFun, InitAcc) ->
     Query = 
         populate_query(leveled,
                         SegList, 
-                        {fun(_S, {B, K}, V, Acc) ->
+                        {fun(_S, BKBin, V, Acc) ->
+                                {B, K} = binary_to_term(BKBin),
                                 FoldObjectsFun({B, K, V}, Acc)
                             end,
                             InitAcc}),
@@ -413,7 +444,8 @@ do_fold(leveled, Store, {buckets, BucketList}, FoldObjectsFun, InitAcc) ->
     Query = 
         populate_query(leveled, 
                         all, 
-                        {fun(_S, {B, K}, V, Acc) ->
+                        {fun(_S, BKBin, V, Acc) ->
+                                {B, K} = binary_to_term(BKBin),
                                 case lists:member(B, BucketList) of 
                                     true ->
                                         FoldObjectsFun({B, K, V}, Acc);
@@ -427,7 +459,8 @@ do_fold(leveled, Store, all, FoldObjectsFun, InitAcc) ->
     Query = 
         populate_query(leveled,
                         all,
-                        {fun(_S, {B, K}, V, Acc) -> 
+                        {fun(_S, BKBin, V, Acc) -> 
+                                {B, K} = binary_to_term(BKBin),
                                 FoldObjectsFun({B, K, V}, Acc)
                             end, 
                             InitAcc}),
@@ -541,21 +574,23 @@ store_currentstatus(Pid) ->
 empty_buildandclose_test() ->
     RootPath = "test/keystore0/",
     aae_util:clean_subdir(RootPath),
-    {ok, never, Store0} = store_parallelstart(RootPath, leveled),
+    {ok, {never, none, true}, Store0} 
+        = store_parallelstart(RootPath, leveled),
     
     {ok, Manifest0} = open_manifest(RootPath),
     {parallel, CurrentGUID} = store_currentstatus(Store0),
     ?assertMatch(CurrentGUID, Manifest0#manifest.current_guid),
-    ?assertMatch(false, Manifest0#manifest.safe_shutdown),
+    ?assertMatch(none, Manifest0#manifest.shutdown_guid),
     
-    ok = store_close(Store0),
+    ok = store_close(Store0, ShutdownGUID = leveled_codec:generate_uuid()),
     {ok, Manifest1} = open_manifest(RootPath),
     ?assertMatch(CurrentGUID, Manifest1#manifest.current_guid),
-    ?assertMatch(true, Manifest1#manifest.safe_shutdown),
+    ?assertMatch(ShutdownGUID, Manifest1#manifest.shutdown_guid),
     
-    {ok, never, Store1} = store_parallelstart(RootPath, leveled),
+    {ok, {never, ShutdownGUID, true}, Store1} 
+        = store_parallelstart(RootPath, leveled),
     ?assertMatch({parallel, CurrentGUID}, store_currentstatus(Store1)),
-    ok = store_close(Store1),
+    ok = store_close(Store1, none),
     
     aae_util:clean_subdir(RootPath).
 
@@ -604,7 +639,8 @@ load_test() ->
     {L3, R3} = lists:split(32, R2),
     {L4, L5} = lists:split(32, R3),
 
-    {ok, never, Store0} = store_parallelstart(RootPath, leveled),
+    {ok, {never, none, true}, Store0} 
+        = store_parallelstart(RootPath, leveled),
     ok = store_mput(Store0, L1),
     ok = store_mput(Store0, L2),
     ok = store_mput(Store0, L3),
@@ -652,9 +688,10 @@ load_test() ->
     Res5 = lists:usort(Folder5()),
     ?assertMatch(FinalState, Res5),
 
-    ok = store_close(Store0),
+    ok = store_close(Store0, none),
 
-    {ok, never, Store1} = store_parallelstart(RootPath, leveled),
+    {ok, {never, none, false}, Store1} 
+        = store_parallelstart(RootPath, leveled),
    
     {async, Folder6} = store_fold(Store1, all, FoldObjectsFun, []),
     Res6 = lists:usort(Folder6()),
@@ -690,7 +727,7 @@ load_test() ->
     Res9 = lists:usort(Folder9()),
     ?assertMatch(FinalStateSL, Res9),
 
-    ok = store_close(Store1),
+    ok = store_close(Store1, none),
     aae_util:clean_subdir(RootPath).
 
 
@@ -700,7 +737,9 @@ generate_objectspecs(Op, Bucket, KeyList) ->
     FoldFun = 
         fun({K, V}) ->
             {Clock, Hash, Size, SibCount} = V,
-            Value = generate_value(Clock, Hash, Size, SibCount, null),
+            Value = generate_value({0, 0}, Clock, 
+                                    Hash, Size, SibCount, 
+                                    0, null),
             define_objectspec(Op, 
                                 aae_util:get_segmentid(Bucket, K), 
                                 Bucket, 

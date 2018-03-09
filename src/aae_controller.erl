@@ -7,105 +7,184 @@
 %% - Snapshots of the KeyStore to support async object folds
 %% - Periodic requests to rebuild
 %% - Requests to startup and shutdown
+%%
+%% 
 
 
 -module(aae_controller).
 
--behaviour(gen_fsm).
+-behaviour(gen_server).
 -include("include/aae.hrl").
 
 -export([init/1,
-            handle_sync_event/4,
-            handle_event/3,
-            handle_info/3,
-            terminate/3,
-            code_change/4]).
+            handle_call/3,
+            handle_cast/2,
+            handle_info/2,
+            terminate/2,
+            code_change/3]).
 
--export([starting/3,
-            replacing_store/3,
-            replacing_store/2,
-            replacing_tree/2,
-            replacing_tree/3,
-            steady/3,
-            steady/2]).
+-export([aae_start/5]).
             
 -include_lib("eunit/include/eunit.hrl").
 
+-define(STORE_PATH, "_keystore/").
+-define(TREE_PATH, "_aaetree/").
+-define(MEGA, 1000000).
 
--record(state, {key_store :: key_store(),
+
+
+-record(state, {key_store :: pid(),
                 tree_caches :: tree_caches(),
-                rebuild_disklog :: pid(),
-                vnode :: pid()}).
+                initiate_node_worker_fun,
+                reliable = false :: boolean(),
+                next_rebuild :: erlang:timestamp()}).
 
+-record(options, {keystore_type :: keystore_type(),
+                    startup_storestate :: startup_storestate(),
+                    rebuild_schedule :: rebuild_schedule(),
+                    index_ns :: list(responsible_preflist()),
+                    root_path :: list()}).
 
-% -type controller_state() :: #state{}.
--type key_store() :: {boolean(), pid()|none}.
--type tree_caches() :: list({tuple(), pid()}).
-
+-type responsible_preflist() :: {binary(), integer()}. 
+        % The responsible preflist is a reference to the partition associated 
+        % with an AAE requirement.  The preflist is a reference to the id of 
+        % the head partition in preflist, and and n-val.
+-type tree_caches() 
+        :: list({responsible_preflist(), pid()}).
+        % A map between the responsible_preflist reference and the tree_cache 
+        % for that preflist
+-type keystore_type() 
+        :: {parallel, aae_keystore:supported_stores()}|{native, pid()}.
+        % Key Store can be native (no separate AAE store required) or
+        % parallel when a seperate Key Store is needed for AAE.  The Type
+        % for parallel stores must be a supported KV store by the aae_keystore
+        % module 
+-type startup_storestate() 
+        :: {boolean(), list()|none}.
+        % On startup the current state of the store is passed for the aae 
+        % controller to determine if the startup of the aae_controller has 
+        % placed the system in a 'reliable' and consistent state between the
+        % vnode store and the parallel key store.  The first element is the 
+        % is_empty status of the vnode backend, and the second element is a 
+        % GUID which was stored in the backend prior to the last controlled 
+        % close.
+-type rebuild_schedule() 
+        :: {integer(), integer()}.
+        % A rebuild schedule, the first integer being the minimum number of 
+        % hours to wait between rebuilds.  The second integer is a number of 
+        % seconds by which to jitter the rebuild.  The actual rebuild will be 
+        % scheduled by adding a random integer number of seconds (between 0 
+        % and the jitter value) to the minimum time
 
 %%%============================================================================
 %%% API
 %%%============================================================================
 
-
-
-
+-spec aae_start(keystore_type(), 
+                startup_storestate(), 
+                rebuild_schedule(),
+                list(responsible_preflist()), 
+                list()) -> {ok, pid()}.
+%% @doc
+%% Start an AAE controller 
+aae_start(KeyStoreT, StartupState, RebuildSch, Preflists, RootPath) ->
+    AAEopts =
+        #options{keystore_type = KeyStoreT,
+                    startup_storestate = StartupState,
+                    rebuild_schedule = RebuildSch,
+                    index_ns = Preflists,
+                    root_path = RootPath},
+    gen_server:start(?MODULE, [AAEopts], []).
 
 %%%============================================================================
-%%% gen_fsm callbacks
+%%% gen_server callbacks
 %%%============================================================================
 
-init([_Opts]) ->
-    {ok, starting, #state{}}.
+init([Opts]) ->
+    RootPath = Opts#options.root_path,
+    {ok, State0} = 
+        case Opts#options.keystore_type of 
+            {parallel, StoreType} ->
+                StoreRP = 
+                    filename:join([RootPath, StoreType, ?STORE_PATH]),
+                {ok, {LastRebuild, ShutdownGUID, IsEmpty}, Pid} =
+                    aae_keystore:store_parallelstart(StoreRP, StoreType),
+                case Opts#options.startup_storestate of 
+                    {IsEmpty, ShutdownGUID} ->
+                        RebuildTS = 
+                            schedule_rebuild(LastRebuild, 
+                                                Opts#options.rebuild_schedule),
+                        {ok, #state{key_store = Pid, 
+                                        next_rebuild = RebuildTS, 
+                                        reliable = true}};
+                    StoreState ->
+                        aae_util:log("AAE01", 
+                                        [StoreState, {IsEmpty, ShutdownGUID}],
+                                        logs()),
+                        {ok, #state{key_store = Pid, 
+                                        next_rebuild = os:timestamp(), 
+                                        reliable = false}}
+                end;
+            KeyStoreType ->
+                aae_util:log("AAE02", [KeyStoreType], logs())
+        end,
+    {ok, State0}.
 
-starting(_Msg, _From, State) ->
-    {reply, ok, replacing_store, State}.
+handle_call(_Msg, _From, State) ->
+    {reply, not_implemented, State}.
 
-replacing_store(_Msg, _From, State) ->
-    {reply, ok, replacing_tree, State}.
+handle_cast(_Msg, State) ->
+    {noreply, State}.
 
-replacing_tree(_Msg, _From, State) ->
-    {reply, ok, steady, State}.
+handle_info(_Info, State) ->
+    {noreply, State}.
 
-steady(_Msg, _From, State) ->
-    {reply, ok, steady, State}.
-
-
-
-replacing_store(_Msg, State) ->
-    {next_state, replacing_tree, State}.
-
-replacing_tree(_Msg, State) ->
-    {next_state, steady, State}.
-
-steady(_Msg, State) ->
-    {next_state, steady, State}.
-
-
-handle_sync_event(_Msg, _From, StateName, State) ->
-    {reply, ok, StateName, State}.
-
-handle_event(_Msg, StateName, State) ->
-    {next_state, StateName, State}.
-
-handle_info(_Msg, StateName, State) ->
-    {next_state, StateName, State}.
-
-terminate(_Reason, _StateName, _State) ->
+terminate(_Reason, _State) ->
     ok.
 
-code_change(_OldVsn, StateName, State, _Extra) ->
-    {ok, StateName, State}.
+code_change(_OldVsn, State, _Extra) ->
+    {ok, State}.
 
 %%%============================================================================
 %%% Internal functions
 %%%============================================================================
 
+schedule_rebuild({MegaSecs, Secs, MicroSecs}, {MinHours, JitterSeconds}) ->
+    NewSecs = 
+        MegaSecs * ?MEGA 
+            + Secs 
+            + MinHours * 3600 + random:uniform(JitterSeconds),
+    {NewSecs div ?MEGA, NewSecs rem ?MEGA, MicroSecs}.
 
 
 
+%%%============================================================================
+%%% log definitions
+%%%============================================================================
+
+-spec logs() -> list(tuple()).
+%% @doc
+%% Define log lines for this module
+logs() ->
+    [{"AAE01", 
+            {warn, "AAE Key Store rebuild required on startup due to " 
+                    ++ "mismatch between vnode store state ~w "
+                    ++ "and AAE key store state of ~w "
+                    ++ "maybe restart with node excluded from coverage "
+                    ++ "queries to improve AAE operation until rebuild "
+                    ++ "is complete"}},
+        {"AAE02",
+            {error, "Unexpected KeyStore type information passed ~w"}}
+    
+    ].
 
 
+%%%============================================================================
+%%% Test
+%%%============================================================================
 
+-ifdef(TEST).
+
+-endif.
 
 
