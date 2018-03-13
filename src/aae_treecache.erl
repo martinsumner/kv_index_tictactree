@@ -81,7 +81,7 @@ cache_close(AAECache) ->
 
 -spec cache_alter(pid(), binary(), integer(), integer()) -> ok.
 %% @doc
-%% Change the hash tree to refelct an addition and removal of a hash value
+%% Change the hash tree to reflect an addition and removal of a hash value
 cache_alter(AAECache, Key, CurrentHash, OldHash) -> 
     gen_server:cast(AAECache, {alter, Key, CurrentHash, OldHash}).
 

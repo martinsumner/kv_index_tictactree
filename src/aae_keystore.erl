@@ -40,7 +40,7 @@
             store_fold/4]).
 
 -export([define_objectspec/5,
-            generate_value/7,
+            generate_value/4,
             value_preflist/1,
             value_clock/1,
             value_hash/1,
@@ -322,16 +322,16 @@ code_change(_OldVsn, StateName, State, _Extra) ->
 %%% Key Codec
 %%%============================================================================
 
--spec define_objectspec(add|remove, integer(), binary(), binary(), tuple()) 
+-spec define_objectspec(add|remove, 
+                        integer(), binary(), binary(), tuple()|null) 
                                                                     -> tuple().
 %% @doc
 %% Create an ObjectSpec for adding to the backend store
 define_objectspec(Op, SegmentID, Bucket, Key, Value) ->
     {Op, <<SegmentID:24/integer>>, term_to_binary({Bucket, Key}), null, Value}.
 
--spec generate_value(tuple(), list(tuple()), 
-                        integer(), integer(), integer(), integer(), 
-                        any()) -> tuple().
+-spec generate_value(tuple(), aae_controller:version_vector(), integer(), 
+                        {integer(), integer(), integer(), any()}) -> tuple().
 %% @doc
 %% Create a value based on the current active version number
 %% Currently the "head" is ignored.  This may eb changed to support other 
@@ -343,7 +343,7 @@ define_objectspec(Op, SegmentID, Bucket, Key, Value) ->
 %% Size - The byte size of the binary Riak object (uncompressed)
 %% SibCount - the count of siblings for the object (on this vnode only)
 %% IndexHash - A Hash of all the index fields and terms for this object
-generate_value(PreflistID, Clock, Hash, Size, SibCount, IndexHash, _Head) ->
+generate_value(PreflistID, Clock, Hash, {Size, SibCount, IndexHash, _Head}) ->
     {?VALUE_VERSION, {PreflistID, Clock, Hash, Size, SibCount, IndexHash}}.
 
 %% Some helper functions for accessing individual value elements by version, 
@@ -737,9 +737,8 @@ generate_objectspecs(Op, Bucket, KeyList) ->
     FoldFun = 
         fun({K, V}) ->
             {Clock, Hash, Size, SibCount} = V,
-            Value = generate_value({0, 0}, Clock, 
-                                    Hash, Size, SibCount, 
-                                    0, null),
+            Value = generate_value({0, 0}, Clock, Hash, 
+                                    {Size, SibCount, 0, null}),
             define_objectspec(Op, 
                                 aae_util:get_segmentid(Bucket, K), 
                                 Bucket, 
