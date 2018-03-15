@@ -436,7 +436,7 @@ do_fold(leveled, Store, {segments, SegList}, FoldObjectsFun, InitAcc) ->
                         SegList, 
                         {fun(_S, BKBin, V, Acc) ->
                                 {B, K} = binary_to_term(BKBin),
-                                FoldObjectsFun({B, K, V}, Acc)
+                                FoldObjectsFun(B, K, V, Acc)
                             end,
                             InitAcc}),
     leveled_bookie:book_returnfolder(Store, Query);
@@ -448,7 +448,7 @@ do_fold(leveled, Store, {buckets, BucketList}, FoldObjectsFun, InitAcc) ->
                                 {B, K} = binary_to_term(BKBin),
                                 case lists:member(B, BucketList) of 
                                     true ->
-                                        FoldObjectsFun({B, K, V}, Acc);
+                                        FoldObjectsFun(B, K, V, Acc);
                                     false ->
                                         Acc
                                 end
@@ -461,7 +461,7 @@ do_fold(leveled, Store, all, FoldObjectsFun, InitAcc) ->
                         all,
                         {fun(_S, BKBin, V, Acc) -> 
                                 {B, K} = binary_to_term(BKBin),
-                                FoldObjectsFun({B, K, V}, Acc)
+                                FoldObjectsFun(B, K, V, Acc)
                             end, 
                             InitAcc}),
     leveled_bookie:book_returnfolder(Store, Query).
@@ -646,7 +646,7 @@ load_test() ->
     ok = store_mput(Store0, L3),
 
     FoldObjectsFun =
-        fun({B, K, V}, Acc) ->
+        fun(B, K, V, Acc) ->
             [{B, K, value_clock(V)}|Acc]
         end,
     

@@ -30,7 +30,6 @@
 
 -define(PENDING_EXT, ".pnd").
 -define(FINAL_EXT, ".aae").
--define(TREE_SIZE, large).
 -define(START_SQN, 1).
 
 -record(state, {save_sqn :: integer(),
@@ -41,7 +40,6 @@
                 loading = false :: boolean(),
                 change_queue :: list()}).
 
-% -type treecache_state() :: #state{}.
 
 %%%============================================================================
 %%% API
@@ -103,7 +101,7 @@ cache_leaves(Pid, BranchIDs) ->
 %% current tree the cache should keep a queue of all the changes from this
 %% point.
 %%
-%% Eventually cache_completeload hsould be called with a tree built from 
+%% Eventually cache_completeload should be called with a tree built from 
 %% a loading process snapshotted at the startload point, and the changes can
 %% all be applied
 cache_startload(Pid) ->
