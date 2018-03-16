@@ -29,6 +29,7 @@
             aae_close/2,
             aae_fetchroot/3,
             aae_fetchbranches/4,
+            aae_fetchclocks/4,
             aae_rebuildcaches/4]).
 
 -export([foldobjects_buildtrees/3]).
@@ -51,7 +52,8 @@
                 prompt_cacherebuild :: boolean(),
                 parallel_keystore :: boolean(),
                 objectspecs_queue = [] :: list(),
-                root_path :: list()}).
+                root_path :: list(),
+                runner :: pid()}).
 
 -record(options, {keystore_type :: keystore_type(),
                     startup_storestate :: startup_storestate(),
@@ -156,6 +158,16 @@ aae_fetchroot(Pid, IndexNs, ReturnFun) ->
 aae_fetchbranches(Pid, IndexNs, BranchIDs, ReturnFun) ->
     gen_server:cast(Pid, {fetch_branches, IndexNs, BranchIDs, ReturnFun}).
 
+
+-spec aae_fetchclocks(pid(), 
+                        list(responsible_preflist()), list(integer()), 
+                        fun()) -> ok.
+%% @doc
+%% Fetch all the keys and clocks covered by a given lis of SegmentIDs and a 
+%% list of IndexNs
+aae_fetchclocks(Pid, IndexNs, SegmentIDs, ReturnFun) ->
+    gen_server:cast(Pid, {fetch_clocks, IndexNs, SegmentIDs, ReturnFun}).
+
 -spec aae_close(pid(), list()) -> ok.
 %% @doc
 %% Closedown the AAE controlle claosing and saving state.  Tag the closed state 
@@ -250,11 +262,16 @@ init([Opts]) ->
         end,
     {AllTreesOK, TreeCaches} = 
         lists:foldl(StartCacheFun, {true, []}, Opts#options.index_ns),
+    
+    % Start clock runner
+    {ok, Runner} = aae_runner:runner_start(),
+
     {ok, State0#state{object_splitfun = Opts#options.object_splitfun,
                         index_ns = Opts#options.index_ns,
                         tree_caches = TreeCaches,
                         prompt_cacherebuild = not AllTreesOK,
-                        root_path = RootPath}}.
+                        root_path = RootPath,
+                        runner = Runner}}.
 
 
 handle_call(rebuild_time, _From, State) ->  
@@ -293,8 +310,8 @@ handle_call({rebuild_treecaches, IndexNs, parallel_keystore, WorkerFun},
                     NewIndexNs),
     TreeCaches = NewTreeCaches ++ State#state.tree_caches,
 
-    % Produce a Finishfun to eb called at the end of the Folder with the 
-    % input as the results.  this should call rebuild_complete on each Tree
+    % Produce a Finishfun to be called at the end of the Folder with the 
+    % input as the results.  This should call rebuild_complete on each Tree
     % cache in turn
     FinishTreeFun =
         fun({FoldIndexN, FoldTree}) ->
@@ -402,7 +419,25 @@ handle_cast({fetch_branches, IndexNs, BranchIDs, ReturnFun}, State) ->
         end,
     Result = lists:map(FetchBranchFun, IndexNs),
     ReturnFun(Result),
+    {noreply, State};
+handle_cast({fetch_clocks, IndexNs, SegmentIDs, ReturnFun}, State) ->
+    FoldObjFun = 
+        fun(B, K, V, Acc) ->
+            case lists:member(aae_keystore:value_preflist(V), IndexNs) of   
+                true ->
+                    [{B, K, aae_keystore:value_clock(V)}];
+                false ->
+                    Acc 
+            end 
+        end,
+    {async, Folder} = 
+        aae_keystore:store_fold(State#state.key_store, 
+                                {segments, SegmentIDs}, 
+                                FoldObjFun, 
+                                []),
+    aae_runner:runner_clockfold(State#state.runner, Folder, ReturnFun),
     {noreply, State}.
+
 
 handle_info(_Info, State) ->
     {noreply, State}.
