@@ -328,7 +328,12 @@ code_change(_OldVsn, StateName, State, _Extra) ->
 %% @doc
 %% Create an ObjectSpec for adding to the backend store
 define_objectspec(Op, SegmentID, Bucket, Key, Value) ->
-    {Op, <<SegmentID:24/integer>>, term_to_binary({Bucket, Key}), null, Value}.
+    SegmentID0 = leveled_tictac:get_segment(SegmentID, ?TREE_SIZE),
+    {Op, 
+        <<SegmentID0:24/integer>>, 
+        term_to_binary({Bucket, Key}), 
+        null, 
+        Value}.
 
 -spec generate_value(tuple(), aae_controller:version_vector(), integer(), 
                         {integer(), integer(), integer(), any()}) -> tuple().
@@ -476,7 +481,12 @@ populate_query(leveled, all, FoldFun) ->
             FoldFun,
             false, true, false};
 populate_query(leveled, SegList, FoldFun) ->
-    SegList0 = lists:map(fun(S) -> <<S:24/integer>> end, SegList),
+    MapSegFun = 
+        fun(S) -> 
+            S0 = leveled_tictac:get_segment(S, ?TREE_SIZE),
+            <<S0:24/integer>> 
+        end,
+    SegList0 = lists:map(MapSegFun, SegList),
     {foldheads_bybucket,
             ?HEAD_TAG, 
             SegList0, bucket_list,

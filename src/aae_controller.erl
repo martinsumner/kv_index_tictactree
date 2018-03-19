@@ -114,8 +114,8 @@ aae_start(KeyStoreT, StartupD, RebuildSch, Preflists, RootPath, ObjSplitFun) ->
                     startup_storestate = StartupD,
                     rebuild_schedule = RebuildSch,
                     index_ns = Preflists,
-                    object_splitfun = ObjSplitFun,
-                    root_path = RootPath},
+                    root_path = RootPath,
+                    object_splitfun = ObjSplitFun},
     gen_server:start(?MODULE, [AAEopts], []).
 
 
@@ -379,8 +379,7 @@ handle_cast({put, IndexN, Bucket, Key, Clock, PrevClock, BinaryObj}, State) ->
             case length(UpdSpecL) >= ?BATCH_LENGTH of 
                 true ->
                     % Push to the KeyStore as batch is now at least full
-                    ok =  aae_keystore:store_mput(State#state.key_store, 
-                                                    UpdSpecL),
+                    push_store(State#state.key_store, UpdSpecL),
                     {noreply, State#state{objectspecs_queue = []}};
                 false ->
                     {noreply, State#state{objectspecs_queue = UpdSpecL}}
@@ -430,6 +429,7 @@ handle_cast({fetch_clocks, IndexNs, SegmentIDs, ReturnFun}, State) ->
                     Acc 
             end 
         end,
+    ok = push_store(State#state.key_store, State#state.objectspecs_queue),
     {async, Folder} = 
         aae_keystore:store_fold(State#state.key_store, 
                                 {segments, SegmentIDs}, 
@@ -489,6 +489,9 @@ foldobjects_buildtrees(IndexNs, IndexNFun, ExtractHashFun) ->
 %%%============================================================================
 
 
+push_store(Store, ObjSpecL) ->
+    aae_keystore:store_mput(Store, lists:reverse(ObjSpecL)).
+
 -spec new_cache(responsible_preflist(), list()) -> {ok, pid()}.
 %% @doc
 %% Start a new tree cache
@@ -498,10 +501,12 @@ new_cache(IndexN, RootPath) ->
     PartitionID = Index + N,
     aae_treecache:cache_new(TreeRP, PartitionID).
 
--spec schedule_rebuild(erlang:timestanmp(), {integer(), integer()}) 
+-spec schedule_rebuild(erlang:timestamp()|never, {integer(), integer()}) 
                                                         -> erlang:timestamp().
 %% @doc
 %% Set a rebuild time based on the last rebuild time and the rebuild schedule
+schedule_rebuild(never, Schedule) ->
+    schedule_rebuild(os:timestamp(), Schedule);
 schedule_rebuild({MegaSecs, Secs, MicroSecs}, {MinHours, JitterSeconds}) ->
     NewSecs = 
         MegaSecs * ?MEGA 
@@ -587,6 +592,142 @@ logs() ->
 %%%============================================================================
 
 -ifdef(TEST).
+
+rebuild_notempty_test() ->
+    RootPath = "test/notemptycntrllr/",
+    aae_util:clean_subdir(RootPath),
+    {ok, Cntrl0} = start_wrap({false, "1234"}, RootPath),
+    NRB0 = aae_controller:aae_nextrebuild(Cntrl0),
+    ?assertMatch(true, NRB0 < os:timestamp()),
+    
+    % Shutdown and startup with GUID 
+    % But shutdown was with rebuild due - so should not reset the rebuild to
+    % future 
+    ok = aae_close(Cntrl0, "4567"),
+    {ok, Cntrl1} = start_wrap({false, "4567"}, RootPath),
+    NRB1 = aae_controller:aae_nextrebuild(Cntrl1),
+    ?assertMatch(true, NRB1 < os:timestamp()),
+    
+    % Shutdown then startup with wrong GUID
+    ok = aae_close(Cntrl1, "8910"),
+    {ok, Cntrl2} = start_wrap({false, "4567"}, RootPath),
+    NRB2 = aae_controller:aae_nextrebuild(Cntrl2),
+    ?assertMatch(true, NRB2 < os:timestamp()),
+    
+    ok = aae_close(Cntrl2, "0000"),
+    aae_util:clean_subdir(RootPath).
+
+rebuild_onempty_test() ->
+    RootPath = "test/emptycntrllr/",
+    aae_util:clean_subdir(RootPath),
+    {ok, Cntrl0} = start_wrap({true, none}, RootPath),
+    NRB0 = aae_controller:aae_nextrebuild(Cntrl0),
+    ?assertMatch(false, NRB0 < os:timestamp()),
+    
+    % Shutdown and startup with GUID 
+    ok = aae_close(Cntrl0, "4567"),
+    {ok, Cntrl1} = start_wrap({true, "4567"}, RootPath),
+    NRB1 = aae_controller:aae_nextrebuild(Cntrl1),
+    ?assertMatch(false, NRB1 < os:timestamp()),
+    
+    % Shutdown then startup with wrong GUID
+    ok = aae_close(Cntrl1, "8910"),
+    {ok, Cntrl2} = start_wrap({true, "4567"}, RootPath),
+    NRB2 = aae_controller:aae_nextrebuild(Cntrl2),
+    ?assertMatch(true, NRB2 < os:timestamp()),
+    
+    ok = aae_close(Cntrl2, "0000"),
+    aae_util:clean_subdir(RootPath).
+
+wrong_indexn_test() ->
+    RootPath = "test/emptycntrllr/",
+    aae_util:clean_subdir(RootPath),
+
+    RPid = self(),
+    ReturnFun = fun(R) -> RPid ! {result, R} end,
+
+    {ok, Cntrl0} = start_wrap({true, none}, RootPath),
+    NRB0 = aae_controller:aae_nextrebuild(Cntrl0),
+    ?assertMatch(false, NRB0 < os:timestamp()),
+    
+    ok = aae_fetchroot(Cntrl0, [{0, 3}], ReturnFun),
+    receive
+        {result, [{{0,3}, ZeroB0}]} ->
+            ?assertMatch(<<0:131072/integer>>, ZeroB0)
+    end,
+    ok = aae_fetchroot(Cntrl0, [{1, 3}], ReturnFun),
+    receive 
+        {result, [{{1, 3}, F0}]} ->
+            ?assertMatch(false, F0)
+    end,
+    
+    io:format("Put entry - wrong index~n"),
+    ok = aae_put(Cntrl0, {1, 3}, <<"B">>, <<"K">>, [{a, 1}], [], <<>>),
+    ok = aae_fetchroot(Cntrl0, [{0, 3}], ReturnFun),
+    Root1 = 
+        receive
+            {result, [{{0,3}, ZeroB1}]} ->
+                ?assertMatch(<<0:131072/integer>>, ZeroB1),
+                ZeroB1
+        end,
+        ok = aae_fetchroot(Cntrl0, [{1, 3}], ReturnFun),
+        receive 
+            {result, [{{1, 3}, F1}]} ->
+                ?assertMatch(false, F1)
+        end,
+    
+    io:format("Put entry - correct index~n"),
+    ok = aae_put(Cntrl0, {0, 3}, <<"B">>, <<"K">>, [{c, 1}], [], <<>>),
+    ok = aae_fetchroot(Cntrl0, [{0, 3}], ReturnFun),
+    Root2 = 
+        receive
+            {result, [{{0,3}, ZeroB2}]} ->
+                ?assertMatch(false, <<0:131072/integer>> == ZeroB2),
+                ZeroB2
+        end,
+    ok = aae_fetchroot(Cntrl0, [{1, 3}], ReturnFun),
+    receive 
+        {result, [{{1, 3}, F2}]} ->
+            ?assertMatch(false, F2)
+    end,
+    
+    BranchIDL = leveled_tictac:find_dirtysegments(Root1, Root2),
+    ?assertMatch(1, length(BranchIDL)),
+    [BranchID] = BranchIDL, 
+    
+    ok = aae_fetchbranches(Cntrl0, [{0, 3}], BranchIDL, ReturnFun),
+    Branch3 = 
+        receive
+            {result, [{{0,3}, [{BranchID, B3}]}]} ->
+                ?assertMatch(false,<<0:131072/integer>> == B3),
+                B3
+        end,
+    SegIDL = leveled_tictac:find_dirtysegments(Branch3, <<0:8192>>),
+    ?assertMatch(1, length(SegIDL)),
+    [SubSegID] = SegIDL,
+    SegID = 256 * BranchID + SubSegID,
+    ExpSegID = 
+        leveled_tictac:keyto_segment32(term_to_binary({<<"B">>, <<"K">>}))
+            band (1024 * 1024 - 1),
+    ?assertMatch(ExpSegID, SegID),
+    io:format("SegID ~w ExpSegID ~w~n", [SegID, ExpSegID]),
+    
+    ok = aae_fetchclocks(Cntrl0, [{0, 3}], [SegID], ReturnFun),
+    KC4 = 
+        receive
+            {result, KCL} ->
+                io:format("KCL ~w~n", [KCL]),
+                KCL 
+        end,
+    ?assertMatch([{<<"B">>, <<"K">>, [{c, 1}]}], KC4),
+    
+    ok = aae_close(Cntrl0, "0000"),
+    aae_util:clean_subdir(RootPath).
+
+start_wrap(StartupI, RootPath) ->
+    F = fun(_X) -> {0, 1, 0, null} end,
+    aae_start({parallel, leveled}, StartupI,{1, 300}, [{0, 3}], RootPath, F).
+
 
 -endif.
 
