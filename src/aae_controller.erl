@@ -34,6 +34,8 @@
 
 -export([foldobjects_buildtrees/3]).
 
+-export([rebuild_worker/1]).
+
 -include_lib("eunit/include/eunit.hrl").
 
 -define(STORE_PATH, "_keystore/").
@@ -127,7 +129,8 @@ aae_nextrebuild(Pid) ->
 
 -spec aae_put(pid(), responsible_preflist(), 
                             binary(), binary(), 
-                            list(), list(), binary()) -> ok.
+                            version_vector(), version_vector(),
+                            binary()) -> ok.
 %% @doc
 %% Put a change into the AAE system - updating the TicTac tree, and the 
 %% KeyStore where a parallel Keystore is used.
@@ -191,7 +194,7 @@ aae_close(Pid, ShutdownGUID) ->
 %% taken by the vnode manager as part of the atomic unit of work which has 
 %% made this call.  The worker function will trigger a worker from a pool to
 %% perfom the fold which should also take a finish function that will be used
-%% to call cache_completeload for eahc IndexN when the fold is finished.
+%% to call cache_completeload for each IndexN when the fold is finished.
 %%
 %% If parallel_keystore is passed, the rebuild will be run against the 
 %% parallel store so te controller should take the snapshot and prepare the
@@ -244,19 +247,16 @@ init([Opts]) ->
     % then the prompt_cacherebuild should trigger for them to be rebuilt from
     % the AAE KeyStore (if that itself is not pending a rebuild)  
     {ExpectEmpty, _} = Opts#options.startup_storestate,
-    TreeRP = filename:join(RootPath, ?TREE_PATH),
     StartCacheFun = 
         fun(IndexN, {AllRestored, Caches}) ->
-            {Index, N} = IndexN,
-            PartitionID = Index + N,
             {IsRestored, Cache} = 
                 case ExpectEmpty of 
                     true ->
                         {ok, NewCache} = 
-                            aae_treecache:cache_new(TreeRP, PartitionID),
+                            cache(new, IndexN, RootPath),
                         {true, NewCache};
                     false ->
-                        aae_treecache:cache_open(TreeRP, PartitionID)
+                        cache(open, IndexN, RootPath)
                 end,
             {IsRestored and AllRestored, [{IndexN, Cache}|Caches]}
         end,
@@ -283,12 +283,13 @@ handle_call({close, ShutdownGUID}, _From, State) ->
             ok = aae_treecache:cache_close(TreeCache)
         end,
     lists:foreach(CloseTCFun, State#state.tree_caches),
+    ok = aae_runner:runner_stop(State#state.runner),
     {stop, normal, ok, State};
 handle_call({rebuild_treecaches, IndexNs, parallel_keystore, WorkerFun}, 
                                                             _From, State) ->
     % Before the fold flush all the PUTs 
-    ok =  aae_keystore:store_mput(State#state.key_store, 
-                                    State#state.objectspecs_queue),
+    aae_util:log("AAE06", [IndexNs], logs()),
+    ok = flush_puts(State#state.key_store, State#state.objectspecs_queue),
     
     % Setup a fold over the store
     IndexNFun = fun(_B, _K, V) -> aae_keystore:value_preflist(V) end,
@@ -300,15 +301,20 @@ handle_call({rebuild_treecaches, IndexNs, parallel_keystore, WorkerFun},
     
     % Handle the current list of responsible preflists for this vnode 
     % having changed since the last call to start or rebuild the cache trees
-    NewIndexNs = lists:subtract(IndexNs, State#state.index_ns),
-    NewTreeCaches = 
-        lists:map(fun(NewIdxN) -> 
-                            {ok, TCP} = 
-                                new_cache(NewIdxN, State#state.root_path),
-                            {NewIdxN, TCP}
-                        end, 
-                    NewIndexNs),
-    TreeCaches = NewTreeCaches ++ State#state.tree_caches,
+    SetupCacheFun = 
+        fun(IndexN, TreeCachesAcc) ->
+            TreeCache1 = 
+                case lists:keyfind(IndexN, 1, State#state.tree_caches) of 
+                    {IndexN, TreeCache0} ->
+                        TreeCache0;
+                    false ->
+                        aae_util:log("AAE09", [IndexN], logs()),
+                        cache(new, IndexN, State#state.root_path)
+            end,
+            ok = aae_treecache:cache_startload(TreeCache1),
+            [{IndexN, TreeCache1}|TreeCachesAcc]
+        end,
+    TreeCaches = lists:foldl(SetupCacheFun, [], IndexNs),
 
     % Produce a Finishfun to be called at the end of the Folder with the 
     % input as the results.  This should call rebuild_complete on each Tree
@@ -344,6 +350,7 @@ handle_cast({put, IndexN, Bucket, Key, Clock, PrevClock, BinaryObj}, State) ->
     TreeCaches = State#state.tree_caches,
     BinaryKey = make_binarykey(Bucket, Key),
     {CH, OH} = hash_clocks(Clock, PrevClock),
+
     
     % Update the TreeCache associated with the Key (should a cache exist for
     % that store)
@@ -379,7 +386,7 @@ handle_cast({put, IndexN, Bucket, Key, Clock, PrevClock, BinaryObj}, State) ->
             case length(UpdSpecL) >= ?BATCH_LENGTH of 
                 true ->
                     % Push to the KeyStore as batch is now at least full
-                    push_store(State#state.key_store, UpdSpecL),
+                    flush_puts(State#state.key_store, UpdSpecL),
                     {noreply, State#state{objectspecs_queue = []}};
                 false ->
                     {noreply, State#state{objectspecs_queue = UpdSpecL}}
@@ -429,7 +436,7 @@ handle_cast({fetch_clocks, IndexNs, SegmentIDs, ReturnFun}, State) ->
                     Acc 
             end 
         end,
-    ok = push_store(State#state.key_store, State#state.objectspecs_queue),
+    ok = flush_puts(State#state.key_store, State#state.objectspecs_queue),
     {async, Folder} = 
         aae_keystore:store_fold(State#state.key_store, 
                                 {segments, SegmentIDs}, 
@@ -468,12 +475,14 @@ foldobjects_buildtrees(IndexNs, IndexNFun, ExtractHashFun) ->
     FoldObjectsFun = 
         fun(B, K, V, Acc) ->
             IndexN = IndexNFun(B, K, V),
-            BinK = <<B/binary, K/binary>>,
+            BinK = make_binarykey(B, K),
             BinExtractFun = 
-                fun(_BK, _V) -> {BinK, {is_hash, ExtractHashFun(V)}} end,
+                fun(_BK, _V) -> 
+                    Hash = ExtractHashFun(V),
+                    {BinK, {is_hash, Hash}} end,
             case lists:keyfind(IndexN, 1, Acc) of 
                 {IndexN, Tree} ->
-                    Tree0 = leveled_tictac:add_kv(Tree, K, V, BinExtractFun),
+                    Tree0 = leveled_tictac:add_kv(Tree, null, null, BinExtractFun),
                     lists:keyreplace(IndexN, 1, Acc, {IndexN, Tree0});
                 false ->
                     Acc 
@@ -489,17 +498,27 @@ foldobjects_buildtrees(IndexNs, IndexNFun, ExtractHashFun) ->
 %%%============================================================================
 
 
-push_store(Store, ObjSpecL) ->
-    aae_keystore:store_mput(Store, lists:reverse(ObjSpecL)).
+-spec flush_puts(pid(), list()) -> ok.
+%% @doc
+%% Flush all the puts into the store.  The Puts have been queued with the most
+%% recent PUT at the head.  
+flush_puts(Store, ObjSpecL) ->
+    aae_keystore:store_mput(Store, aae_keystore:dedup_objspeclist(ObjSpecL)).
 
--spec new_cache(responsible_preflist(), list()) -> {ok, pid()}.
+-spec cache(new|open, responsible_preflist(), list()) -> {ok, pid()}.
 %% @doc
 %% Start a new tree cache
-new_cache(IndexN, RootPath) ->
+cache(Startup, IndexN, RootPath) ->
     TreeRP = filename:join(RootPath, ?TREE_PATH),
     {Index, N} = IndexN,
     PartitionID = Index + N,
-    aae_treecache:cache_new(TreeRP, PartitionID).
+    case Startup of 
+        new ->
+            aae_treecache:cache_new(TreeRP, PartitionID);
+        open ->
+            aae_treecache:cache_open(TreeRP, PartitionID)
+    end.
+
 
 -spec schedule_rebuild(erlang:timestamp()|never, {integer(), integer()}) 
                                                         -> erlang:timestamp().
@@ -556,6 +575,10 @@ make_binarykey(Bucket, Key) ->
                                                     -> {integer(), integer()}.
 %% @doc
 %% Has the version vectors 
+hash_clocks(none, PrevVV) ->
+    {0, erlang:phash2(PrevVV)};
+hash_clocks(CurrentVV, none) ->
+    {erlang:phash2(CurrentVV), 0};
 hash_clocks(CurrentVV, PrevVV) ->
     {erlang:phash2(CurrentVV), erlang:phash2(PrevVV)}.
 
@@ -582,7 +605,15 @@ logs() ->
         {"AAE04",
             {warn, "Misrouted request for IndexN ~w"}},
         {"AAE05",
-            {info, "New IndexN ~w found in cache rebuild"}}
+            {info, "New IndexN ~w found in cache rebuild"}},
+        {"AAE06",
+            {info, "Received rebuild request for IndexNs ~w"}},
+        {"AAE07",
+            {info, "Dispatching test fold"}},
+        {"AAE08",
+            {info, "Spawned worker receiving test fold"}},
+        {"AAE09",
+            {info, "Change in IndexNs detected at rebuild - new IndexN ~w"}}
     
     ].
 
@@ -651,57 +682,41 @@ wrong_indexn_test() ->
     ?assertMatch(false, NRB0 < os:timestamp()),
     
     ok = aae_fetchroot(Cntrl0, [{0, 3}], ReturnFun),
-    receive
-        {result, [{{0,3}, ZeroB0}]} ->
-            ?assertMatch(<<0:131072/integer>>, ZeroB0)
-    end,
+    [{{0,3}, ZeroB0}] = start_receiver(),
+    ?assertMatch(<<0:131072/integer>>, ZeroB0),
+
     ok = aae_fetchroot(Cntrl0, [{1, 3}], ReturnFun),
-    receive 
-        {result, [{{1, 3}, F0}]} ->
-            ?assertMatch(false, F0)
-    end,
+    [{{1, 3}, F0}] = start_receiver(),
+    ?assertMatch(false, F0),
     
     io:format("Put entry - wrong index~n"),
     ok = aae_put(Cntrl0, {1, 3}, <<"B">>, <<"K">>, [{a, 1}], [], <<>>),
     ok = aae_fetchroot(Cntrl0, [{0, 3}], ReturnFun),
-    Root1 = 
-        receive
-            {result, [{{0,3}, ZeroB1}]} ->
-                ?assertMatch(<<0:131072/integer>>, ZeroB1),
-                ZeroB1
-        end,
-        ok = aae_fetchroot(Cntrl0, [{1, 3}], ReturnFun),
-        receive 
-            {result, [{{1, 3}, F1}]} ->
-                ?assertMatch(false, F1)
-        end,
+    [{{0,3}, Root1}] = start_receiver(),
+    ?assertMatch(<<0:131072/integer>>, Root1),
     
-    io:format("Put entry - correct index~n"),
+    ok = aae_fetchroot(Cntrl0, [{1, 3}], ReturnFun),
+    [{{1, 3}, F1}] = start_receiver(),
+    ?assertMatch(false, F1),
+    
+    io:format("Put entry - correct index same key~n"),
     ok = aae_put(Cntrl0, {0, 3}, <<"B">>, <<"K">>, [{c, 1}], [], <<>>),
     ok = aae_fetchroot(Cntrl0, [{0, 3}], ReturnFun),
-    Root2 = 
-        receive
-            {result, [{{0,3}, ZeroB2}]} ->
-                ?assertMatch(false, <<0:131072/integer>> == ZeroB2),
-                ZeroB2
-        end,
+    [{{0,3}, Root2}] = start_receiver(),
+    ?assertMatch(false, <<0:131072/integer>> == Root2),
+
     ok = aae_fetchroot(Cntrl0, [{1, 3}], ReturnFun),
-    receive 
-        {result, [{{1, 3}, F2}]} ->
-            ?assertMatch(false, F2)
-    end,
+    [{{1, 3}, F2}] = start_receiver(),
+    ?assertMatch(false, F2),
     
     BranchIDL = leveled_tictac:find_dirtysegments(Root1, Root2),
     ?assertMatch(1, length(BranchIDL)),
     [BranchID] = BranchIDL, 
     
     ok = aae_fetchbranches(Cntrl0, [{0, 3}], BranchIDL, ReturnFun),
-    Branch3 = 
-        receive
-            {result, [{{0,3}, [{BranchID, B3}]}]} ->
-                ?assertMatch(false,<<0:131072/integer>> == B3),
-                B3
-        end,
+    [{{0,3}, [{BranchID, Branch3}]}] = start_receiver(),
+    ?assertMatch(false,<<0:131072/integer>> == Branch3),
+
     SegIDL = leveled_tictac:find_dirtysegments(Branch3, <<0:8192>>),
     ?assertMatch(1, length(SegIDL)),
     [SubSegID] = SegIDL,
@@ -713,21 +728,145 @@ wrong_indexn_test() ->
     io:format("SegID ~w ExpSegID ~w~n", [SegID, ExpSegID]),
     
     ok = aae_fetchclocks(Cntrl0, [{0, 3}], [SegID], ReturnFun),
-    KC4 = 
-        receive
-            {result, KCL} ->
-                io:format("KCL ~w~n", [KCL]),
-                KCL 
-        end,
+    KC4 = start_receiver(),
+    % Should find new key
     ?assertMatch([{<<"B">>, <<"K">>, [{c, 1}]}], KC4),
+
+    ok = aae_fetchclocks(Cntrl0, [{1, 3}], [SegID], ReturnFun),
+    KC5 = start_receiver(),
+    % Shouldn't find old key - has been replaced by new key
+    ?assertMatch([], KC5),
     
     ok = aae_close(Cntrl0, "0000"),
     aae_util:clean_subdir(RootPath).
 
 start_wrap(StartupI, RootPath) ->
-    F = fun(_X) -> {0, 1, 0, null} end,
-    aae_start({parallel, leveled}, StartupI,{1, 300}, [{0, 3}], RootPath, F).
+    start_wrap(StartupI, RootPath, [{0, 3}]).
 
+start_wrap(StartupI, RootPath, RPL) ->
+    F = fun(_X) -> {0, 1, 0, null} end,
+    aae_start({parallel, leveled}, StartupI, {1, 300}, RPL, RootPath, F).
+
+basic_cache_rebuild_test_() ->
+    {timeout, 60, fun basic_cache_rebuild_tester/0}.
+
+basic_cache_rebuild_tester() ->
+    RootPath = "test/emptycntrllr/",
+    aae_util:clean_subdir(RootPath),
+
+    RPid = self(),
+    ReturnFun = fun(R) -> RPid ! {result, R} end,
+
+    Preflists = [{0, 3}, {100, 3}, {200, 3}],
+    {ok, Cntrl0} = 
+        start_wrap({true, none}, RootPath, Preflists),
+    NRB0 = aae_controller:aae_nextrebuild(Cntrl0),
+    ?assertMatch(false, NRB0 < os:timestamp()),
+
+    PKL = put_keys(Cntrl0, Preflists, [], 5000),
+    {RepL, Rest0} = lists:split(1000, PKL),
+    {RemL, Rest1} = lists:split(1000, Rest0),
+    RKL = replace_keys(Cntrl0, RepL, []),
+    ok = remove_keys(Cntrl0, RemL),
+    _KVL = lists:sort(RKL ++ Rest1),
+
+    ok = aae_fetchroot(Cntrl0, [{0, 3}], ReturnFun),
+    [{{0,3}, Root0}] = start_receiver(),
+    ok = aae_fetchroot(Cntrl0, [{100, 3}], ReturnFun),
+    [{{100,3}, Root1}] = start_receiver(),
+    ok = aae_fetchroot(Cntrl0, [{200, 3}], ReturnFun),
+    [{{200,3}, Root2}] = start_receiver(),
+
+    ok = aae_rebuildcaches(Cntrl0, 
+                            Preflists, 
+                            parallel_keystore, 
+                            workerfun(ReturnFun)),
+    ok = start_receiver(),
+
+    ok = aae_fetchroot(Cntrl0, [{0, 3}], ReturnFun),
+    [{{0,3}, RB_Root0}] = start_receiver(),
+    ok = aae_fetchroot(Cntrl0, [{100, 3}], ReturnFun),
+    [{{100,3}, RB_Root1}] = start_receiver(),
+    ok = aae_fetchroot(Cntrl0, [{200, 3}], ReturnFun),
+    [{{200,3}, RB_Root2}] = start_receiver(),
+
+    SegIDL = leveled_tictac:find_dirtysegments(Root0, RB_Root0),
+    io:format("Count of dirty segments in IndexN 0 ~w~n", [length(SegIDL)]),
+
+    ?assertMatch(Root0, RB_Root0),
+    ?assertMatch(Root1, RB_Root1),
+    ?assertMatch(Root2, RB_Root2),
+    
+    ok = aae_close(Cntrl0, "0000"),
+    aae_util:clean_subdir(RootPath).
+
+
+put_keys(_Cntrl, _Preflists, KeyList, 0) ->
+    KeyList;
+put_keys(Cntrl, Preflists, KeyList, Count) ->
+    Preflist = lists:nth(random:uniform(length(Preflists)), Preflists),
+    Bucket = integer_to_binary(Count rem 5),  
+    Key = list_to_binary(string:right(integer_to_list(Count), 6, $0)),
+    VersionVector = add_randomincrement([]),
+    ok = aae_put(Cntrl, 
+                    Preflist, 
+                    Bucket, 
+                    Key, 
+                    VersionVector, 
+                    none, 
+                    <<>>),
+    put_keys(Cntrl, 
+                Preflists, 
+                [{Bucket, Key, VersionVector, Preflist}|KeyList], 
+                Count - 1).
+    
+
+replace_keys(_Cntrl, [], OutList) ->
+    OutList;
+replace_keys(Cntrl, [{B, K, C, PL}|Rest], OutList) ->
+    NewC = add_randomincrement(C),
+    ok = aae_put(Cntrl, PL, B, K, NewC, C, <<>>),
+    replace_keys(Cntrl, Rest, [{B, K, NewC, PL}|OutList]).
+
+remove_keys(_Cntrl, []) ->
+    ok;
+remove_keys(Cntrl, [{B, K, C, PL}|Rest]) ->
+    ok = aae_put(Cntrl, PL, B, K, none, C, <<>>),
+    remove_keys(Cntrl, Rest).
+
+add_randomincrement(Clock) ->
+    RandIncr = random:uniform(100),
+    RandNode = lists:nth(random:uniform(9), 
+                            ["a", "b", "c", "d", "e", "f", "g", "h", "i"]),
+    UpdClock = 
+        case lists:keytake(RandNode, 1, Clock) of 
+            false ->
+                [{RandNode, RandIncr}|Clock];
+            {value, {RandNode, Incr0}, Rest} ->
+                [{RandNode, Incr0 + RandIncr}|Rest]
+        end,
+    lists:usort(UpdClock).
+
+workerfun(ReturnFun) ->
+    WorkerPid = spawn(?MODULE, rebuild_worker, [ReturnFun]),
+    fun(FoldFun, FinishFun) ->
+        aae_util:log("AAE07", [], logs()),
+        WorkerPid! {fold, FoldFun, FinishFun}
+    end.
+
+start_receiver() ->
+    receive
+        {result, Reply} ->
+            Reply 
+    end.
+
+rebuild_worker(ReturnFun) ->
+    receive
+        {fold, FoldFun, FinishFun} ->
+            aae_util:log("AAE08", [], logs()),
+            FinishFun(FoldFun()),
+            ReturnFun(ok)
+    end.
 
 -endif.
 

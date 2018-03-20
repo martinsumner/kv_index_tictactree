@@ -40,6 +40,7 @@
             store_fold/4]).
 
 -export([define_objectspec/5,
+            dedup_objspeclist/1,
             generate_value/4,
             value_preflist/1,
             value_clock/1,
@@ -334,6 +335,13 @@ define_objectspec(Op, SegmentID, Bucket, Key, Value) ->
         term_to_binary({Bucket, Key}), 
         null, 
         Value}.
+
+-spec dedup_objspeclist(list(tuple())) -> list(tuple()).
+%% @doc
+%% De-duplicate an object spec list, by sorting on the Bucket/Key element, 
+%% assuming the most recent result is at the HEAD
+dedup_objspeclist(ObjSpecL) ->
+    lists:ukeysort(3, ObjSpecL).
 
 -spec generate_value(tuple(), aae_controller:version_vector(), integer(), 
                         {integer(), integer(), integer(), any()}) -> tuple().

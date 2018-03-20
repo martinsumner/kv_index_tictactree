@@ -15,7 +15,8 @@
             code_change/3]).
 
 -export([runner_start/0, 
-            runner_clockfold/3]).
+            runner_clockfold/3,
+            runner_stop/1]).
 
 -record(state, {result_size = 0 :: integer(),
                 query_count = 0 :: integer(),
@@ -37,6 +38,10 @@ runner_start() ->
 %% Pass some work to a runner
 runner_clockfold(Runner, Folder, ReturnFun) ->
     gen_server:cast(Runner, {work, Folder, ReturnFun}).
+%% @doc
+%% Close the runner
+runner_stop(Runner) ->
+    gen_server:call(Runner, close).
 
 %%%============================================================================
 %%% gen_server callbacks
@@ -45,8 +50,8 @@ runner_clockfold(Runner, Folder, ReturnFun) ->
 init([]) ->
     {ok, #state{}}.
 
-handle_call(_Msg, _From, State) ->
-    {reply, not_implemented, State}.
+handle_call(close, _From, State) ->
+    {stop, normal, ok, State}.
 
 handle_cast({work, Folder, ReturnFun}, State) ->
     SW = os:timestamp(),

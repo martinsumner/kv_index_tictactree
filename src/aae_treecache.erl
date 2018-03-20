@@ -458,7 +458,6 @@ test_setup_funs(InitialKeys) ->
         fun(CachePid) -> 
             fun({K, H}) ->
                 {K, OH} = lists:keyfind(K, 1, InitialKeys),
-                io:format("Alter ~w to ~w for ~w~n", [OH, H, K]),
                 cache_alter(CachePid, K, H, OH)
             end
         end,
