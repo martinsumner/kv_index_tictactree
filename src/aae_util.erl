@@ -105,7 +105,7 @@ get_opt(Key, Opts, Default) ->
 get_logreference(LogRef, LogBase) ->
     case lists:keyfind(LogRef, 1, LogBase) of
         false ->
-            case lists:keyfind(LogRef, 1, LogBase) of
+            case lists:keyfind(LogRef, 1, ?DEFAULT_LOGBASE) of
                 false ->
                     ?UNDEFINED_LOG;
                 Log ->
@@ -202,17 +202,27 @@ clean_subdir(DirPath) ->
 
 log_test() ->
     log("D0001", [], []),
-    log_timer("D0001", [], os:timestamp(), []).
+    log_timer("G0001", [], os:timestamp(), []).
 
 log_warn_test() ->
     ok = log("G0001", [], [], [warn, error]),
     ok = log("G8888", [], [], [info, warn, error]),
-    ok = log_timer("G0001", [], os:timestamp(), [], [warn, error]),
-    ok = log_timer("G8888", [], os:timestamp(), [], [info, warn, error]).
+    SW = os:timestamp(),
+    ok = log_timer("G0001", [], SW, [], [warn, error]),
+    ok = log_timer("G8888", [], SW, [], [info, warn, error]),
+    timer:sleep(2),
+    ok = log_timer("G0001", [], SW, [], [info, warn, error]).
 
 flipbyte_test() ->
-    Bin = <<0:256/integer>>,
-    Bin0 = flip_byte(Bin, 0, 32),
-    ?assertMatch(false, Bin == Bin0).
+    Bin0 = <<0:256/integer>>,
+    BinFB0 = flip_byte(Bin0, 0, 32),
+    ?assertMatch(false, BinFB0 == Bin0),
+    Bin1 = <<4294967295:32/integer>>,
+    BinFB1 = flip_byte(Bin1, 1, 1),
+    ?assertMatch(false, BinFB1 == Bin1).
+
+clen_empty_subdir_test() ->
+    FakePath = "test/foobar99",
+    ok = clean_subdir(FakePath).
 
 -endif.

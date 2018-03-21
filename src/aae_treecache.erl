@@ -236,7 +236,7 @@ open_from_disk(RootPath) ->
             case filename:extension(FN) of 
                 ?PENDING_EXT ->
                     aae_util:log("C0001", [FN], logs()),
-                    ok = file:delete(FN),
+                    ok = file:delete(filename:join(RootPath, FN)),
                     FinalFiles;
                 ?FINAL_EXT ->
                     BaseFN = 
@@ -310,7 +310,7 @@ binary_extractfun(Key, {CurrentHash, OldHash}) ->
 %% @doc
 %% Define log lines for this module
 logs() ->
-    [{"C0001", {info, "Pending filename ~w found and will delete"}},
+    [{"C0001", {info, "Pending filename ~s found and will delete"}},
         {"C0002", {warn, "CRC wonky in file ~w"}},
         {"C0003", {info, "Saving tree cache to path ~s and filename ~s"}},
         {"C0004", {info, "Destroying tree cache for partition ~w"}}].
@@ -321,24 +321,60 @@ logs() ->
 
 -ifdef(TEST).
 
-clean_saveopen_test() ->
-    RootPath = "test/cache0/",
-    aae_util:clean_subdir(RootPath),
+setup_savedcaches(RootPath) ->
     Tree0 = leveled_tictac:new_tree(test),
-    Tree1 = 
-        leveled_tictac:add_kv(Tree0, 
-                                <<"K1">>, <<"V1">>, 
-                                fun(K, V) -> {K, V} end),
-    Tree2 = 
-        leveled_tictac:add_kv(Tree1, 
-                                <<"K2">>, <<"V2">>, 
-                                fun(K, V) -> {K, V} end),
+    Tree1 = leveled_tictac:add_kv(Tree0, 
+                                    <<"K1">>, <<"V1">>, 
+                                    fun(K, V) -> {K, V} end),
+    Tree2 = leveled_tictac:add_kv(Tree1, 
+                                    <<"K2">>, <<"V2">>, 
+                                    fun(K, V) -> {K, V} end),
     ok = save_to_disk(RootPath, 1, Tree1),
     ok = save_to_disk(RootPath, 2, Tree2),
+    Tree2.
+
+clean_saveopen_test() ->
+    % Check that pending files ar eignored, and that the highest SQN that is
+    % not pending is the one opened
+    RootPath = "test/cache0/",
+    aae_util:clean_subdir(RootPath),
+    Tree2 = setup_savedcaches(RootPath),
+    NextFN = filename:join(RootPath, integer_to_list(3) ++ ?PENDING_EXT),
+    ok = file:write_file(NextFN, <<"delete">>),
+    UnrelatedFN = filename:join(RootPath, "alt.file"),
+    ok = file:write_file(UnrelatedFN, <<"no_delete">>),
+
     {Tree3, SaveSQN} = open_from_disk(RootPath),
     ?assertMatch(3, SaveSQN),
     ?assertMatch([], leveled_tictac:find_dirtyleaves(Tree2, Tree3)),
-    ?assertMatch({none, 1}, open_from_disk(RootPath)).
+    ?assertMatch({none, 1}, open_from_disk(RootPath)),
+    
+    ?assertMatch({ok, <<"no_delete">>}, file:read_file(UnrelatedFN)),
+    ?assertMatch({error, enoent}, file:read_file(NextFN)),
+    aae_util:clean_subdir(RootPath).
+
+corrupt_save_test() ->
+    % If any byte is corrupted on disk - then the result should be a failure 
+    % to open and the TreeCache reverting to empty
+    RootPath = "test/cachecs/",
+    aae_util:clean_subdir(RootPath),
+    _Tree2 = setup_savedcaches(RootPath),
+    BestFN = form_cache_filename(RootPath, 2),
+    {ok, LatestCache} = file:read_file(BestFN),
+    FlipByteFun =
+        fun(Offset) ->
+            aae_util:flip_byte(LatestCache, 1, Offset)
+        end,
+    BrokenCaches = 
+        lists:map(FlipByteFun, lists:seq(1, byte_size(LatestCache) - 1)),
+    BrokenCacheCheckFun =
+        fun(BrokenCache) ->
+            ok = file:write_file(BestFN, BrokenCache),
+            R = open_from_disk(RootPath),
+            ?assertMatch({none, 1}, R)
+        end,
+    ok = lists:foreach(BrokenCacheCheckFun, BrokenCaches),
+    aae_util:clean_subdir(RootPath).
 
 
 simple_test() ->
@@ -444,6 +480,11 @@ replace_test() ->
 
 
     ok = cache_destroy(AAECache0).
+
+
+coverage_cheat_test() ->
+    {noreply, _State0} = handle_info(timeout, #state{}),
+    {ok, _State1} = code_change(null, #state{}, null).
 
 
 

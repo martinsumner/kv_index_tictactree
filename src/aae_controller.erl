@@ -252,9 +252,7 @@ init([Opts]) ->
             {IsRestored, Cache} = 
                 case ExpectEmpty of 
                     true ->
-                        {ok, NewCache} = 
-                            cache(new, IndexN, RootPath),
-                        {true, NewCache};
+                        cache(new, IndexN, RootPath);
                     false ->
                         cache(open, IndexN, RootPath)
                 end,
@@ -309,8 +307,9 @@ handle_call({rebuild_treecaches, IndexNs, parallel_keystore, WorkerFun},
                         TreeCache0;
                     false ->
                         aae_util:log("AAE09", [IndexN], logs()),
-                        cache(new, IndexN, State#state.root_path)
-            end,
+                        {true, NC} = cache(new, IndexN, State#state.root_path),
+                        NC
+                end,
             ok = aae_treecache:cache_startload(TreeCache1),
             [{IndexN, TreeCache1}|TreeCachesAcc]
         end,
@@ -321,14 +320,8 @@ handle_call({rebuild_treecaches, IndexNs, parallel_keystore, WorkerFun},
     % cache in turn
     FinishTreeFun =
         fun({FoldIndexN, FoldTree}) ->
-            case lists:keyfind(FoldIndexN, 1, TreeCaches) of 
-                {FoldIndexN, TreeCache} ->
-                    aae_treecache:cache_completeload(TreeCache, FoldTree);
-                false ->
-                    % Maybe an n-val was added, then since the n-val 
-                    % was changed
-                    aae_util:log("AAE05", [FoldIndexN], logs())
-            end 
+            {FoldIndexN, TreeCache} = lists:keyfind(FoldIndexN, 1, TreeCaches),
+            aae_treecache:cache_completeload(TreeCache, FoldTree) 
         end,
     FinishFun = 
         fun(FoldTreeCaches) ->
@@ -505,16 +498,19 @@ foldobjects_buildtrees(IndexNs, IndexNFun, ExtractHashFun) ->
 flush_puts(Store, ObjSpecL) ->
     aae_keystore:store_mput(Store, aae_keystore:dedup_objspeclist(ObjSpecL)).
 
--spec cache(new|open, responsible_preflist(), list()) -> {ok, pid()}.
+-spec cache(new|open, responsible_preflist(), list()) -> {boolean(), pid()}.
 %% @doc
-%% Start a new tree cache
+%% Start a new tree cache, return a boolean along with the Pid to indicate 
+%% if the opening of the cache was clean (i.e. the cache had been saved and 
+%% checksummed correctly when last saved)
 cache(Startup, IndexN, RootPath) ->
     TreeRP = filename:join(RootPath, ?TREE_PATH),
     {Index, N} = IndexN,
     PartitionID = Index + N,
     case Startup of 
         new ->
-            aae_treecache:cache_new(TreeRP, PartitionID);
+            {ok, NC} = aae_treecache:cache_new(TreeRP, PartitionID),
+            {true, NC};
         open ->
             aae_treecache:cache_open(TreeRP, PartitionID)
     end.
@@ -604,8 +600,8 @@ logs() ->
                     "that does not match any of ~w"}},
         {"AAE04",
             {warn, "Misrouted request for IndexN ~w"}},
-        {"AAE05",
-            {info, "New IndexN ~w found in cache rebuild"}},
+        
+
         {"AAE06",
             {info, "Received rebuild request for IndexNs ~w"}},
         {"AAE07",
@@ -740,17 +736,8 @@ wrong_indexn_test() ->
     ok = aae_close(Cntrl0, "0000"),
     aae_util:clean_subdir(RootPath).
 
-start_wrap(StartupI, RootPath) ->
-    start_wrap(StartupI, RootPath, [{0, 3}]).
 
-start_wrap(StartupI, RootPath, RPL) ->
-    F = fun(_X) -> {0, 1, 0, null} end,
-    aae_start({parallel, leveled}, StartupI, {1, 300}, RPL, RootPath, F).
-
-basic_cache_rebuild_test_() ->
-    {timeout, 60, fun basic_cache_rebuild_tester/0}.
-
-basic_cache_rebuild_tester() ->
+basic_cache_rebuild_test() ->
     RootPath = "test/emptycntrllr/",
     aae_util:clean_subdir(RootPath),
 
@@ -792,6 +779,7 @@ basic_cache_rebuild_tester() ->
 
     SegIDL = leveled_tictac:find_dirtysegments(Root0, RB_Root0),
     io:format("Count of dirty segments in IndexN 0 ~w~n", [length(SegIDL)]),
+    ?assertMatch(0, length(SegIDL)),
 
     ?assertMatch(Root0, RB_Root0),
     ?assertMatch(Root1, RB_Root1),
@@ -799,6 +787,114 @@ basic_cache_rebuild_tester() ->
     
     ok = aae_close(Cntrl0, "0000"),
     aae_util:clean_subdir(RootPath).
+
+
+varyindexn_cache_rebuild_test() ->
+    RootPath = "test/emptycntrllr/",
+    aae_util:clean_subdir(RootPath),
+
+    RPid = self(),
+    ReturnFun = fun(R) -> RPid ! {result, R} end,
+
+    Preflists = [{0, 3}, {100, 3}, {200, 3}],
+    {ok, Cntrl0} = 
+        start_wrap({true, none}, RootPath, Preflists),
+    NRB0 = aae_controller:aae_nextrebuild(Cntrl0),
+    ?assertMatch(false, NRB0 < os:timestamp()),
+
+    % Note now adding a preflist to the keys being loaded.
+    % There housl be no tree cache for these keys, but they should be added
+    % to the Key store
+    UpdPreflists = [{300, 3}|Preflists],
+    PKL = put_keys(Cntrl0, UpdPreflists, [], 5000),
+    {RepL, Rest0} = lists:split(1000, PKL),
+    {RemL, Rest1} = lists:split(1000, Rest0),
+    RKL = replace_keys(Cntrl0, RepL, []),
+    ok = remove_keys(Cntrl0, RemL),
+    _KVL = lists:sort(RKL ++ Rest1),
+
+    ok = aae_fetchroot(Cntrl0, [{0, 3}], ReturnFun),
+    [{{0,3}, Root0}] = start_receiver(),
+    ok = aae_fetchroot(Cntrl0, [{100, 3}], ReturnFun),
+    [{{100,3}, Root1}] = start_receiver(),
+    ok = aae_fetchroot(Cntrl0, [{200, 3}], ReturnFun),
+    [{{200,3}, Root2}] = start_receiver(),
+    ok = aae_fetchroot(Cntrl0, [{300, 3}], ReturnFun),
+    [{{300,3}, Root3}] = start_receiver(),
+    ?assertMatch(false, Root3),
+
+    ok = aae_rebuildcaches(Cntrl0, 
+                            UpdPreflists, 
+                            parallel_keystore, 
+                            workerfun(ReturnFun)),
+    ok = start_receiver(),
+
+    ok = aae_fetchroot(Cntrl0, [{0, 3}], ReturnFun),
+    [{{0,3}, RB1_Root0}] = start_receiver(),
+    ok = aae_fetchroot(Cntrl0, [{100, 3}], ReturnFun),
+    [{{100,3}, RB1_Root1}] = start_receiver(),
+    ok = aae_fetchroot(Cntrl0, [{200, 3}], ReturnFun),
+    [{{200,3}, RB1_Root2}] = start_receiver(),
+    ok = aae_fetchroot(Cntrl0, [{300, 3}], ReturnFun),
+    [{{300,3}, RB1_Root3}] = start_receiver(),
+    
+    ?assertMatch(true, is_binary(RB1_Root3)),
+
+    SegIDL = leveled_tictac:find_dirtysegments(Root0, RB1_Root0),
+    io:format("Count of dirty segments in IndexN 0 ~w~n", [length(SegIDL)]),
+    ?assertMatch(0, length(SegIDL)),
+
+    ?assertMatch(Root0, RB1_Root0),
+    ?assertMatch(Root1, RB1_Root1),
+    ?assertMatch(Root2, RB1_Root2),
+
+    ok = aae_rebuildcaches(Cntrl0, 
+                            Preflists, 
+                            parallel_keystore, 
+                            workerfun(ReturnFun)),
+    ok = start_receiver(),
+
+    ok = aae_fetchroot(Cntrl0, [{0, 3}], ReturnFun),
+    [{{0,3}, RB2_Root0}] = start_receiver(),
+    ok = aae_fetchroot(Cntrl0, [{100, 3}], ReturnFun),
+    [{{100,3}, RB2_Root1}] = start_receiver(),
+    ok = aae_fetchroot(Cntrl0, [{200, 3}], ReturnFun),
+    [{{200,3}, RB2_Root2}] = start_receiver(),
+    ok = aae_fetchroot(Cntrl0, [{300, 3}], ReturnFun),
+    [{{300,3}, RB2_Root3}] = start_receiver(),
+    ?assertMatch(false, RB2_Root3),
+
+    SegIDL = leveled_tictac:find_dirtysegments(Root0, RB1_Root0),
+    io:format("Count of dirty segments in IndexN 0 ~w~n", [length(SegIDL)]),
+    ?assertMatch(0, length(SegIDL)),
+
+    ?assertMatch(Root0, RB2_Root0),
+    ?assertMatch(Root1, RB2_Root1),
+    ?assertMatch(Root2, RB2_Root2),
+    
+    ok = aae_fetchbranches(Cntrl0, [{300, 3}], [1], ReturnFun),
+    [{{300, 3}, RB2_Branch3}] = start_receiver(),
+    ?assertMatch(false, RB2_Branch3),
+
+    ok = aae_close(Cntrl0, "0000"),
+    aae_util:clean_subdir(RootPath).
+
+coverage_cheat_test() ->
+    {noreply, _State0} = handle_info(timeout, #state{}),
+    {ok, _State1} = code_change(null, #state{}, null).
+
+
+
+%%%============================================================================
+%%% Test Utils
+%%%============================================================================
+
+start_wrap(StartupI, RootPath) ->
+    start_wrap(StartupI, RootPath, [{0, 3}]).
+
+start_wrap(StartupI, RootPath, RPL) ->
+    F = fun(_X) -> {0, 1, 0, null} end,
+    aae_start({parallel, leveled}, StartupI, {1, 300}, RPL, RootPath, F).
 
 
 put_keys(_Cntrl, _Preflists, KeyList, 0) ->
@@ -820,7 +916,6 @@ put_keys(Cntrl, Preflists, KeyList, Count) ->
                 [{Bucket, Key, VersionVector, Preflist}|KeyList], 
                 Count - 1).
     
-
 replace_keys(_Cntrl, [], OutList) ->
     OutList;
 replace_keys(Cntrl, [{B, K, C, PL}|Rest], OutList) ->

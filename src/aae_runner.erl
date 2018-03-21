@@ -18,6 +18,8 @@
             runner_clockfold/3,
             runner_stop/1]).
 
+-include_lib("eunit/include/eunit.hrl").
+
 -record(state, {result_size = 0 :: integer(),
                 query_count = 0 :: integer(),
                 query_time  = 0 :: integer()}).
@@ -114,6 +116,13 @@ logs() ->
 %%%============================================================================
 
 -ifdef(TEST).
+
+
+coverage_cheat_test() ->
+    {noreply, _State0} = handle_info(timeout, #state{}),
+    {ok, _State1} = code_change(null, #state{}, null).
+
+
 
 -endif.
 

@@ -248,21 +248,24 @@ native(_Msg, _From, State) ->
 
 loading({mput, ObjectSpecs}, State) ->
     ok = do_load(State#state.store_type, State#state.store, ObjectSpecs),
+    ChangeQueue1 = [ObjectSpecs|State#state.change_queue],
     ObjectCount0 = State#state.change_queue_counter,
     ObjectCount1 = State#state.change_queue_counter + length(ObjectSpecs),
     ToLog = 
         ObjectCount1 div ?CHANGEQ_LOGFREQ > ObjectCount0 div ?CHANGEQ_LOGFREQ,
     case ToLog of 
         true ->
-            aae_util:log("KS001", [State#state.id, ObjectCount1], logs());
+            aae_util:log("KS001", [State#state.id, ObjectCount1], logs()),
+            {next_state, 
+                loading, 
+                State#state{change_queue_counter = ObjectCount1, 
+                            change_queue = ChangeQueue1}};
         false ->
-            ok
-    end,
-    ChangeQueue1 = [ObjectSpecs|State#state.change_queue],
-    {next_state, 
-        loading, 
-            State#state{change_queue_counter = ObjectCount1, 
-                        change_queue = ChangeQueue1}};
+            {next_state, 
+                loading, 
+                State#state{change_queue_counter = ObjectCount0, 
+                            change_queue = ChangeQueue1}}
+    end;
 loading({mload, ObjectSpecs}, State) ->
     ok = do_load(State#state.store_type, State#state.load_store, ObjectSpecs),
     {next_state, loading, State};
@@ -390,18 +393,7 @@ value_indexhash({1, ValueItems}) ->
 %% @doc
 %% Check to see if the store is empty
 is_empty(leveled, Store) ->
-    FoldBucketsFun = fun(B, Acc) -> sets:add_element(B, Acc) end,
-    ListBucketQ = {binary_bucketlist,
-                    ?HEAD_TAG,
-                    {FoldBucketsFun, sets:new()}},
-    {async, Folder} = leveled_bookie:book_returnfolder(Store, ListBucketQ),
-    BSet = Folder(),
-    case sets:size(BSet) of
-        0 ->
-            true;
-        _ ->
-            false
-    end.
+    leveled_bookie:book_isempty(Store, ?HEAD_TAG).
 
 -spec close_store(supported_stores(), pid()) -> ok.
 %% @doc
@@ -638,7 +630,7 @@ load_test() ->
 
     GenerateKeyFun = aae_util:test_key_generator(v1),
 
-    InitialKeys = lists:map(GenerateKeyFun, lists:seq(1,100)),
+    InitialKeys = lists:map(GenerateKeyFun, lists:seq(1, 100)),
     AlternateKeys = lists:map(GenerateKeyFun, lists:seq(61, 80)),
     RemoveKeys = lists:map(GenerateKeyFun, lists:seq(81, 100)),
 
@@ -748,6 +740,61 @@ load_test() ->
     ok = store_close(Store1, none),
     aae_util:clean_subdir(RootPath).
 
+
+split_lists(L, SplitSize, Acc) when length(L) =< SplitSize ->
+    [L|Acc];
+split_lists(L, SplitSize, Acc) ->
+    {LL, RL} = lists:split(SplitSize, L),
+    split_lists(RL, SplitSize, [LL|Acc]).
+
+
+big_load_test_() ->
+    {timeout, 60, fun big_load_tester/0}.
+
+big_load_tester() ->
+    RootPath = "test/keystore3/",
+    KeyCount = 2 * ?CHANGEQ_LOGFREQ,
+    ok = filelib:ensure_dir(RootPath),
+    aae_util:clean_subdir(RootPath),
+
+    GenerateKeyFun = aae_util:test_key_generator(v1),
+
+    InitialKeys = 
+        lists:map(GenerateKeyFun, lists:seq(1, KeyCount)),
+    InitObjectSpecs = generate_objectspecs(add, <<"B1">>, InitialKeys),
+    
+    SubLists = split_lists(InitObjectSpecs, 32, []),
+
+    {ok, {never, none, true}, Store0} 
+        = store_parallelstart(RootPath, leveled),
+    ok = lists:foreach(fun(L) -> store_mput(Store0, L) end, SubLists),
+
+    FoldObjectsFun =
+        fun(_B, _K, _V, Acc) ->
+            Acc + 1
+        end,
+    {async, Folder0} = store_fold(Store0, all, FoldObjectsFun, 0),
+    ?assertMatch(KeyCount, Folder0()),
+
+    ok = store_prompt(Store0, rebuild_start),
+    ok = lists:foreach(fun(L) -> store_mload(Store0, L) end, SubLists),
+
+    ok = store_close(Store0, ShutdownGUID = leveled_codec:generate_uuid()),
+
+    {ok, {never, ShutdownGUID, false}, Store1} 
+        = store_parallelstart(RootPath, leveled),
+    
+    AdditionalKeys = 
+        lists:map(GenerateKeyFun, lists:seq(KeyCount + 1, KeyCount + 10)),
+    AdditionalObjectSpecs = 
+        generate_objectspecs(add, <<"B1">>, AdditionalKeys),
+    ok = store_mput(Store1, AdditionalObjectSpecs),
+
+    {async, Folder1} = store_fold(Store1, all, FoldObjectsFun, 0),
+    ?assertMatch(KeyCount, Folder1() - 10),
+    
+    ok = store_close(Store1, none),
+    aae_util:clean_subdir(RootPath).
 
 
 
