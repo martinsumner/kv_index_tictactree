@@ -340,7 +340,7 @@ handle_call({rebuild_treecaches, IndexNs, parallel_keystore, WorkerFun},
 handle_cast({put, IndexN, Bucket, Key, Clock, PrevClock, BinaryObj}, State) ->
     % Setup
     TreeCaches = State#state.tree_caches,
-    BinaryKey = make_binarykey(Bucket, Key),
+    BinaryKey = aae_util:make_binarykey(Bucket, Key),
     {CH, OH} = hash_clocks(Clock, PrevClock),
 
     
@@ -369,7 +369,7 @@ handle_cast({put, IndexN, Bucket, Key, Clock, PrevClock, BinaryObj}, State) ->
     % then the unexpected key will be included in the cache
     case State#state.parallel_keystore of 
         true ->
-            SegmentID = leveled_tictac:keyto_segment32(BinaryKey),
+            SegmentID = leveled_tictac:keyto_segment48(BinaryKey),
             ObjSpec =  generate_objectspec(Bucket, Key, SegmentID, IndexN,
                                             BinaryObj, 
                                             Clock, CH, 
@@ -468,7 +468,7 @@ foldobjects_buildtrees(IndexNs, IndexNFun, ExtractHashFun) ->
     FoldObjectsFun = 
         fun(B, K, V, Acc) ->
             IndexN = IndexNFun(B, K, V),
-            BinK = make_binarykey(B, K),
+            BinK = aae_util:make_binarykey(B, K),
             BinExtractFun = 
                 fun(_BK, _V) -> 
                     Hash = ExtractHashFun(V),
@@ -496,7 +496,7 @@ foldobjects_buildtrees(IndexNs, IndexNFun, ExtractHashFun) ->
 %% Flush all the puts into the store.  The Puts have been queued with the most
 %% recent PUT at the head.  
 flush_puts(Store, ObjSpecL) ->
-    aae_keystore:store_mput(Store, aae_keystore:dedup_objspeclist(ObjSpecL)).
+    aae_keystore:store_mput(Store, ObjSpecL).
 
 -spec cache(new|open, responsible_preflist(), list()) -> {boolean(), pid()}.
 %% @doc
@@ -530,7 +530,7 @@ schedule_rebuild({MegaSecs, Secs, MicroSecs}, {MinHours, JitterSeconds}) ->
     {NewSecs div ?MEGA, NewSecs rem ?MEGA, MicroSecs}.
 
 
--spec generate_objectspec(binary(), binary(), integer(), tuple(),
+-spec generate_objectspec(binary(), binary(), {integer(), integer()}, tuple(),
                             binary(), version_vector(), integer()|none, 
                             fun()) -> tuple().
 %% @doc                            
@@ -538,20 +538,18 @@ schedule_rebuild({MegaSecs, Secs, MicroSecs}, {MinHours, JitterSeconds}) ->
 generate_objectspec(Bucket, Key, SegmentID, _IndexN,
                         _BinaryObj, none, _CurrentHash, 
                         _SplitFun) ->
-    aae_keystore:define_objectspec(remove, 
-                                    SegmentID, Bucket, Key, 
-                                    null);
+    SegTree_int = aae_keystore:generate_treesegment(SegmentID),
+    aae_keystore:define_objectspec(remove, SegTree_int, Bucket, Key, null);
 generate_objectspec(Bucket, Key, SegmentID, IndexN,
                         BinaryObj, CurrentVV, CurrentHash, 
                         SplitFun) ->
+    SegTree_int = aae_keystore:generate_treesegment(SegmentID),
     KSV = aae_keystore:generate_value(IndexN, 
+                                        SegTree_int,
                                         CurrentVV, 
                                         CurrentHash, 
                                         SplitFun(BinaryObj)),
-    aae_keystore:define_objectspec(add, 
-                                    SegmentID, 
-                                    Bucket, Key, 
-                                    KSV).
+    aae_keystore:define_objectspec(add, SegTree_int, Bucket, Key, KSV).
 
 
 -spec handle_unexpected_key(binary(), binary(), tuple(), list(tuple())) -> ok.
@@ -560,12 +558,6 @@ generate_objectspec(Bucket, Key, SegmentID, IndexN,
 handle_unexpected_key(Bucket, Key, IndexN, TreeCaches) ->
     RespPreflists = lists:map(fun({RP, _TC}) ->  RP end, TreeCaches),
     aae_util:log("AAE03", [Bucket, Key, IndexN, RespPreflists], logs()).
-
--spec make_binarykey(binary(), binary()) -> binary().
-%% @doc
-%% Convert Bucket and Key into a single binary 
-make_binarykey(Bucket, Key) ->
-    term_to_binary({Bucket, Key}).
 
 -spec hash_clocks(version_vector(), version_vector()) 
                                                     -> {integer(), integer()}.
@@ -717,8 +709,9 @@ wrong_indexn_test() ->
     ?assertMatch(1, length(SegIDL)),
     [SubSegID] = SegIDL,
     SegID = 256 * BranchID + SubSegID,
+    {BB, KB} = {<<"B">>, <<"K">>},
     ExpSegID = 
-        leveled_tictac:keyto_segment32(term_to_binary({<<"B">>, <<"K">>}))
+        leveled_tictac:keyto_segment32(<<BB/binary, KB/binary>>)
             band (1024 * 1024 - 1),
     ?assertMatch(ExpSegID, SegID),
     io:format("SegID ~w ExpSegID ~w~n", [SegID, ExpSegID]),
@@ -894,7 +887,7 @@ start_wrap(StartupI, RootPath) ->
 
 start_wrap(StartupI, RootPath, RPL) ->
     F = fun(_X) -> {0, 1, 0, null} end,
-    aae_start({parallel, leveled}, StartupI, {1, 300}, RPL, RootPath, F).
+    aae_start({parallel, leveled_so}, StartupI, {1, 300}, RPL, RootPath, F).
 
 
 put_keys(_Cntrl, _Preflists, KeyList, 0) ->

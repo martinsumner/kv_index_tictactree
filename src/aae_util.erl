@@ -5,12 +5,15 @@
 
 -module(aae_util).
 
+-include("include/aae.hrl").
+
 -include_lib("eunit/include/eunit.hrl").
 
 -export([log/3,
             log_timer/4,
             get_opt/2,
-            get_opt/3]).
+            get_opt/3,
+            make_binarykey/2]).
 
 -export([clean_subdir/1,
             test_key_generator/1,
@@ -98,6 +101,14 @@ get_opt(Key, Opts, Default) ->
             Value
     end.
 
+
+-spec make_binarykey(binary(), binary()) -> binary().
+%% @doc
+%% Convert Bucket and Key into a single binary 
+make_binarykey(Bucket, Key) ->
+    <<Bucket/binary, Key/binary>>.
+
+
 %%%============================================================================
 %%% Internal functions
 %%%============================================================================
@@ -170,12 +181,6 @@ internal_generator(ValueFun) ->
         {Key, Value}
     end.
 
-get_segmentid(Bucket, Key) ->
-    <<SegmentID:20/integer, _Rest/bitstring>> = 
-        crypto:hash(md5, <<Bucket/binary, Key/binary>>),
-    SegmentID.
-
-
 clean_subdir(DirPath) ->
     case filelib:is_dir(DirPath) of
         true ->
@@ -199,6 +204,10 @@ clean_subdir(DirPath) ->
     end.
 
 -ifdef(TEST).
+
+get_segmentid(B, K) ->
+    Seg32 = leveled_tictac:keyto_segment32(make_binarykey(B, K)),
+    leveled_tictac:get_segment(Seg32, ?TREE_SIZE).
 
 log_test() ->
     log("D0001", [], []),

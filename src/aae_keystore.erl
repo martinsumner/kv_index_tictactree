@@ -33,6 +33,7 @@
             native/3]).
 
 -export([store_parallelstart/2,
+            store_startupdata/1,
             store_close/2,
             store_mput/2,
             store_mload/2,
@@ -40,14 +41,15 @@
             store_fold/4]).
 
 -export([define_objectspec/5,
-            dedup_objspeclist/1,
-            generate_value/4,
+            generate_value/5,
+            generate_treesegment/1,
             value_preflist/1,
             value_clock/1,
             value_hash/1,
             value_size/1,
             value_sibcount/1,
-            value_indexhash/1]).
+            value_indexhash/1,
+            value_aaesegment/1]).
 
 -record(state, {vnode :: pid(),
                 store :: pid(),
@@ -69,12 +71,17 @@
                     last_rebuild = never :: erlang:timestamp()|never, 
                     shutdown_guid = none :: list()|none}).
 
+-record(objectspec, {op :: add|remove,
+                        segment_id :: integer(),
+                        bucket :: binary(),
+                        key :: binary(),
+                        value = null :: tuple()|null}).
+
 -include_lib("eunit/include/eunit.hrl").
 
 -define(LEVELED_BACKEND_OPTS, [{max_pencillercachesize, 16000},
-                                {sync_strategy, none},
-                                {head_only, no_lookup},
-                                {max_journalsize, 1000000}]).
+                                    {sync_strategy, none},
+                                    {max_journalsize, 1000000}]).
 -define(CHANGEQ_LOGFREQ, 10000).
 -define(HEAD_TAG, h). 
     % Used in leveled as a Tag for head-only objects
@@ -87,10 +94,11 @@
     % file extension to be used once manifest write is pending
 -define(VALUE_VERSION, 1).
 
--type supported_stores() :: leveled. 
+-type supported_stores() :: leveled_so|leveled_ko. 
     % Stores supported for parallel running
 -type manifest() :: #manifest{}.
     % Saves state of what store is currently active
+-type objectspec() :: #objectspec{}.
 
 %%%============================================================================
 %%% API
@@ -100,15 +108,30 @@
                 {ok, {os:timestamp()|never, list()|none, boolean()}, pid()}.
 %% @doc
 %% Start a store to be run in parallel mode
-store_parallelstart(Path, leveled) ->
+store_parallelstart(Path, leveled_so) ->
     Opts = 
         [{root_path, Path}, 
-            {native, {false, leveled}}, 
+            {native, {false, leveled_so}}, 
             {backend_opts, ?LEVELED_BACKEND_OPTS}],
     {ok, Pid} = gen_fsm:start(?MODULE, [Opts], []),
+    store_startupdata(Pid);
+store_parallelstart(Path, leveled_ko) ->
+    Opts = 
+        [{root_path, Path}, 
+            {native, {false, leveled_ko}}, 
+            {backend_opts, ?LEVELED_BACKEND_OPTS}],
+    {ok, Pid} = gen_fsm:start(?MODULE, [Opts], []),
+    store_startupdata(Pid).
+
+-spec store_startupdata(pid()) ->
+                {ok, {os:timestamp()|never, list()|none, boolean()}, pid()}.
+%% @doc
+%% Get the startup metadata from the store
+store_startupdata(Pid) ->
     {LastRebuild, ShutdownGUID, IsEmpty} 
         = gen_fsm:sync_send_event(Pid, startup_metadata),
     {ok, {LastRebuild, ShutdownGUID, IsEmpty}, Pid}.
+
 
 -spec store_close(pid(), list()|none) -> ok.
 %% @doc
@@ -176,7 +199,7 @@ init([Opts]) ->
     case aae_util:get_opt(native, Opts) of 
         % true ->
         %    {stop, not_yet_implemented};
-        {false, leveled} ->
+        {false, StoreType} ->
             RootPath = aae_util:get_opt(root_path, Opts),
             Manifest0 =
                 case open_manifest(RootPath) of 
@@ -190,7 +213,7 @@ init([Opts]) ->
             Manifest1 = clear_pendingpath(Manifest0, RootPath),
                 
             BackendOpts0 = aae_util:get_opt(backend_opts, Opts),
-            {ok, Store} = open_store(leveled, 
+            {ok, Store} = open_store(StoreType, 
                                         BackendOpts0, 
                                         RootPath,
                                         Manifest1#manifest.current_guid),
@@ -212,7 +235,7 @@ init([Opts]) ->
             {ok, 
                 parallel, 
                 #state{store = Store, 
-                        store_type = leveled,
+                        store_type = StoreType,
                         root_path = RootPath,
                         current_guid = Manifest0#manifest.current_guid,
                         shutdown_guid = Manifest0#manifest.shutdown_guid,
@@ -297,7 +320,7 @@ parallel({mput, ObjectSpecs}, State) ->
     {next_state, parallel, State};
 parallel({prompt, rebuild_start}, State) ->
     GUID = leveled_codec:generate_uuid(),
-    {ok, Store} =  open_store(leveled, 
+    {ok, Store} =  open_store(State#state.store_type, 
                                 State#state.backend_opts, 
                                 State#state.root_path, 
                                 GUID),
@@ -335,30 +358,31 @@ code_change(_OldVsn, StateName, State, _Extra) ->
 
 -spec define_objectspec(add|remove, 
                         integer(), binary(), binary(), tuple()|null) 
-                                                                    -> tuple().
+                                                            -> objectspec().
 %% @doc
 %% Create an ObjectSpec for adding to the backend store
-define_objectspec(Op, SegmentID, Bucket, Key, Value) ->
-    SegmentID0 = leveled_tictac:get_segment(SegmentID, ?TREE_SIZE),
-    {Op, 
-        <<SegmentID0:24/integer>>, 
-        term_to_binary({Bucket, Key}), 
-        null, 
-        Value}.
+define_objectspec(Op, SegTree_int, Bucket, Key, Value) ->
+    #objectspec{op = Op, 
+                segment_id = SegTree_int,
+                bucket = Bucket, 
+                key = Key, 
+                value = Value}.
 
--spec dedup_objspeclist(list(tuple())) -> list(tuple()).
+
+-spec generate_treesegment({integer(), integer()}) -> integer().
 %% @doc
-%% De-duplicate an object spec list, by sorting on the Bucket/Key element, 
-%% assuming the most recent result is at the HEAD
-dedup_objspeclist(ObjSpecL) ->
-    lists:ukeysort(3, ObjSpecL).
+%% Get actual SegmentID for tree
+generate_treesegment(SegmentID) ->
+    Seg32_int = leveled_tictac:keyto_segment32(SegmentID),
+    leveled_tictac:get_segment(Seg32_int, ?TREE_SIZE).
 
--spec generate_value(tuple(), aae_controller:version_vector(), integer(), 
+-spec generate_value(tuple(), integer(), 
+                        aae_controller:version_vector(), integer(), 
                         {integer(), integer(), integer(), any()}) -> tuple().
 %% @doc
 %% Create a value based on the current active version number
 %% Currently the "head" is ignored.  This may eb changed to support other 
-%% coverage fold features in the future.  Other items:
+%% coverage fold features in the future.  Other items
 %% PreflistID - {Partition, NVal} - although this is largeish, compression 
 %% should minimise the disk footprint
 %% Clock - A Riak dotted version vector of {Actor, Seqn}
@@ -366,8 +390,10 @@ dedup_objspeclist(ObjSpecL) ->
 %% Size - The byte size of the binary Riak object (uncompressed)
 %% SibCount - the count of siblings for the object (on this vnode only)
 %% IndexHash - A Hash of all the index fields and terms for this object
-generate_value(PreflistID, Clock, Hash, {Size, SibCount, IndexHash, _Head}) ->
-    {?VALUE_VERSION, {PreflistID, Clock, Hash, Size, SibCount, IndexHash}}.
+generate_value(PreflistID, SegTS_int, Clock, Hash, 
+                                        {Size, SibCount, IndexHash, _Head}) ->
+    {?VALUE_VERSION, 
+        {PreflistID, Clock, Hash, Size, SibCount, IndexHash, SegTS_int}}.
 
 %% Some helper functions for accessing individual value elements by version, 
 %% intended to make it easier to uplift the version of the value format at a
@@ -391,6 +417,9 @@ value_sibcount({1, ValueItems}) ->
 value_indexhash({1, ValueItems}) ->
     element(6, ValueItems).
 
+value_aaesegment({1, ValueItems}) ->
+    element(7, ValueItems).
+
 
 %%%============================================================================
 %%% Store functions
@@ -399,36 +428,89 @@ value_indexhash({1, ValueItems}) ->
 -spec is_empty(supported_stores(), pid()) -> boolean().
 %% @doc
 %% Check to see if the store is empty
-is_empty(leveled, Store) ->
+is_empty(leveled_so, Store) ->
+    leveled_bookie:book_isempty(Store, ?HEAD_TAG);
+is_empty(leveled_ko, Store) ->
     leveled_bookie:book_isempty(Store, ?HEAD_TAG).
 
 -spec close_store(supported_stores(), pid()) -> ok.
 %% @doc
 %% Wait for store to close
-close_store(leveled, Store) ->
+close_store(leveled_so, Store) ->
+    leveled_bookie:book_close(Store);
+close_store(leveled_ko, Store) ->
     leveled_bookie:book_close(Store).
 
 -spec open_store(supported_stores(), list(), list(), list()) -> {ok, pid()}.
 %% @doc
 %% Open a parallel backend key store
-open_store(leveled, BackendOpts0, RootPath, GUID) ->
+open_store(leveled_so, BackendOpts0, RootPath, GUID) ->
+    BackendOpts1 = add_path_toopts(BackendOpts0, RootPath, GUID),
+    BackendOpts = [{head_only, no_lookup}|BackendOpts1],
+    leveled_bookie:book_start(BackendOpts);
+open_store(leveled_ko, BackendOpts0, RootPath, GUID) ->
+    BackendOpts1 = add_path_toopts(BackendOpts0, RootPath, GUID),
+    BackendOpts = [{head_only, with_lookup}|BackendOpts1],
+    leveled_bookie:book_start(BackendOpts).
+
+
+add_path_toopts(BackendOpts, RootPath, GUID) ->
     Path = filename:join(RootPath, GUID),
     ok = filelib:ensure_dir(Path),
-    BackendOpts = [{root_path, Path}|BackendOpts0],
-    leveled_bookie:book_start(BackendOpts).
+    [{root_path, Path}|BackendOpts].
+
 
 -spec delete_store(supported_stores(), pid()) -> ok.
 %% @doc
 %% delete the store - as it has been replaced by a rebuild
-delete_store(leveled, Store) ->
+delete_store(leveled_so, Store) ->
+    leveled_bookie:book_destroy(Store);
+delete_store(leveled_ko, Store) ->
     leveled_bookie:book_destroy(Store).
 
 -spec do_load(supported_stores(), pid(), list(tuple())) -> ok.
 %% @doc
 %% Load a batch of object specifications into the store
-do_load(leveled, Store, ObjectSpecs) ->
-    leveled_bookie:book_mput(Store, ObjectSpecs),
+do_load(leveled_so, Store, ObjectSpecs) ->
+    leveled_bookie:book_mput(Store, dedup_map(leveled_so, ObjectSpecs)),
+    ok;
+do_load(leveled_ko, Store, ObjectSpecs) ->
+    leveled_bookie:book_mput(Store, dedup_map(leveled_ko, ObjectSpecs)),
     ok.
+
+-spec dedup_map(supported_stores(), list(objectspec())) -> list(tuple()).
+%% @doc
+%% Map the spec records into tuples as required by the backend store type, 
+%% and dedup assuming the left-most record is the most recent Bucket/Key
+dedup_map(leveled_so, ObjectSpecs) ->
+    SegmentOrderedMapFun = 
+        fun(ObjSpec) ->
+            SegTS_int = ObjSpec#objectspec.segment_id,
+            {ObjSpec#objectspec.op, 
+                <<SegTS_int:24/integer>>, % needs to be binary not bitstring  
+                term_to_binary({ObjSpec#objectspec.bucket, 
+                                ObjSpec#objectspec.key}), 
+                null, 
+                ObjSpec#objectspec.value}
+        end,
+    lists:ukeysort(3, lists:map(SegmentOrderedMapFun, ObjectSpecs));
+dedup_map(leveled_ko, ObjectSpecs) ->
+    FoldFun =
+        fun(ObjSpec, {Acc, Members}) ->
+            B = ObjSpec#objectspec.bucket,
+            K = ObjSpec#objectspec.key,
+            case lists:member({B, K}, Members) of
+                true ->
+                    {Acc, Members};
+                false ->
+                    UpdSpec = {ObjSpec#objectspec.op, B, K, null, 
+                                ObjSpec#objectspec.value},
+                    {[UpdSpec|Acc], [{B, K}|Members]}
+            end
+        end,
+    {UpdSpecL, _MemberL} = lists:foldl(FoldFun, {[], []}, ObjectSpecs),
+    UpdSpecL.
+            
 
 -spec do_fold(supported_stores(), pid(), tuple()|all, fun(), any()) 
                                                             -> {async, fun()}.
@@ -442,52 +524,80 @@ do_load(leveled, Store, ObjectSpecs) ->
 %% been taken prior to the fold, and should not happen as part of the fold.
 %% There should be no refresh of the iterator, the snapshot should last the
 %% duration of the fold.
-do_fold(leveled, Store, {segments, SegList}, FoldObjectsFun, InitAcc) ->
+do_fold(leveled_so, Store, {segments, SegList}, FoldObjectsFun, InitAcc) ->
     Query = 
-        populate_query(leveled,
-                        SegList, 
-                        {fun(_S, BKBin, V, Acc) ->
-                                {B, K} = binary_to_term(BKBin),
-                                FoldObjectsFun(B, K, V, Acc)
-                            end,
-                            InitAcc}),
+        populate_so_query(SegList, 
+                            {fun(_S, BKBin, V, Acc) ->
+                                    {B, K} = binary_to_term(BKBin),
+                                    FoldObjectsFun(B, K, V, Acc)
+                                end,
+                                InitAcc}),
     leveled_bookie:book_returnfolder(Store, Query);
-do_fold(leveled, Store, {buckets, BucketList}, FoldObjectsFun, InitAcc) ->
-    Query = 
-        populate_query(leveled, 
-                        all, 
-                        {fun(_S, BKBin, V, Acc) ->
-                                {B, K} = binary_to_term(BKBin),
-                                case lists:member(B, BucketList) of 
-                                    true ->
-                                        FoldObjectsFun(B, K, V, Acc);
-                                    false ->
-                                        Acc
-                                end
-                            end,
-                            InitAcc}),
+do_fold(leveled_ko, Store, {segments, SegList}, FoldObjectsFun, InitAcc) ->
+    FoldFun = 
+        fun(B, K, V, Acc) ->
+            case lists:member(value_aaesegment(V), SegList) of 
+                true ->
+                    FoldObjectsFun(B, K, V, Acc);
+                false ->
+                    Acc 
+            end
+        end,
+    Query =
+        {foldheads_allkeys, 
+            ?HEAD_TAG,
+            {FoldFun, InitAcc},
+            false, true, SegList},
     leveled_bookie:book_returnfolder(Store, Query);
-do_fold(leveled, Store, all, FoldObjectsFun, InitAcc) ->
+do_fold(leveled_so, Store, {buckets, BucketList}, FoldObjectsFun, InitAcc) ->
     Query = 
-        populate_query(leveled,
-                        all,
-                        {fun(_S, BKBin, V, Acc) -> 
-                                {B, K} = binary_to_term(BKBin),
-                                FoldObjectsFun(B, K, V, Acc)
-                            end, 
-                            InitAcc}),
+        populate_so_query(all, 
+                            {fun(_S, BKBin, V, Acc) ->
+                                    {B, K} = binary_to_term(BKBin),
+                                    case lists:member(B, BucketList) of 
+                                        true ->
+                                            FoldObjectsFun(B, K, V, Acc);
+                                        false ->
+                                            Acc
+                                    end
+                                end,
+                                InitAcc}),
+    leveled_bookie:book_returnfolder(Store, Query);
+do_fold(leveled_ko, Store, {buckets, BucketList}, FoldObjectsFun, InitAcc) ->
+    Query = 
+        {foldheads_bybucket,
+            ?HEAD_TAG, 
+            BucketList, bucket_list,
+            {FoldObjectsFun, InitAcc},
+            false, true, false},
+    leveled_bookie:book_returnfolder(Store, Query);
+do_fold(leveled_so, Store, all, FoldObjectsFun, InitAcc) ->
+    Query = 
+        populate_so_query(all,
+                            {fun(_S, BKBin, V, Acc) -> 
+                                    {B, K} = binary_to_term(BKBin),
+                                    FoldObjectsFun(B, K, V, Acc)
+                                end, 
+                                InitAcc}),
+    leveled_bookie:book_returnfolder(Store, Query);
+do_fold(leveled_ko, Store, all, FoldObjectsFun, InitAcc) ->
+    Query =
+        {foldheads_allkeys, 
+            ?HEAD_TAG,
+            {FoldObjectsFun, InitAcc},
+            false, true, false},
     leveled_bookie:book_returnfolder(Store, Query).
 
 
--spec populate_query(supported_stores(), all|list(), tuple()) -> tuple().
+-spec populate_so_query(all|list(), tuple()) -> tuple().
 %% @doc
 %% Pupulate query template
-populate_query(leveled, all, FoldFun) ->
+populate_so_query(all, FoldFun) ->
     {foldheads_allkeys,
             ?HEAD_TAG,
             FoldFun,
             false, true, false};
-populate_query(leveled, SegList, FoldFun) ->
+populate_so_query(SegList, FoldFun) ->
     MapSegFun = 
         fun(S) -> 
             S0 = leveled_tictac:get_segment(S, ?TREE_SIZE),
@@ -499,6 +609,7 @@ populate_query(leveled, SegList, FoldFun) ->
             SegList0, bucket_list,
             FoldFun,
             false, true, false}.
+
 
 
 -spec open_manifest(list()) -> {ok, manifest()}|false.
@@ -595,11 +706,17 @@ store_currentstatus(Pid) ->
     gen_fsm:sync_send_all_state_event(Pid, current_status).
 
 
-empty_buildandclose_test() ->
+leveled_so_emptybuildandclose_test() ->
+    empty_buildandclose_tester(leveled_so).
+
+leveled_ko_emptybuildandclose_test() ->
+    empty_buildandclose_tester(leveled_ko).
+
+empty_buildandclose_tester(StoreType) ->
     RootPath = "test/keystore0/",
     aae_util:clean_subdir(RootPath),
     {ok, {never, none, true}, Store0} 
-        = store_parallelstart(RootPath, leveled),
+        = store_parallelstart(RootPath, StoreType),
     
     {ok, Manifest0} = open_manifest(RootPath),
     {parallel, CurrentGUID} = store_currentstatus(Store0),
@@ -612,7 +729,7 @@ empty_buildandclose_test() ->
     ?assertMatch(ShutdownGUID, Manifest1#manifest.shutdown_guid),
     
     {ok, {never, ShutdownGUID, true}, Store1} 
-        = store_parallelstart(RootPath, leveled),
+        = store_parallelstart(RootPath, StoreType),
     ?assertMatch({parallel, CurrentGUID}, store_currentstatus(Store1)),
     ok = store_close(Store1, none),
     
@@ -637,7 +754,14 @@ bad_manifest_test() ->
     ?assertMatch({ok, Manifest}, open_manifest(RootPath)),
     aae_util:clean_subdir(RootPath).
 
-load_test() ->
+
+leveled_so_load_test() ->
+    load_tester(leveled_so).
+
+leveled_ko_load_test() ->
+    load_tester(leveled_ko).
+
+load_tester(StoreType) ->
     RootPath = "test/keystore2/",
     ok = filelib:ensure_dir(RootPath),
     aae_util:clean_subdir(RootPath),
@@ -664,7 +788,7 @@ load_test() ->
     {L4, L5} = lists:split(32, R3),
 
     {ok, {never, none, true}, Store0} 
-        = store_parallelstart(RootPath, leveled),
+        = store_parallelstart(RootPath, StoreType),
     ok = store_mput(Store0, L1),
     ok = store_mput(Store0, L2),
     ok = store_mput(Store0, L3),
@@ -715,7 +839,7 @@ load_test() ->
     ok = store_close(Store0, none),
 
     {ok, {never, none, false}, Store1} 
-        = store_parallelstart(RootPath, leveled),
+        = store_parallelstart(RootPath, StoreType),
    
     {async, Folder6} = store_fold(Store1, all, FoldObjectsFun, []),
     Res6 = lists:usort(Folder6()),
@@ -745,6 +869,7 @@ load_test() ->
             end
         end,
     FinalStateSL = lists:usort(lists:foldl(CheckSegFun, [], FinalState)),
+    io:format("FinalStateSL: ~w~n", [FinalStateSL]),
 
     {async, Folder9} = 
         store_fold(Store1, {segments, SegList}, FoldObjectsFun, []),
@@ -780,7 +905,7 @@ big_load_tester() ->
     SubLists = split_lists(InitObjectSpecs, 32, []),
 
     {ok, {never, none, true}, Store0} 
-        = store_parallelstart(RootPath, leveled),
+        = store_parallelstart(RootPath, leveled_so),
     ok = lists:foreach(fun(L) -> store_mput(Store0, L) end, SubLists),
 
     FoldObjectsFun =
@@ -810,7 +935,7 @@ big_load_tester() ->
     ok = store_close(Store0, ShutdownGUID0 = leveled_codec:generate_uuid()),
 
     {ok, {never, ShutdownGUID0, false}, Store1} 
-        = store_parallelstart(RootPath, leveled),
+        = store_parallelstart(RootPath, leveled_so),
     
     {async, Folder3} = store_fold(Store1, all, FoldObjectsFun, 0),
     ?assertMatch(KeyCount, Folder3() - KeyCount),
@@ -836,7 +961,7 @@ big_load_tester() ->
     ?assertMatch(undefined, M0#manifest.pending_guid),
 
     {ok, {never, ShutdownGUID1, false}, Store2} 
-        = store_parallelstart(RootPath, leveled),
+        = store_parallelstart(RootPath, leveled_so),
     
     {async, Folder4} = store_fold(Store2, all, FoldObjectsFun, 0),
     ?assertMatch(KeyCount, Folder4() - KeyCount),
@@ -854,23 +979,23 @@ coverage_cheat_test() ->
     {ok, native, _State} = code_change(null, native, #state{}, null).
 
 dumb_value_test() ->
-    V = generate_value({0, 3}, {a, 1}, erlang:phash2(<<>>), 
+    V = generate_value({0, 3}, 0, {a, 1}, erlang:phash2(<<>>), 
                         {100, 1, 0, null}),
     ?assertMatch(100, value_size(V)),
     ?assertMatch(1, value_sibcount(V)),
     ?assertMatch(0, value_indexhash(V)).
 
-generate_objectspecs(Op, Bucket, KeyList) ->
+generate_objectspecs(Op, B, KeyList) ->
     FoldFun = 
         fun({K, V}) ->
             {Clock, Hash, Size, SibCount} = V,
-            Value = generate_value({0, 0}, Clock, Hash, 
+            Seg = 
+                leveled_tictac:keyto_segment48(aae_util:make_binarykey(B, K)),
+            Seg0 = generate_treesegment(Seg),
+            Value = generate_value({0, 0}, Seg0, Clock, Hash, 
                                     {Size, SibCount, 0, null}),
-            define_objectspec(Op, 
-                                aae_util:get_segmentid(Bucket, K), 
-                                Bucket, 
-                                K, 
-                                Value)
+            
+            define_objectspec(Op, Seg0, B, K, Value)
         end,
     lists:map(FoldFun, KeyList).
             
