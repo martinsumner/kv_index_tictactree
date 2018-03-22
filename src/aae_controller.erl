@@ -236,9 +236,10 @@ init([Opts]) ->
                                         next_rebuild = os:timestamp(), 
                                         reliable = false,
                                         parallel_keystore = true}}
-                end;
-            KeyStoreType ->
-                aae_util:log("AAE02", [KeyStoreType], logs())
+                end
+            % KeyStoreType ->
+            %     aae_util:log("AAE02", [KeyStoreType], logs())
+            % Native stores not yet implemented
         end,
 
     % Start the TreeCaches
@@ -334,9 +335,7 @@ handle_call({rebuild_treecaches, IndexNs, parallel_keystore, WorkerFun},
     % updated to match the lasted provided list of responsible preflists
     {reply, 
         ok, 
-        State#state{tree_caches = TreeCaches, index_ns = IndexNs}};
-handle_call(_Msg, _From, State) ->
-    {reply, not_implemented, State}.
+        State#state{tree_caches = TreeCaches, index_ns = IndexNs}}.
 
 handle_cast({put, IndexN, Bucket, Key, Clock, PrevClock, BinaryObj}, State) ->
     % Setup
@@ -383,9 +382,10 @@ handle_cast({put, IndexN, Bucket, Key, Clock, PrevClock, BinaryObj}, State) ->
                     {noreply, State#state{objectspecs_queue = []}};
                 false ->
                     {noreply, State#state{objectspecs_queue = UpdSpecL}}
-            end;
-        false ->
-            {noreply, State}
+            end
+        % false ->
+        %    {noreply, State}
+        % native stores not yet timplemented
     end;
 handle_cast({fetch_root, IndexNs, ReturnFun}, State) ->
     FetchRootFun = 

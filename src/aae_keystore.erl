@@ -55,6 +55,7 @@
                 store_type :: supported_stores(),
                 change_queue = [] :: list(),
                 change_queue_counter = 0 :: integer(),
+                load_counter = 0 :: integer(),
                 current_guid :: list(),
                 root_path :: list(),
                 last_rebuild :: os:timestamp()|never,
@@ -173,8 +174,8 @@ store_fold(Pid, Limiter, FoldObjectsFun, InitAcc) ->
 
 init([Opts]) ->
     case aae_util:get_opt(native, Opts) of 
-        true ->
-            {stop, not_yet_implemented};
+        % true ->
+        %    {stop, not_yet_implemented};
         {false, leveled} ->
             RootPath = aae_util:get_opt(root_path, Opts),
             Manifest0 =
@@ -186,7 +187,7 @@ init([Opts]) ->
                         M 
                 end,
             
-            Manifest1 = clear_pendingpath(Manifest0),
+            Manifest1 = clear_pendingpath(Manifest0, RootPath),
                 
             BackendOpts0 = aae_util:get_opt(backend_opts, Opts),
             {ok, Store} = open_store(leveled, 
@@ -255,20 +256,25 @@ loading({mput, ObjectSpecs}, State) ->
         ObjectCount1 div ?CHANGEQ_LOGFREQ > ObjectCount0 div ?CHANGEQ_LOGFREQ,
     case ToLog of 
         true ->
-            aae_util:log("KS001", [State#state.id, ObjectCount1], logs()),
-            {next_state, 
-                loading, 
-                State#state{change_queue_counter = ObjectCount1, 
-                            change_queue = ChangeQueue1}};
+            aae_util:log("KS001", [State#state.id, ObjectCount1], logs());
         false ->
-            {next_state, 
-                loading, 
-                State#state{change_queue_counter = ObjectCount0, 
-                            change_queue = ChangeQueue1}}
-    end;
+            ok
+    end,
+    {next_state, loading, State#state{change_queue_counter = ObjectCount1, 
+                                        change_queue = ChangeQueue1}};
 loading({mload, ObjectSpecs}, State) ->
     ok = do_load(State#state.store_type, State#state.load_store, ObjectSpecs),
-    {next_state, loading, State};
+    LoadCount0 = State#state.load_counter,
+    LoadCount1 = State#state.load_counter + length(ObjectSpecs),
+    ToLog = 
+        LoadCount1 div ?CHANGEQ_LOGFREQ > LoadCount0 div ?CHANGEQ_LOGFREQ,
+    case ToLog of 
+        true ->
+            aae_util:log("KS004", [State#state.id, LoadCount1], logs());
+        false ->
+            ok
+    end,
+    {next_state, loading, State#state{load_counter = LoadCount1}};
 loading({prompt, rebuild_complete}, State) ->
     StoreType = State#state.store_type,
     LoadStore = State#state.load_store,
@@ -282,6 +288,7 @@ loading({prompt, rebuild_complete}, State) ->
         parallel, 
         State#state{change_queue = [], 
                     change_queue_counter = 0,
+                    load_counter = 0,
                     store = LoadStore,
                     current_guid = GUID}}.
 
@@ -505,7 +512,9 @@ open_manifest(RootPath) ->
             {ok, <<CRC32:32/integer, Manifest/binary>>} = file:read_file(FN),
             case erlang:crc32(Manifest) of 
                 CRC32 ->
-                    {ok, binary_to_term(Manifest)};
+                    M = binary_to_term(Manifest),
+                    aae_util:log("KS005", [M#manifest.current_guid], logs()),
+                    {ok, M};
                 _ ->
                     aae_util:log("KS002", [RootPath, "crc32"], logs()),
                     false
@@ -520,7 +529,7 @@ open_manifest(RootPath) ->
 %% Store tham manifest file, adding a CRC, and ensuring it is readable before
 %% returning
 store_manifest(RootPath, Manifest) ->
-    aae_util:log("KS003", [Manifest], logs()),
+    aae_util:log("KS003", [Manifest#manifest.current_guid], logs()),
     ManBin = term_to_binary(Manifest),
     CRC32 = erlang:crc32(ManBin),
     PFN = filename:join(RootPath, ?MANIFEST_FN ++ ?PENDING_EXT),
@@ -531,20 +540,16 @@ store_manifest(RootPath, Manifest) ->
     ok.
 
 
--spec clear_pendingpath(manifest()) -> manifest().
+-spec clear_pendingpath(manifest(), list()) -> manifest().
 %% @doc
-%% Clear any Keystore that had been aprtially loaded at the last shutdown
-clear_pendingpath(Manifest) ->
+%% Clear any Keystore that had been partially loaded at the last shutdown
+clear_pendingpath(Manifest, RootPath) ->
     case Manifest#manifest.pending_guid of 
         undefined ->
             Manifest;
-        PendingPath ->
-            case filelib:is_dir(PendingPath) of
-                true ->
-                    ok = file:del_dir(PendingPath);
-                false ->
-                    ok 
-            end,
+        GUID ->
+            PendingPath = filename:join(RootPath, GUID),
+            aae_util:log("KS006", [PendingPath], logs()),
             Manifest#manifest{pending_guid = undefined}
     end.
 
@@ -558,13 +563,22 @@ clear_pendingpath(Manifest) ->
 %% Define log lines for this module
 logs() ->
     [{"KS001", 
-            {info, "Key Store building with id=~w has reached " 
+            {info, "Key Store loadding with id=~w has reached " 
                     ++ "deferred count=~w"}},
         {"KS002",
             {warn, "No valid manifest found for AAE keystore at ~s "
                     ++ "reason ~s"}},
         {"KS003",
-            {info, "Storing manifest of ~w"}}].
+            {info, "Storing manifest with current GUID ~s"}},
+        {"KS004", 
+            {info, "Key Store building with id=~w has reached " 
+                    ++ "loaded count=~w"}},
+        {"KS005",
+            {info, "Clean opening of manifest with current GUID ~s"}},
+        {"KS006",
+            {warn, "Pending store is garbage and should be deleted at ~s"}}
+
+        ].
 
 
 %%%============================================================================
@@ -779,24 +793,72 @@ big_load_tester() ->
     ok = store_prompt(Store0, rebuild_start),
     ok = lists:foreach(fun(L) -> store_mload(Store0, L) end, SubLists),
 
-    ok = store_close(Store0, ShutdownGUID = leveled_codec:generate_uuid()),
-
-    {ok, {never, ShutdownGUID, false}, Store1} 
-        = store_parallelstart(RootPath, leveled),
-    
     AdditionalKeys = 
-        lists:map(GenerateKeyFun, lists:seq(KeyCount + 1, KeyCount + 10)),
+        lists:map(GenerateKeyFun, lists:seq(KeyCount + 1, 2 * KeyCount)),
     AdditionalObjectSpecs = 
         generate_objectspecs(add, <<"B1">>, AdditionalKeys),
-    ok = store_mput(Store1, AdditionalObjectSpecs),
+    ok = store_mput(Store0, AdditionalObjectSpecs),
 
-    {async, Folder1} = store_fold(Store1, all, FoldObjectsFun, 0),
-    ?assertMatch(KeyCount, Folder1() - 10),
+    {async, Folder1} = store_fold(Store0, all, FoldObjectsFun, 0),
+    ?assertMatch(KeyCount, Folder1() - KeyCount),
+
+    ok = store_prompt(Store0, rebuild_complete),
+
+    {async, Folder2} = store_fold(Store0, all, FoldObjectsFun, 0),
+    ?assertMatch(KeyCount, Folder2() - KeyCount),
+
+    ok = store_close(Store0, ShutdownGUID0 = leveled_codec:generate_uuid()),
+
+    {ok, {never, ShutdownGUID0, false}, Store1} 
+        = store_parallelstart(RootPath, leveled),
     
-    ok = store_close(Store1, none),
+    {async, Folder3} = store_fold(Store1, all, FoldObjectsFun, 0),
+    ?assertMatch(KeyCount, Folder3() - KeyCount),
+
+    ok = store_prompt(Store1, rebuild_start),
+    OpenWhenPendingSavedFun = 
+        fun(_X, {Complete, M}) ->
+            case Complete of 
+                true ->
+                    {true, M};
+                false ->
+                    timer:sleep(100),
+                    {ok, PMan0} = open_manifest(RootPath),
+                    {not (PMan0#manifest.pending_guid == undefined), PMan0}
+            end
+        end,
+    {true, PendingManifest} = 
+        lists:foldl(OpenWhenPendingSavedFun, {false, null}, lists:seq(1,10)),
+
+    ok = store_close(Store1, ShutdownGUID1 = leveled_codec:generate_uuid()),
+    ?assertMatch(false, undefined == PendingManifest#manifest.pending_guid),
+    M0 = clear_pendingpath(PendingManifest, RootPath),
+    ?assertMatch(undefined, M0#manifest.pending_guid),
+
+    {ok, {never, ShutdownGUID1, false}, Store2} 
+        = store_parallelstart(RootPath, leveled),
+    
+    {async, Folder4} = store_fold(Store2, all, FoldObjectsFun, 0),
+    ?assertMatch(KeyCount, Folder4() - KeyCount),
+
+    ok = store_close(Store2, none),
     aae_util:clean_subdir(RootPath).
 
 
+
+coverage_cheat_test() ->
+    {reply, ok, native, _State} = native(null, self(), #state{}),
+    {next_state, native, _State} = native(null, #state{}),
+    {next_state, native, _State} = handle_event(null, native, #state{}),
+    {next_state, native, _State} = handle_info(null, native, #state{}),
+    {ok, native, _State} = code_change(null, native, #state{}, null).
+
+dumb_value_test() ->
+    V = generate_value({0, 3}, {a, 1}, erlang:phash2(<<>>), 
+                        {100, 1, 0, null}),
+    ?assertMatch(100, value_size(V)),
+    ?assertMatch(1, value_sibcount(V)),
+    ?assertMatch(0, value_indexhash(V)).
 
 generate_objectspecs(Op, Bucket, KeyList) ->
     FoldFun = 
