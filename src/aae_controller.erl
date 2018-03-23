@@ -615,7 +615,7 @@ logs() ->
 rebuild_notempty_test() ->
     RootPath = "test/notemptycntrllr/",
     aae_util:clean_subdir(RootPath),
-    {ok, Cntrl0} = start_wrap({false, "1234"}, RootPath),
+    {ok, Cntrl0} = start_wrap({false, "1234"}, RootPath, leveled_so),
     NRB0 = aae_controller:aae_nextrebuild(Cntrl0),
     ?assertMatch(true, NRB0 < os:timestamp()),
     
@@ -623,13 +623,13 @@ rebuild_notempty_test() ->
     % But shutdown was with rebuild due - so should not reset the rebuild to
     % future 
     ok = aae_close(Cntrl0, "4567"),
-    {ok, Cntrl1} = start_wrap({false, "4567"}, RootPath),
+    {ok, Cntrl1} = start_wrap({false, "4567"}, RootPath, leveled_so),
     NRB1 = aae_controller:aae_nextrebuild(Cntrl1),
     ?assertMatch(true, NRB1 < os:timestamp()),
     
     % Shutdown then startup with wrong GUID
     ok = aae_close(Cntrl1, "8910"),
-    {ok, Cntrl2} = start_wrap({false, "4567"}, RootPath),
+    {ok, Cntrl2} = start_wrap({false, "4567"}, RootPath, leveled_so),
     NRB2 = aae_controller:aae_nextrebuild(Cntrl2),
     ?assertMatch(true, NRB2 < os:timestamp()),
     
@@ -639,19 +639,19 @@ rebuild_notempty_test() ->
 rebuild_onempty_test() ->
     RootPath = "test/emptycntrllr/",
     aae_util:clean_subdir(RootPath),
-    {ok, Cntrl0} = start_wrap({true, none}, RootPath),
+    {ok, Cntrl0} = start_wrap({true, none}, RootPath, leveled_so),
     NRB0 = aae_controller:aae_nextrebuild(Cntrl0),
     ?assertMatch(false, NRB0 < os:timestamp()),
     
     % Shutdown and startup with GUID 
     ok = aae_close(Cntrl0, "4567"),
-    {ok, Cntrl1} = start_wrap({true, "4567"}, RootPath),
+    {ok, Cntrl1} = start_wrap({true, "4567"}, RootPath, leveled_so),
     NRB1 = aae_controller:aae_nextrebuild(Cntrl1),
     ?assertMatch(false, NRB1 < os:timestamp()),
     
     % Shutdown then startup with wrong GUID
     ok = aae_close(Cntrl1, "8910"),
-    {ok, Cntrl2} = start_wrap({true, "4567"}, RootPath),
+    {ok, Cntrl2} = start_wrap({true, "4567"}, RootPath, leveled_so),
     NRB2 = aae_controller:aae_nextrebuild(Cntrl2),
     ?assertMatch(true, NRB2 < os:timestamp()),
     
@@ -665,7 +665,7 @@ wrong_indexn_test() ->
     RPid = self(),
     ReturnFun = fun(R) -> RPid ! {result, R} end,
 
-    {ok, Cntrl0} = start_wrap({true, none}, RootPath),
+    {ok, Cntrl0} = start_wrap({true, none}, RootPath, leveled_so),
     NRB0 = aae_controller:aae_nextrebuild(Cntrl0),
     ?assertMatch(false, NRB0 < os:timestamp()),
     
@@ -730,7 +730,13 @@ wrong_indexn_test() ->
     aae_util:clean_subdir(RootPath).
 
 
-basic_cache_rebuild_test() ->
+basic_cache_rebuild_so_test() ->
+    basic_cache_rebuild_tester(leveled_so).
+
+basic_cache_rebuild_ko_test() ->
+    basic_cache_rebuild_tester(leveled_ko).
+
+basic_cache_rebuild_tester(StoreType) ->
     RootPath = "test/emptycntrllr/",
     aae_util:clean_subdir(RootPath),
 
@@ -739,7 +745,7 @@ basic_cache_rebuild_test() ->
 
     Preflists = [{0, 3}, {100, 3}, {200, 3}],
     {ok, Cntrl0} = 
-        start_wrap({true, none}, RootPath, Preflists),
+        start_wrap({true, none}, RootPath, Preflists, StoreType),
     NRB0 = aae_controller:aae_nextrebuild(Cntrl0),
     ?assertMatch(false, NRB0 < os:timestamp()),
 
@@ -782,7 +788,13 @@ basic_cache_rebuild_test() ->
     aae_util:clean_subdir(RootPath).
 
 
-varyindexn_cache_rebuild_test() ->
+varyindexn_cache_rebuild_so_test() ->
+    varyindexn_cache_rebuild_tester(leveled_so).
+
+varyindexn_cache_rebuild_ko_test() ->
+    varyindexn_cache_rebuild_tester(leveled_ko).
+
+varyindexn_cache_rebuild_tester(StoreType) ->
     RootPath = "test/emptycntrllr/",
     aae_util:clean_subdir(RootPath),
 
@@ -791,7 +803,7 @@ varyindexn_cache_rebuild_test() ->
 
     Preflists = [{0, 3}, {100, 3}, {200, 3}],
     {ok, Cntrl0} = 
-        start_wrap({true, none}, RootPath, Preflists),
+        start_wrap({true, none}, RootPath, Preflists, StoreType),
     NRB0 = aae_controller:aae_nextrebuild(Cntrl0),
     ?assertMatch(false, NRB0 < os:timestamp()),
 
@@ -882,12 +894,12 @@ coverage_cheat_test() ->
 %%% Test Utils
 %%%============================================================================
 
-start_wrap(StartupI, RootPath) ->
-    start_wrap(StartupI, RootPath, [{0, 3}]).
+start_wrap(StartupI, RootPath, StoreType) ->
+    start_wrap(StartupI, RootPath, [{0, 3}], StoreType).
 
-start_wrap(StartupI, RootPath, RPL) ->
+start_wrap(StartupI, RootPath, RPL, StoreType) ->
     F = fun(_X) -> {0, 1, 0, null} end,
-    aae_start({parallel, leveled_so}, StartupI, {1, 300}, RPL, RootPath, F).
+    aae_start({parallel, StoreType}, StartupI, {1, 300}, RPL, RootPath, F).
 
 
 put_keys(_Cntrl, _Preflists, KeyList, 0) ->
