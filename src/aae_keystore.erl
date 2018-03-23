@@ -887,10 +887,19 @@ split_lists(L, SplitSize, Acc) ->
     split_lists(RL, SplitSize, [LL|Acc]).
 
 
-big_load_test_() ->
-    {timeout, 60, fun big_load_tester/0}.
+so_big_load_test_() ->
+    {timeout, 60, fun so_big_load_tester/0}.
 
-big_load_tester() ->
+ko_big_load_test_() ->
+    {timeout, 60, fun ko_big_load_tester/0}.
+
+so_big_load_tester() ->
+    big_load_tester(leveled_so).
+
+ko_big_load_tester() ->
+    big_load_tester(leveled_ko).
+
+big_load_tester(StoreType) ->
     RootPath = "test/keystore3/",
     KeyCount = 2 * ?CHANGEQ_LOGFREQ,
     ok = filelib:ensure_dir(RootPath),
@@ -898,22 +907,19 @@ big_load_tester() ->
 
     GenerateKeyFun = aae_util:test_key_generator(v1),
 
+    {ok, {never, none, true}, Store0} 
+        = store_parallelstart(RootPath, StoreType),
+
     InitialKeys = 
         lists:map(GenerateKeyFun, lists:seq(1, KeyCount)),
     InitObjectSpecs = generate_objectspecs(add, <<"B1">>, InitialKeys),
-    
-    SubLists = split_lists(InitObjectSpecs, 32, []),
-
-    {ok, {never, none, true}, Store0} 
-        = store_parallelstart(RootPath, leveled_so),
-    ok = lists:foreach(fun(L) -> store_mput(Store0, L) end, SubLists),
+    SubLists = timed_bulk_put(Store0, InitObjectSpecs, StoreType),
 
     FoldObjectsFun =
         fun(_B, _K, _V, Acc) ->
             Acc + 1
         end,
-    {async, Folder0} = store_fold(Store0, all, FoldObjectsFun, 0),
-    ?assertMatch(KeyCount, Folder0()),
+    timed_fold(Store0, KeyCount, FoldObjectsFun, StoreType, false),
 
     ok = store_prompt(Store0, rebuild_start),
     ok = lists:foreach(fun(L) -> store_mload(Store0, L) end, SubLists),
@@ -922,10 +928,9 @@ big_load_tester() ->
         lists:map(GenerateKeyFun, lists:seq(KeyCount + 1, 2 * KeyCount)),
     AdditionalObjectSpecs = 
         generate_objectspecs(add, <<"B1">>, AdditionalKeys),
-    ok = store_mput(Store0, AdditionalObjectSpecs),
+    _ = timed_bulk_put(Store0, AdditionalObjectSpecs, StoreType),
 
-    {async, Folder1} = store_fold(Store0, all, FoldObjectsFun, 0),
-    ?assertMatch(KeyCount, Folder1() - KeyCount),
+    timed_fold(Store0, KeyCount, FoldObjectsFun, StoreType, true),
 
     ok = store_prompt(Store0, rebuild_complete),
 
@@ -935,10 +940,9 @@ big_load_tester() ->
     ok = store_close(Store0, ShutdownGUID0 = leveled_codec:generate_uuid()),
 
     {ok, {never, ShutdownGUID0, false}, Store1} 
-        = store_parallelstart(RootPath, leveled_so),
+        = store_parallelstart(RootPath, StoreType),
     
-    {async, Folder3} = store_fold(Store1, all, FoldObjectsFun, 0),
-    ?assertMatch(KeyCount, Folder3() - KeyCount),
+    timed_fold(Store1, KeyCount, FoldObjectsFun, StoreType, true),
 
     ok = store_prompt(Store1, rebuild_start),
     OpenWhenPendingSavedFun = 
@@ -961,15 +965,39 @@ big_load_tester() ->
     ?assertMatch(undefined, M0#manifest.pending_guid),
 
     {ok, {never, ShutdownGUID1, false}, Store2} 
-        = store_parallelstart(RootPath, leveled_so),
+        = store_parallelstart(RootPath, StoreType),
     
-    {async, Folder4} = store_fold(Store2, all, FoldObjectsFun, 0),
-    ?assertMatch(KeyCount, Folder4() - KeyCount),
+    timed_fold(Store2, KeyCount, FoldObjectsFun, StoreType, true),
 
     ok = store_close(Store2, none),
     aae_util:clean_subdir(RootPath).
 
 
+timed_fold(Store, KeyCount, FoldObjectsFun, StoreType, DoubleCount) ->
+    SW = os:timestamp(),
+    {async, Folder} = store_fold(Store, all, FoldObjectsFun, 0),
+    case DoubleCount of 
+        true ->
+            ?assertMatch(KeyCount, Folder() - KeyCount);
+        false ->
+            ?assertMatch(KeyCount, Folder())
+    end,
+    io:format("Fold took ~w for StoreType ~w~n", 
+                [timer:now_diff(os:timestamp(), SW), StoreType]).
+
+timed_bulk_put(Store, ObjectSpecs, StoreType) ->
+    SubLists = split_lists(ObjectSpecs, 32, []),
+    % Add a duplicate entry to one of the sub-lists
+    [FirstList|RestLists] = SubLists,
+    [FirstSpec|_RestSpecs] = FirstList,
+    FirstList0 = FirstList ++ [FirstSpec],
+    SubLists0 = [FirstList0|RestLists],
+    SW = os:timestamp(),
+    ok = lists:foreach(fun(L) -> store_mput(Store, L) end, SubLists0),
+    io:format("Load took ~w for StoreType ~w~n", 
+                [timer:now_diff(os:timestamp(), SW), StoreType]),
+    % Return the sublists without the duplicate
+    SubLists.
 
 coverage_cheat_test() ->
     {reply, ok, native, _State} = native(null, self(), #state{}),
