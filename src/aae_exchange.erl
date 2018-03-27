@@ -101,20 +101,21 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
--record(state, {root_compare_deltas :: list(),
-                root_confirm_deltas :: list(),
-                branch_compare_deltas :: list(),
-                branch_confirm_deltas :: list(),
-                key_deltas :: list(),
+-record(state, {root_compare_deltas = [] :: list(),
+                root_confirm_deltas = [] :: list(),
+                branch_compare_deltas = [] :: list(),
+                branch_confirm_deltas = [] :: list(),
+                key_deltas = [] :: list(),
                 repair_fun,
                 reply_fun,
-                blue_list = [] :: list(tuple()),
-                pink_list = [] :: list(tuple()),
+                blue_list = [] :: input_list(),
+                pink_list = [] :: input_list(),
                 exchange_id :: list(),
-                blue_results :: list(),
-                blue_target_count :: integer(),
-                pink_results :: list(),
-                pink_target_count :: integer(), 
+                blue_returns :: {integer(), integer()},
+                pink_returns :: {integer(), integer()},
+                pink_acc,
+                blue_acc,
+                merge_fun,
                 start_time :: erlang:timestamp(),
                 pending_state :: atom()
                 }).
@@ -124,7 +125,11 @@
     % - a SendFun, which should  be a 3-arity function, taking a preflist, 
     % a message and a colour to be used to flag the reply;
     % - a list of preflists, to be used in the SendFun to be filtered by the
-    % target
+    % target.  The Preflist might be {Index, Node} for remote requests or 
+    % {Index, Pid} for local requests
+-type branch_results() :: list({integer(), binary()}).
+    % Results to branch queries are a list mapping Branch ID to the binary for
+    % that branch
 
 %%%============================================================================
 %%% API
@@ -134,12 +139,14 @@
 %% @doc
 %% Start an FSM to manage an exchange and comapre the preflsist in the 
 %% BlueList wiht those in the PinkList, using the RepairFun to repair any
-%% keys discovered to have inconsistent clocks, and the ReplyFun to respond 
-%% to the calling client.  
+%% keys discovered to have inconsistent clocks.  ReplyFun used to reply back
+%% to calling client the StateName at termination.
+%%
+%% Teh replyFun should be a 1 arity function
 start(BlueList, PinkList, RepairFun, ReplyFun) ->
     ExchangeID = leveled_codec:generate_uuid(),
     gen_fsm:start(?MODULE, 
-                    [BlueList, PinkList, RepairFun, ReplyFun, ExchangeID],
+                    [BlueList, PinkList, RepairFun, ReplyFun, ExchangeID], 
                     []),
     {ok, ExchangeID}.
 
@@ -157,8 +164,8 @@ init([BlueList, PinkList, RepairFun, ReplyFun, ExchangeID]) ->
                     repair_fun = RepairFun,
                     reply_fun = ReplyFun,
                     exchange_id = ExchangeID,
-                    pink_target_count = PinkTarget,
-                    blue_target_count = BlueTarget},
+                    pink_returns = {0, PinkTarget},
+                    blue_returns = {0, BlueTarget}},
     aee_util:log("EX001", [ExchangeID, PinkTarget + BlueTarget], logs()),
     {ok, prepare, State, jitter_pause(?TRANSITION_PAUSE_MS)}.
 
@@ -168,16 +175,15 @@ prepare(timeout, State) ->
                         always_blue),
     {next_state, 
         waiting_all_results, 
-        State#state{pink_results = [], 
-                    blue_results = [],
-                    start_time = os:timestamp(),
-                    pending_state = root_compare},
+        State#state{start_time = os:timestamp(),
+                    pending_state = root_compare,
+                    pink_acc = <<>>,
+                    blue_acc = <<>>,
+                    merge_fun = fun merge_root/2},
         ?CACHE_TIMEOUT_MS}.
 
 root_compare(timeout, State) ->
-    BlueRoot = merge_results(root, State#state.blue_results),
-    PinkRoot = merge_results(root, State#state.pink_results),
-    BranchIDs = compare_results(root, BlueRoot, PinkRoot),
+    BranchIDs = compare_roots(State#state.blue_acc, State#state.pink_acc),
     case length(BranchIDs) of 
         0 ->
             {stop, normal, State};
@@ -187,19 +193,20 @@ root_compare(timeout, State) ->
                                 always_blue),
             {next_state,
                 waiting_all_results,
-                State#state{pink_results = [], 
-                            blue_results = [],
-                            start_time = os:timestamp(),
+                State#state{start_time = os:timestamp(),
                             root_compare_deltas = BranchIDs,
-                            pending_state = root_confirm},
+                            pending_state = root_confirm,
+                            pink_acc = <<>>,
+                            blue_acc = <<>>,
+                            merge_fun = fun merge_root/2,
+                            pink_returns = reset(State#state.pink_returns),
+                            blue_returns = reset(State#state.blue_returns)},
                 ?CACHE_TIMEOUT_MS}
     end.
 
 root_confirm(timeout, State) ->
-    BlueRoot = merge_results(root, State#state.blue_results),
-    PinkRoot = merge_results(root, State#state.pink_results),
     BranchIDs0 = State#state.root_compare_deltas,
-    BranchIDs1 = compare_results(root, BlueRoot, PinkRoot),
+    BranchIDs1 = compare_roots(State#state.blue_acc, State#state.pink_acc),
     BranchIDs = 
         select_ids(intersect_ids(BranchIDs0, BranchIDs1), ?MAX_RESULTS),
     case length(BranchIDs) of 
@@ -211,42 +218,43 @@ root_confirm(timeout, State) ->
                                 always_blue),
             {next_state,
                 waiting_all_results,
-                State#state{pink_results = [], 
-                            blue_results = [],
-                            start_time = os:timestamp(),
+                State#state{start_time = os:timestamp(),
                             root_confirm_deltas = BranchIDs,
-                            pending_state = branch_compare},
+                            pending_state = branch_compare,
+                            pink_acc = [],
+                            blue_acc = [],
+                            merge_fun = fun merge_branches/2,
+                            pink_returns = reset(State#state.pink_returns),
+                            blue_returns = reset(State#state.blue_returns)},
                 ?CACHE_TIMEOUT_MS}
     end.
 
 branch_compare(timeout, State) ->
-    BranchIDs = State#state.root_confirm_deltas,
-    BlueBranches = merge_results(BranchIDs, State#state.blue_results),
-    PinkBranches = merge_results(BranchIDs, State#state.pink_results),
-    SegmentIDs = compare_results(BranchIDs, BlueBranches, PinkBranches),
+    SegmentIDs = compare_branches(State#state.blue_acc, State#state.pink_acc),
     case length(SegmentIDs) of 
         0 ->
             {stop, normal, State};
         _ ->
-            ok = send_requests({fetch_branches, BranchIDs}, 
-                                State#state.blue_list, State#state.pink_list, 
+            ok = send_requests({fetch_branches, 
+                                    State#state.root_confirm_deltas}, 
+                                State#state.blue_list, State#state.pink_list,
                                 always_blue),
             {next_state,
                 waiting_all_results,
-                State#state{pink_results = [], 
-                            blue_results = [],
-                            start_time = os:timestamp(),
+                State#state{start_time = os:timestamp(),
                             branch_compare_deltas = SegmentIDs,
-                            pending_state = branch_confirm},
+                            pending_state = branch_confirm,
+                            pink_acc = [],
+                            blue_acc = [],
+                            merge_fun = fun merge_branches/2,
+                            pink_returns = reset(State#state.pink_returns),
+                            blue_returns = reset(State#state.blue_returns)},
                 ?CACHE_TIMEOUT_MS}
     end.
 
 branch_confirm(timeout, State) ->
-    BranchIDs = State#state.root_confirm_deltas,
-    BlueBranches = merge_results(BranchIDs, State#state.blue_results),
-    PinkBranches = merge_results(BranchIDs, State#state.pink_results),
     SegmentIDs0 = State#state.branch_compare_deltas,
-    SegmentIDs1 = compare_results(BranchIDs, BlueBranches, PinkBranches),
+    SegmentIDs1 = compare_branches(State#state.blue_acc, State#state.pink_acc),
     SegmentIDs = 
         select_ids(intersect_ids(SegmentIDs0, SegmentIDs1), ?MAX_RESULTS),
     case length(SegmentIDs) of 
@@ -258,18 +266,19 @@ branch_confirm(timeout, State) ->
                                 always_blue),
             {next_state,
                 waiting_all_results,
-                State#state{pink_results = [], 
-                            blue_results = [],
-                            start_time = os:timestamp(),
+                State#state{start_time = os:timestamp(),
                             branch_confirm_deltas = SegmentIDs,
-                            pending_state = clock_compare},
+                            pending_state = clock_compare,
+                            pink_acc = [],
+                            blue_acc = [],
+                            merge_fun = fun merge_clocks/2,
+                            pink_returns = reset(State#state.pink_returns),
+                            blue_returns = reset(State#state.blue_returns)},
                 ?SCAN_TIMEOUT_MS}
     end.
 
 clock_compare(timeout, State) ->
-    BlueClocks = merge_results(clocks, State#state.blue_results),
-    PinkClocks = merge_results(clocks, State#state.pink_results),
-    RepairKeys = compare_results(clocks, BlueClocks, PinkClocks),
+    RepairKeys = compare_clocks(State#state.blue_acc, State#state.pink_acc),
     RepairFun = State#state.repair_fun,
     aae_util:log("EX004", 
                     [length(RepairKeys), State#state.exchange_id], 
@@ -280,20 +289,21 @@ clock_compare(timeout, State) ->
         State#state{key_deltas = RepairKeys, pending_state = complete}}.
 
 
-waiting_all_results({reply, Preflists, Result, Colour}, State) ->
-    State0 =
+waiting_all_results({reply, Result, Colour}, State) ->
+    {PC, PT} = State#state.pink_returns,
+    {BC, BT} = State#state.blue_returns,
+    MergeFun = State#state.merge_fun,
+    {State0, AllPink, AllBlue} =
         case Colour of  
             pink ->
-                R = [{Preflists, Result}|State#state.pink_results],
-                State#state{pink_results = lists:ukeysort(1, R)};
+                PinkAcc = MergeFun(Result, State#state.pink_acc),
+                {State#state{pink_returns = {PC + 1, PT}, pink_acc = PinkAcc},
+                    PC + 1 == PT, BC == BT};
             blue ->
-                R = [{Preflists, Result}|State#state.blue_results],
-                State#state{blue_results = lists:ukeysort(1, R)}
+                BlueAcc = MergeFun(Result, State#state.blue_acc),
+                {State#state{blue_returns = {BC + 1, BT}, blue_acc = BlueAcc},
+                    PC == PT, BC + 1 == BT}
         end,
-    AllPink = 
-        length(State0#state.pink_results) == State#state.pink_target_count,
-    AllBlue = 
-        length(State0#state.blue_results) == State#state.blue_target_count,
     case AllBlue and AllPink of 
         true ->
             {next_state, 
@@ -307,11 +317,9 @@ waiting_all_results({reply, Preflists, Result, Colour}, State) ->
                 set_timeout(State0#state.start_time, ?CACHE_TIMEOUT_MS)}
     end;
 waiting_all_results(timeout, State) ->
-    MissingCount = 
-        State#state.pink_target_count 
-            + State#state.blue_target_count
-            - length(State#state.pink_results) 
-            - length(State#state.blue_results),
+    {PC, PT} = State#state.pink_returns,
+    {BC, BT} = State#state.blue_returns,
+    MissingCount = PT + BT - (PC + BC),
     aae_util:log("EX002", 
                     [State#state.pending_state, 
                         MissingCount, 
@@ -372,46 +380,69 @@ send_requests(Msg, BlueList, [{SendFun, Preflists}|Rest], always_pink) ->
     end.
 
 
--spec merge_results(root|clocks|list(), list()) -> list()|binary().
+-spec merge_root(binary(), binary()) -> binary().
 %% @doc
-%% Merge all the results for one side (e.g. blue or pink) to give a single 
-%% combined result.
-merge_results(root, RootList) ->
-    lists:foldl(fun leveled_tictac:merge_binaries/2, <<>>, RootList);
-merge_results(clocks, KeysClocksList) ->
-    lists:merge(KeysClocksList);
-merge_results(BranchIds, BranchLists) ->
-    MapFun = 
-        fun(Idx) ->
-            FoldFun = 
-                fun(BranchBinL, CombinedBin) ->
-                    BranchBin = lists:nth(Idx, BranchBinL),
-                    leveled_tictac:merge_binaries(BranchBin, CombinedBin)
-                end,
-            lists:foldl(FoldFun, <<>>, BranchLists)
-        end,
-    lists:map(MapFun, lists:seq(1, length(BranchIds))).
+%% Merge an individual result for a set of preflists into the accumulated 
+%% binary for the tree root
+merge_root(ResultBin, RootAccBin) ->
+    leveled_tictac:merge_binaries(ResultBin, RootAccBin).
 
--spec compare_results(root|clocks|list(), list()|binary(), list()|binary())
-                                                                    -> list().
+-spec merge_branches(branch_results(), branch_results()) -> branch_results().
 %% @doc
-%% Compare blue with pink
-compare_results(root, BlueRoot, PinkRoot) ->
-    leveled_tictac:find_dirtysegments(BlueRoot, PinkRoot);
-compare_results(clocks, BlueList, PinkList) ->
+%% Branches should be returned as a list of {BranchID, BranchBin} pairs.  For 
+%% each branch in a result, merge into the accumulator.
+merge_branches([], BranchAccL) ->
+    BranchAccL;
+merge_branches([{BranchID, BranchBin}|Rest], BranchAccL) ->
+    case lists:keyfind(BranchID, 1, BranchAccL) of
+        false ->
+            % First repsonse has an empty accumulator
+            merge_branches(Rest, [{BranchID, BranchBin}|BranchAccL]);
+        {BranchID, BinAcc} ->
+            BinAcc0 = leveled_tictac:merge_binaries(BranchBin, BinAcc),
+            lists:keyreplace(BranchID, 1, BranchAccL, {BranchID, BinAcc0})
+    end.
+
+-spec merge_clocks(list(tuple()), list(tuple())) -> list(tuple()).
+%% @doc
+%% Accumulate keys and clocks returned in the segment query, outputting a 
+%% sorted list of keys and clocks.
+merge_clocks(KeyClockL, KeyClockLAcc) ->
+    lists:merge(lists:usort(KeyClockL), KeyClockLAcc).
+
+
+-spec compare_roots(binary(), binary()) -> list(integer()).
+%% @doc
+%% Compare the roots of two trees (i.e. the Pink and Blue root), and return a 
+%% list of branch IDs which are mismatched.
+compare_roots(BlueRoot, PinkRoot) ->
+    leveled_tictac:find_dirtysegments(BlueRoot, PinkRoot).
+
+-spec compare_branches(branch_results(), branch_results()) -> list(integer()).
+%% @doc
+%% Compare two sets of branches , and return a list of segment IDs which are 
+%% mismatched
+compare_branches(BlueBranches, PinkBranches) ->
+    FoldFun =
+        fun(Idx, Acc) ->
+            {BranchID, BlueBranch} = lists:nth(Idx, BlueBranches),
+            {BranchID, PinkBranch} = lists:keyfind(BranchID, 1, PinkBranches),
+            DirtySegs =
+                leveled_tictac:find_dirtysegments(BlueBranch, PinkBranch),
+            lists:map(fun(S) -> 
+                            leveled_tictac:join_segment(BranchID, S) 
+                        end,
+                        DirtySegs) ++ Acc
+        end,
+    lists:foldl(FoldFun, [], lists:seq(1, length(BlueBranches))).
+
+-spec compare_clocks(list(tuple()), list(tuple())) -> list(tuple()).
+%% @doc
+%% Find the differences between the lists 
+compare_clocks(BlueList, PinkList) ->
     BlueExcess = lists:subtract(BlueList, PinkList),
     PinkExcess = lists:subtract(PinkList, BlueList),
-    lists:ukeymerge(1, BlueExcess, PinkExcess);
-compare_results(BranchIds, BlueBranches, PinkBranches) ->
-    MapFun =
-        fun(Idx) ->
-            BranchID = lists:nth(Idx, BranchIds),
-            BlueBranch = lists:nth(Idx, BlueBranches),
-            PinkBranch = lists:nth(Idx, PinkBranches),
-            {BranchID, 
-                leveled_tictac:find_dirtysegments(BlueBranch, PinkBranch)}
-        end,
-    lists:map(MapFun, lists:seq(1, length(BranchIds))).
+    lists:ukeymerge(1, BlueExcess, PinkExcess).
 
 -spec intersect_ids(list(integer()), list(integer())) -> list(integer()).
 %% @doc
@@ -456,6 +487,12 @@ select_ids(IDList, MaxOutput) ->
 jitter_pause(Timeout) ->
     leveled_rand:uniform(Timeout) + Timeout div 2.
 
+
+-spec reset({pos_integer(), pos_integer()}) 
+                                        -> {non_neg_integer(), pos_integer()}.
+%% @doc
+%% Rest the count back to 0
+reset({Target, Target}) -> {0, Target}. 
 
 %%%============================================================================
 %%% log definitions
