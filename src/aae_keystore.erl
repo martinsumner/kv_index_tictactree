@@ -674,7 +674,7 @@ clear_pendingpath(Manifest, RootPath) ->
 %% Define log lines for this module
 logs() ->
     [{"KS001", 
-            {info, "Key Store loadding with id=~w has reached " 
+            {info, "Key Store loading with id=~w has reached " 
                     ++ "deferred count=~w"}},
         {"KS002",
             {warn, "No valid manifest found for AAE keystore at ~s "

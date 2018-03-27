@@ -526,7 +526,7 @@ schedule_rebuild({MegaSecs, Secs, MicroSecs}, {MinHours, JitterSeconds}) ->
     NewSecs = 
         MegaSecs * ?MEGA 
             + Secs 
-            + MinHours * 3600 + random:uniform(JitterSeconds),
+            + MinHours * 3600 + leveled_rand:uniform(JitterSeconds),
     {NewSecs div ?MEGA, NewSecs rem ?MEGA, MicroSecs}.
 
 
@@ -905,7 +905,7 @@ start_wrap(StartupI, RootPath, RPL, StoreType) ->
 put_keys(_Cntrl, _Preflists, KeyList, 0) ->
     KeyList;
 put_keys(Cntrl, Preflists, KeyList, Count) ->
-    Preflist = lists:nth(random:uniform(length(Preflists)), Preflists),
+    Preflist = lists:nth(leveled_rand:uniform(length(Preflists)), Preflists),
     Bucket = integer_to_binary(Count rem 5),  
     Key = list_to_binary(string:right(integer_to_list(Count), 6, $0)),
     VersionVector = add_randomincrement([]),
@@ -935,8 +935,8 @@ remove_keys(Cntrl, [{B, K, C, PL}|Rest]) ->
     remove_keys(Cntrl, Rest).
 
 add_randomincrement(Clock) ->
-    RandIncr = random:uniform(100),
-    RandNode = lists:nth(random:uniform(9), 
+    RandIncr = leveled_rand:uniform(100),
+    RandNode = lists:nth(leveled_rand:uniform(9), 
                             ["a", "b", "c", "d", "e", "f", "g", "h", "i"]),
     UpdClock = 
         case lists:keytake(RandNode, 1, Clock) of 
