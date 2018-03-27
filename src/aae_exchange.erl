@@ -130,6 +130,7 @@
 -type branch_results() :: list({integer(), binary()}).
     % Results to branch queries are a list mapping Branch ID to the binary for
     % that branch
+-type exchange_state() :: #state{}.
 
 %%%============================================================================
 %%% API
@@ -184,98 +185,49 @@ prepare(timeout, State) ->
 
 root_compare(timeout, State) ->
     BranchIDs = compare_roots(State#state.blue_acc, State#state.pink_acc),
-    case length(BranchIDs) of 
-        0 ->
-            {stop, normal, State};
-        _ ->
-            ok = send_requests(fetch_root, 
-                                State#state.blue_list, State#state.pink_list, 
-                                always_blue),
-            {next_state,
-                waiting_all_results,
-                State#state{start_time = os:timestamp(),
-                            root_compare_deltas = BranchIDs,
-                            pending_state = root_confirm,
-                            pink_acc = <<>>,
-                            blue_acc = <<>>,
-                            merge_fun = fun merge_root/2,
-                            pink_returns = reset(State#state.pink_returns),
-                            blue_returns = reset(State#state.blue_returns)},
-                ?CACHE_TIMEOUT_MS}
-    end.
+    trigger_next(fetch_root, 
+                    root_confirm, 
+                    fun merge_root/2, 
+                    <<>>, 
+                    length(BranchIDs) == 0, 
+                    ?CACHE_TIMEOUT_MS, 
+                    State#state{root_compare_deltas = BranchIDs}).
 
 root_confirm(timeout, State) ->
     BranchIDs0 = State#state.root_compare_deltas,
     BranchIDs1 = compare_roots(State#state.blue_acc, State#state.pink_acc),
     BranchIDs = 
         select_ids(intersect_ids(BranchIDs0, BranchIDs1), ?MAX_RESULTS),
-    case length(BranchIDs) of 
-        0 ->
-            {stop, normal, State};
-        _ ->
-            ok = send_requests({fetch_branches, BranchIDs}, 
-                                State#state.blue_list, State#state.pink_list, 
-                                always_blue),
-            {next_state,
-                waiting_all_results,
-                State#state{start_time = os:timestamp(),
-                            root_confirm_deltas = BranchIDs,
-                            pending_state = branch_compare,
-                            pink_acc = [],
-                            blue_acc = [],
-                            merge_fun = fun merge_branches/2,
-                            pink_returns = reset(State#state.pink_returns),
-                            blue_returns = reset(State#state.blue_returns)},
-                ?CACHE_TIMEOUT_MS}
-    end.
+    trigger_next({fetch_branches, BranchIDs}, 
+                    branch_compare, 
+                    fun merge_branches/2, 
+                    [], 
+                    length(BranchIDs) == 0, 
+                    ?CACHE_TIMEOUT_MS, 
+                    State#state{root_confirm_deltas = BranchIDs}).
 
 branch_compare(timeout, State) ->
     SegmentIDs = compare_branches(State#state.blue_acc, State#state.pink_acc),
-    case length(SegmentIDs) of 
-        0 ->
-            {stop, normal, State};
-        _ ->
-            ok = send_requests({fetch_branches, 
-                                    State#state.root_confirm_deltas}, 
-                                State#state.blue_list, State#state.pink_list,
-                                always_blue),
-            {next_state,
-                waiting_all_results,
-                State#state{start_time = os:timestamp(),
-                            branch_compare_deltas = SegmentIDs,
-                            pending_state = branch_confirm,
-                            pink_acc = [],
-                            blue_acc = [],
-                            merge_fun = fun merge_branches/2,
-                            pink_returns = reset(State#state.pink_returns),
-                            blue_returns = reset(State#state.blue_returns)},
-                ?CACHE_TIMEOUT_MS}
-    end.
+    trigger_next({fetch_branches, State#state.root_confirm_deltas}, 
+                    branch_confirm, 
+                    fun merge_branches/2, 
+                    [],
+                    length(SegmentIDs) == 0, 
+                    ?CACHE_TIMEOUT_MS, 
+                    State#state{branch_compare_deltas = SegmentIDs}).
 
 branch_confirm(timeout, State) ->
     SegmentIDs0 = State#state.branch_compare_deltas,
     SegmentIDs1 = compare_branches(State#state.blue_acc, State#state.pink_acc),
     SegmentIDs = 
         select_ids(intersect_ids(SegmentIDs0, SegmentIDs1), ?MAX_RESULTS),
-    case length(SegmentIDs) of 
-        0 ->
-            {stop, normal, State};
-        _ ->
-            ok = send_requests({fetch_clocks, SegmentIDs}, 
-                                State#state.blue_list, State#state.pink_list, 
-                                always_blue),
-            {next_state,
-                waiting_all_results,
-                State#state{start_time = os:timestamp(),
-                            branch_confirm_deltas = SegmentIDs,
-                            pending_state = clock_compare,
-                            pink_acc = [],
-                            blue_acc = [],
-                            merge_fun = fun merge_clocks/2,
-                            pink_returns = reset(State#state.pink_returns),
-                            blue_returns = reset(State#state.blue_returns)},
-                ?SCAN_TIMEOUT_MS}
-    end.
+    trigger_next({fetch_clocks, SegmentIDs}, 
+                    clock_compare, 
+                    fun merge_clocks/2, 
+                    [],
+                    length(SegmentIDs) == 0, 
+                    ?SCAN_TIMEOUT_MS, 
+                    State#state{branch_confirm_deltas = SegmentIDs}).
 
 clock_compare(timeout, State) ->
     RepairKeys = compare_clocks(State#state.blue_acc, State#state.pink_acc),
@@ -349,6 +301,35 @@ code_change(_OldVsn, StateName, State, _Extra) ->
 %%%============================================================================
 %%% Internal Functions
 %%%============================================================================
+
+-spec trigger_next(any(), atom(), fun(), any(), boolean(), 
+                                        integer(), exchange_state()) -> any().
+%% @doc
+%% Trigger the next request 
+trigger_next(NextRequest, PendingStateName, MergeFun, InitAcc, StopTest, 
+                                                        Timeout, LoopState) ->
+    case StopTest of 
+        true ->
+            {stop, normal, LoopState};
+        false ->
+            ok = send_requests(NextRequest, 
+                                LoopState#state.blue_list, 
+                                LoopState#state.pink_list, 
+                                always_blue),
+            {next_state,
+                waiting_all_results,
+                LoopState#state{start_time = os:timestamp(),
+                                pending_state = PendingStateName,
+                                pink_acc = InitAcc,
+                                blue_acc = InitAcc,
+                                merge_fun = MergeFun,
+                                pink_returns = 
+                                    reset(LoopState#state.pink_returns),
+                                blue_returns = 
+                                    reset(LoopState#state.blue_returns)},
+                Timeout}
+    end.
+
 
 -spec set_timeout(erlang:timestamp(), pos_integer()) -> integer().
 %% @doc
