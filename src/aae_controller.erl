@@ -28,7 +28,9 @@
             aae_put/7,
             aae_close/2,
             aae_fetchroot/3,
+            aae_mergeroot/3,
             aae_fetchbranches/4,
+            aae_mergebranches/4,
             aae_fetchclocks/4,
             aae_rebuildcaches/4]).
 
@@ -151,6 +153,28 @@ aae_put(Pid, IndexN, Bucket, Key, CurrentVV, PrevVV, BinaryObj) ->
 aae_fetchroot(Pid, IndexNs, ReturnFun) ->
     gen_server:cast(Pid, {fetch_root, IndexNs, ReturnFun}).
 
+-spec aae_mergeroot(pid(), list(responsible_preflist()), fun()) -> ok.
+%% @doc
+%% As with aae_fetch root, but now the reply will be just a single root rather
+%% than an indexed list.  The response will now always be a binary - an empty 
+%% one where the response is false.
+aae_mergeroot(Pid, IndexNs, ReturnFun) ->
+    MergeFoldFun =
+        fun({_IndexN, Root}, RootAcc) ->
+            Root0 = 
+                case Root of 
+                    false -> <<>>;
+                    R -> R
+                end,
+            aae_exchange:merge_root(Root0, RootAcc)
+        end,
+    WrappedReturnFun = 
+        fun(Result) ->
+            MergedResult = lists:foldl(MergeFoldFun, <<>>, Result),
+            ReturnFun(MergedResult)
+        end,
+    gen_server:cast(Pid, {fetch_root, IndexNs, WrappedReturnFun}).
+
 -spec aae_fetchbranches(pid(), 
                         list(responsible_preflist()), list(integer()), 
                         fun()) -> ok.
@@ -160,13 +184,38 @@ aae_fetchroot(Pid, IndexNs, ReturnFun) ->
 %% special case where no TreeCache exists for that preflist
 aae_fetchbranches(Pid, IndexNs, BranchIDs, ReturnFun) ->
     gen_server:cast(Pid, {fetch_branches, IndexNs, BranchIDs, ReturnFun}).
+    
 
+
+-spec aae_mergebranches(pid(), 
+                        list(responsible_preflist()), list(integer()), 
+                        fun()) -> ok.
+%% @doc
+%% As with fetch branches but the results are merged before sending
+aae_mergebranches(Pid, IndexNs, BranchIDs, ReturnFun) ->
+    MergeFoldFun =
+        fun({_IndexN, Branches}, BranchesAcc) ->
+            Branches0 = 
+                case Branches of 
+                    false -> [];
+                    Bs -> Bs
+                end,
+            aae_exchange:merge_branches(Branches0, BranchesAcc)
+        end,
+    WrappedReturnFun = 
+        fun(Result) ->
+            MergedResult = lists:foldl(MergeFoldFun, [], Result),
+            ReturnFun(MergedResult)
+        end,
+    gen_server:cast(Pid, 
+                    {fetch_branches, IndexNs, BranchIDs, WrappedReturnFun}).
+    
 
 -spec aae_fetchclocks(pid(), 
                         list(responsible_preflist()), list(integer()), 
                         fun()) -> ok.
 %% @doc
-%% Fetch all the keys and clocks covered by a given lis of SegmentIDs and a 
+%% Fetch all the keys and clocks covered by a given list of SegmentIDs and a 
 %% list of IndexNs
 aae_fetchclocks(Pid, IndexNs, SegmentIDs, ReturnFun) ->
     gen_server:cast(Pid, {fetch_clocks, IndexNs, SegmentIDs, ReturnFun}).
@@ -259,12 +308,16 @@ init([Opts]) ->
                 end,
             {IsRestored and AllRestored, [{IndexN, Cache}|Caches]}
         end,
+    
     {AllTreesOK, TreeCaches} = 
         lists:foldl(StartCacheFun, {true, []}, Opts#options.index_ns),
     
     % Start clock runner
     {ok, Runner} = aae_runner:runner_start(),
 
+    aae_util:log("AAE10", 
+                    [Opts#options.index_ns, Opts#options.keystore_type], 
+                    logs()),
     {ok, State0#state{object_splitfun = Opts#options.object_splitfun,
                         index_ns = Opts#options.index_ns,
                         tree_caches = TreeCaches,
@@ -505,14 +558,12 @@ flush_puts(Store, ObjSpecL) ->
 %% checksummed correctly when last saved)
 cache(Startup, IndexN, RootPath) ->
     TreeRP = filename:join(RootPath, ?TREE_PATH),
-    {Index, N} = IndexN,
-    PartitionID = Index + N,
     case Startup of 
         new ->
-            {ok, NC} = aae_treecache:cache_new(TreeRP, PartitionID),
+            {ok, NC} = aae_treecache:cache_new(TreeRP, IndexN),
             {true, NC};
         open ->
-            aae_treecache:cache_open(TreeRP, PartitionID)
+            aae_treecache:cache_open(TreeRP, IndexN)
     end.
 
 
@@ -601,7 +652,9 @@ logs() ->
         {"AAE08",
             {info, "Spawned worker receiving test fold"}},
         {"AAE09",
-            {info, "Change in IndexNs detected at rebuild - new IndexN ~w"}}
+            {info, "Change in IndexNs detected at rebuild - new IndexN ~w"}},
+        {"AAE10",
+            {info, "AAE controller started with IndexNs ~w and StoreType ~w"}}
     
     ].
 

@@ -40,12 +40,14 @@
                 loading = false :: boolean(),
                 change_queue :: list()}).
 
+-type partition_id() :: integer()|{integer(), integer()}.
+
 
 %%%============================================================================
 %%% API
 %%%============================================================================
 
--spec cache_open(list(), integer()) -> {boolean(), pid()}.
+-spec cache_open(list(), partition_id()) -> {boolean(), pid()}.
 %% @doc
 %% Open a tree cache, using any previously saved one for this tree cache as a 
 %% starting point.  Return is_empty boolean as true to indicate if a new cache 
@@ -56,7 +58,7 @@ cache_open(RootPath, PartitionID) ->
     IsRestored = gen_server:call(Pid, is_restored, infinity),
     {IsRestored, Pid}.
 
--spec cache_new(list(), integer()) -> {ok, pid()}.
+-spec cache_new(list(), partition_id()) -> {ok, pid()}.
 %% @doc
 %% Open a tree cache, without restoring from file
 cache_new(RootPath, PartitionID) ->
@@ -122,7 +124,7 @@ init([Opts]) ->
     PartitionID = aae_util:get_opt(partition_id, Opts),
     RootPath = aae_util:get_opt(root_path, Opts),
     IgnoreDisk = aae_util:get_opt(ignore_disk, Opts, false),
-    RootPath0 = filename:join(RootPath, integer_to_list(PartitionID)) ++ "/",
+    RootPath0 = filename:join(RootPath, flatten_id(PartitionID)) ++ "/",
     {StartTree, SaveSQN, IsRestored} = 
         case IgnoreDisk of 
             true ->
@@ -139,6 +141,7 @@ init([Opts]) ->
                         {Tree, SQN, true}
                 end
         end,
+    aae_util:log("C0005", [IsRestored, PartitionID], logs()),
     {ok, #state{save_sqn = SaveSQN, 
                 tree = StartTree, 
                 is_restored = IsRestored,
@@ -206,6 +209,14 @@ code_change(_OldVsn, State, _Extra) ->
 %%%============================================================================
 %%% Internal functions
 %%%============================================================================
+
+-spec flatten_id(partition_id()) -> list().
+%% @doc
+%% Flatten partition ID to make a folder name
+flatten_id({Index, N}) ->
+    integer_to_list(Index) ++ "_" ++ integer_to_list(N);
+flatten_id(ID) ->
+    integer_to_list(ID).
 
 -spec save_to_disk(list(), integer(), leveled_tictac:tictactree()) -> ok.
 %% @doc
@@ -313,7 +324,8 @@ logs() ->
     [{"C0001", {info, "Pending filename ~s found and will delete"}},
         {"C0002", {warn, "CRC wonky in file ~w"}},
         {"C0003", {info, "Saving tree cache to path ~s and filename ~s"}},
-        {"C0004", {info, "Destroying tree cache for partition ~w"}}].
+        {"C0004", {info, "Destroying tree cache for partition ~w"}},
+        {"C0005", {info, "Starting cache with is_restored=~w and IndexN of ~w"}}].
 
 %%%============================================================================
 %%% Test

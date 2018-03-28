@@ -95,7 +95,9 @@
             root_confirm/2,
             branch_compare/2,
             branch_confirm/2,
-            clock_compare/2]).
+            clock_compare/2,
+            merge_root/2,
+            merge_branches/2]).
 
 -export([start/4]).
 
@@ -139,11 +141,11 @@
 -spec start(input_list(), input_list(), fun(), fun()) -> {ok, list()}.
 %% @doc
 %% Start an FSM to manage an exchange and comapre the preflsist in the 
-%% BlueList wiht those in the PinkList, using the RepairFun to repair any
+%% BlueList with those in the PinkList, using the RepairFun to repair any
 %% keys discovered to have inconsistent clocks.  ReplyFun used to reply back
 %% to calling client the StateName at termination.
 %%
-%% Teh replyFun should be a 1 arity function
+%% The ReplyFun should be a 1 arity function t
 start(BlueList, PinkList, RepairFun, ReplyFun) ->
     ExchangeID = leveled_codec:generate_uuid(),
     gen_fsm:start(?MODULE, 
@@ -196,8 +198,10 @@ root_compare(timeout, State) ->
 root_confirm(timeout, State) ->
     BranchIDs0 = State#state.root_compare_deltas,
     BranchIDs1 = compare_roots(State#state.blue_acc, State#state.pink_acc),
-    BranchIDs = 
-        select_ids(intersect_ids(BranchIDs0, BranchIDs1), ?MAX_RESULTS),
+    BranchIDs = select_ids(intersect_ids(BranchIDs0, BranchIDs1), 
+                            ?MAX_RESULTS, 
+                            root_confirm, 
+                            State#state.exchange_id),
     trigger_next({fetch_branches, BranchIDs}, 
                     branch_compare, 
                     fun merge_branches/2, 
@@ -219,8 +223,10 @@ branch_compare(timeout, State) ->
 branch_confirm(timeout, State) ->
     SegmentIDs0 = State#state.branch_compare_deltas,
     SegmentIDs1 = compare_branches(State#state.blue_acc, State#state.pink_acc),
-    SegmentIDs = 
-        select_ids(intersect_ids(SegmentIDs0, SegmentIDs1), ?MAX_RESULTS),
+    SegmentIDs = select_ids(intersect_ids(SegmentIDs0, SegmentIDs1), 
+                            ?MAX_RESULTS,
+                            branch_confirm, 
+                            State#state.exchange_id),
     trigger_next({fetch_clocks, SegmentIDs}, 
                     clock_compare, 
                     fun merge_clocks/2, 
@@ -290,13 +296,51 @@ handle_info(_Msg, StateName, State) ->
     {next_state, StateName, State}.
 
 terminate(normal, StateName, State) ->
-    aae_util:log("EX003", [StateName, State#state.exchange_id], logs()),
+    aae_util:log("EX003", 
+                    [StateName, State#state.exchange_id,
+                        length(State#state.root_compare_deltas),
+                        length(State#state.root_confirm_deltas),
+                        length(State#state.branch_compare_deltas),
+                        length(State#state.branch_confirm_deltas),
+                        length(State#state.key_deltas)], 
+                    logs()),
     ReplyFun = State#state.reply_fun,
     ReplyFun(StateName).
 
 code_change(_OldVsn, StateName, State, _Extra) ->
     {ok, StateName, State}.
 
+
+
+%%%============================================================================
+%%% External Functions
+%%%============================================================================
+
+
+-spec merge_root(binary(), binary()) -> binary().
+%% @doc
+%% Merge an individual result for a set of preflists into the accumulated 
+%% binary for the tree root
+merge_root(ResultBin, <<>>) ->
+    ResultBin;
+merge_root(ResultBin, RootAccBin) ->
+    leveled_tictac:merge_binaries(ResultBin, RootAccBin).
+
+-spec merge_branches(branch_results(), branch_results()) -> branch_results().
+%% @doc
+%% Branches should be returned as a list of {BranchID, BranchBin} pairs.  For 
+%% each branch in a result, merge into the accumulator.
+merge_branches([], BranchAccL) ->
+    BranchAccL;
+merge_branches([{BranchID, BranchBin}|Rest], BranchAccL) ->
+    case lists:keyfind(BranchID, 1, BranchAccL) of
+        false ->
+            % First repsonse has an empty accumulator
+            merge_branches(Rest, [{BranchID, BranchBin}|BranchAccL]);
+        {BranchID, BinAcc} ->
+            BinAcc0 = leveled_tictac:merge_binaries(BranchBin, BinAcc),
+            lists:keyreplace(BranchID, 1, BranchAccL, {BranchID, BinAcc0})
+    end.
 
 %%%============================================================================
 %%% Internal Functions
@@ -360,30 +404,6 @@ send_requests(Msg, BlueList, [{SendFun, Preflists}|Rest], always_pink) ->
             send_requests(Msg, BlueList, Rest, always_pink)
     end.
 
-
--spec merge_root(binary(), binary()) -> binary().
-%% @doc
-%% Merge an individual result for a set of preflists into the accumulated 
-%% binary for the tree root
-merge_root(ResultBin, RootAccBin) ->
-    leveled_tictac:merge_binaries(ResultBin, RootAccBin).
-
--spec merge_branches(branch_results(), branch_results()) -> branch_results().
-%% @doc
-%% Branches should be returned as a list of {BranchID, BranchBin} pairs.  For 
-%% each branch in a result, merge into the accumulator.
-merge_branches([], BranchAccL) ->
-    BranchAccL;
-merge_branches([{BranchID, BranchBin}|Rest], BranchAccL) ->
-    case lists:keyfind(BranchID, 1, BranchAccL) of
-        false ->
-            % First repsonse has an empty accumulator
-            merge_branches(Rest, [{BranchID, BranchBin}|BranchAccL]);
-        {BranchID, BinAcc} ->
-            BinAcc0 = leveled_tictac:merge_binaries(BranchBin, BinAcc),
-            lists:keyreplace(BranchID, 1, BranchAccL, {BranchID, BinAcc0})
-    end.
-
 -spec merge_clocks(list(tuple()), list(tuple())) -> list(tuple()).
 %% @doc
 %% Accumulate keys and clocks returned in the segment query, outputting a 
@@ -432,13 +452,14 @@ intersect_ids(IDs0, IDs1) ->
     lists:filter(fun(ID) -> lists:member(ID, IDs1) end, IDs0).
 
 
--spec select_ids(list(integer()), pos_integer()) -> list(integer()).
+-spec select_ids(list(integer()), pos_integer(), atom(), list()) 
+                                                        -> list(integer()).
 %% @doc
 %% Select a cluster of IDs if the list of IDs is smaller than the maximum 
 %% output size.  The lookup based on these IDs will be segment based, so it 
 %% is expected that the tightest clustering will yield the most efficient 
 %% results. 
-select_ids(IDList, MaxOutput) ->
+select_ids(IDList, MaxOutput, StateName, ExchangeID) ->
     FoldFun =
         fun(Idx, {BestIdx, MinOutput}) ->
             Space = lists:nth(MaxOutput + Idx - 1, IDList) 
@@ -452,6 +473,9 @@ select_ids(IDList, MaxOutput) ->
         end,
     case length(IDList) > MaxOutput of 
         true ->
+            aae_util:log("EX005", 
+                            [ExchangeID, length(IDList), StateName],
+                            logs()),
             {BestSliceStart, _Score} = 
                 lists:foldl(FoldFun, 
                             {0, infinity}, 
@@ -489,9 +513,14 @@ logs() ->
             {error, "Timeout with pending_state=~w and missing_count=~w" 
                         ++ " for exchange id=~s"}},
         {"EX003",
-            {info, "Normal exit at pending_state=~w for exchange id=~s"}},
+            {info, "Normal exit at pending_state=~w for exchange id=~s"
+                        ++ " root_compare_deltas=~w root_confirm_deltas=~w"
+                        ++ " branch_compare_deltas=~w branch_confirm_deltas=~w"
+                        ++ " key_deltas=~w"}},
         {"EX004",
-            {info, "Exchange id =~s led to prompting of repair_count=~w"}}
+            {info, "Exchange id=~s led to prompting of repair_count=~w"}},
+        {"EX005",
+            {info, "Exchange id=~s throttled count=~w at state=~w"}}
         ].
 
 
@@ -503,12 +532,12 @@ logs() ->
 
 select_id_test() ->
     L0 = [1, 2, 3],
-    ?assertMatch(L0, select_ids(L0, 3)),
+    ?assertMatch(L0, select_ids(L0, 3, root_confirm, "t0")),
     L1 = [1, 2, 3, 5],
-    ?assertMatch(L0, select_ids(L1, 3)),
+    ?assertMatch(L0, select_ids(L1, 3, root_confirm, "t1")),
     L2 = [1, 2, 3, 5, 6, 7, 8],
-    ?assertMatch(L0, select_ids(L2, 3)),
-    ?assertMatch([5, 6, 7, 8], select_ids(L2, 4)),
-    ?assertMatch(L0, select_ids(intersect_ids(L1, L2), 3)).
+    ?assertMatch(L0, select_ids(L2, 3, root_confirm, "t2")),
+    ?assertMatch([5, 6, 7, 8], select_ids(L2, 4, root_confirm, "t3")),
+    ?assertMatch(L0, select_ids(intersect_ids(L1, L2), 3, root_confirm, "t4")).
 
 -endif.
