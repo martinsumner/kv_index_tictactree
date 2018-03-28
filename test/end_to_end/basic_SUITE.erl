@@ -74,10 +74,17 @@ dual_store_compare(_Config) ->
     
 
 
-
     % Confirm no dependencies when using different matching AAE exchanges
+    RepairFun = fun(_KL) -> null end,  
 
-
+    {ok, _P, GUID} = 
+        aae_exchange:start([{exchange_sendfun(Cntrl1), [{2,0}]}],
+                                [{exchange_sendfun(Cntrl2), [{3, 0}]}],
+                                RepairFun,
+                                ReturnFun),
+    io:format("Exchange id ~s~n", [GUID]),
+    ExchangeState = start_receiver(),
+    true = ExchangeState == root_compare,
 
     % Create a discrepancy and discove rit through exchange
 
@@ -177,3 +184,24 @@ start_receiver() ->
         {result, Reply} ->
             Reply 
     end.
+
+
+exchange_sendfun(Cntrl) ->
+    SendFun = 
+        fun(Msg, Preflists, Colour) ->
+            RPid = self(),
+            ReturnFun = 
+                fun(R) -> 
+                    io:format("Preparing reply to ~w for colour ~w~n", 
+                                [RPid, Colour]),
+                    aae_exchange:reply(RPid, R, Colour)
+                end,
+            case Msg of 
+                fetch_root ->
+                    io:format("fetch_root sent to ~w to return to ~w~n", 
+                                [Cntrl, RPid]),
+                    aae_controller:aae_mergeroot(Cntrl, Preflists, ReturnFun)
+            end
+        end,
+    SendFun.
+

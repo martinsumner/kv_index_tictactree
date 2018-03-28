@@ -72,7 +72,7 @@
 
 -include("include/aae.hrl").
 
--define(TRANSITION_PAUSE_MS, 1000).
+-define(TRANSITION_PAUSE_MS, 100).
     % A pause between phases - allow queue lengths to change, and avoid
     % generating an excess workload for AAE
 -define(CACHE_TIMEOUT_MS, 60000). 
@@ -99,7 +99,8 @@
             merge_root/2,
             merge_branches/2]).
 
--export([start/4]).
+-export([start/4,
+            reply/3]).
 
 -include_lib("eunit/include/eunit.hrl").
 
@@ -138,7 +139,7 @@
 %%% API
 %%%============================================================================
 
--spec start(input_list(), input_list(), fun(), fun()) -> {ok, list()}.
+-spec start(input_list(), input_list(), fun(), fun()) -> {ok, pid(), list()}.
 %% @doc
 %% Start an FSM to manage an exchange and comapre the preflsist in the 
 %% BlueList with those in the PinkList, using the RepairFun to repair any
@@ -148,11 +149,17 @@
 %% The ReplyFun should be a 1 arity function t
 start(BlueList, PinkList, RepairFun, ReplyFun) ->
     ExchangeID = leveled_codec:generate_uuid(),
-    gen_fsm:start(?MODULE, 
-                    [BlueList, PinkList, RepairFun, ReplyFun, ExchangeID], 
-                    []),
-    {ok, ExchangeID}.
+    {ok, ExPID} = gen_fsm:start(?MODULE, 
+                                [BlueList, PinkList, RepairFun, ReplyFun, 
+                                    ExchangeID], 
+                                []),
+    {ok, ExPID, ExchangeID}.
 
+-spec reply(pid(), any(), pink|blue) -> ok.
+%% @doc
+%% Support events to be sent back to the FSM
+reply(Exchange, Result, Colour) ->
+    gen_fsm:send_event(Exchange, {reply, Result, Colour}).
 
 %%%============================================================================
 %%% gen_fsm callbacks
@@ -169,10 +176,11 @@ init([BlueList, PinkList, RepairFun, ReplyFun, ExchangeID]) ->
                     exchange_id = ExchangeID,
                     pink_returns = {0, PinkTarget},
                     blue_returns = {0, BlueTarget}},
-    aee_util:log("EX001", [ExchangeID, PinkTarget + BlueTarget], logs()),
+    aae_util:log("EX001", [ExchangeID, PinkTarget + BlueTarget], logs()),
     {ok, prepare, State, jitter_pause(?TRANSITION_PAUSE_MS)}.
 
 prepare(timeout, State) ->
+    aae_util:log("EX006", [prepare, State#state.exchange_id], logs()),
     ok = send_requests(fetch_root, 
                         State#state.blue_list, State#state.pink_list, 
                         always_blue),
@@ -186,6 +194,7 @@ prepare(timeout, State) ->
         ?CACHE_TIMEOUT_MS}.
 
 root_compare(timeout, State) ->
+    aae_util:log("EX006", [root_compare, State#state.exchange_id], logs()),
     BranchIDs = compare_roots(State#state.blue_acc, State#state.pink_acc),
     trigger_next(fetch_root, 
                     root_confirm, 
@@ -196,6 +205,7 @@ root_compare(timeout, State) ->
                     State#state{root_compare_deltas = BranchIDs}).
 
 root_confirm(timeout, State) ->
+    aae_util:log("EX006", [root_confirm, State#state.exchange_id], logs()),
     BranchIDs0 = State#state.root_compare_deltas,
     BranchIDs1 = compare_roots(State#state.blue_acc, State#state.pink_acc),
     BranchIDs = select_ids(intersect_ids(BranchIDs0, BranchIDs1), 
@@ -211,6 +221,7 @@ root_confirm(timeout, State) ->
                     State#state{root_confirm_deltas = BranchIDs}).
 
 branch_compare(timeout, State) ->
+    aae_util:log("EX006", [branch_compare, State#state.exchange_id], logs()),
     SegmentIDs = compare_branches(State#state.blue_acc, State#state.pink_acc),
     trigger_next({fetch_branches, State#state.root_confirm_deltas}, 
                     branch_confirm, 
@@ -221,6 +232,7 @@ branch_compare(timeout, State) ->
                     State#state{branch_compare_deltas = SegmentIDs}).
 
 branch_confirm(timeout, State) ->
+    aae_util:log("EX006", [branch_confirm, State#state.exchange_id], logs()),
     SegmentIDs0 = State#state.branch_compare_deltas,
     SegmentIDs1 = compare_branches(State#state.blue_acc, State#state.pink_acc),
     SegmentIDs = select_ids(intersect_ids(SegmentIDs0, SegmentIDs1), 
@@ -236,6 +248,7 @@ branch_confirm(timeout, State) ->
                     State#state{branch_confirm_deltas = SegmentIDs}).
 
 clock_compare(timeout, State) ->
+    aae_util:log("EX006", [clock_compare, State#state.exchange_id], logs()),
     RepairKeys = compare_clocks(State#state.blue_acc, State#state.pink_acc),
     RepairFun = State#state.repair_fun,
     aae_util:log("EX004", 
@@ -248,6 +261,7 @@ clock_compare(timeout, State) ->
 
 
 waiting_all_results({reply, Result, Colour}, State) ->
+    aae_util:log("EX007", [Colour, State#state.exchange_id], logs()),
     {PC, PT} = State#state.pink_returns,
     {BC, BT} = State#state.blue_returns,
     MergeFun = State#state.merge_fun,
@@ -520,7 +534,11 @@ logs() ->
         {"EX004",
             {info, "Exchange id=~s led to prompting of repair_count=~w"}},
         {"EX005",
-            {info, "Exchange id=~s throttled count=~w at state=~w"}}
+            {info, "Exchange id=~s throttled count=~w at state=~w"}},
+        {"EX006", % should be debug in production
+            {info, "State change to ~w for exchange id=~s"}},
+        {"EX007", % should be changed to debug in production
+            {info, "Reply received for colour=~w in exchange id=~s"}}
         ].
 
 
