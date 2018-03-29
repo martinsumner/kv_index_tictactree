@@ -477,7 +477,7 @@ handle_cast({fetch_clocks, IndexNs, SegmentIDs, ReturnFun}, State) ->
         fun(B, K, V, Acc) ->
             case lists:member(aae_keystore:value_preflist(V), IndexNs) of   
                 true ->
-                    [{B, K, aae_keystore:value_clock(V)}];
+                    [{B, K, aae_keystore:value_clock(V)}|Acc];
                 false ->
                     Acc 
             end 

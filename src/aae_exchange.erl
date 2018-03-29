@@ -252,12 +252,12 @@ clock_compare(timeout, State) ->
     RepairKeys = compare_clocks(State#state.blue_acc, State#state.pink_acc),
     RepairFun = State#state.repair_fun,
     aae_util:log("EX004", 
-                    [length(RepairKeys), State#state.exchange_id], 
+                    [State#state.exchange_id, length(RepairKeys)], 
                     logs()),
     RepairFun(RepairKeys),
     {stop, 
         normal, 
-        State#state{key_deltas = RepairKeys, pending_state = complete}}.
+        State#state{key_deltas = RepairKeys}}.
 
 
 waiting_all_results({reply, Result, Colour}, State) ->
@@ -319,7 +319,7 @@ terminate(normal, StateName, State) ->
                         length(State#state.key_deltas)], 
                     logs()),
     ReplyFun = State#state.reply_fun,
-    ReplyFun(StateName).
+    ReplyFun({StateName, length(State#state.key_deltas)}).
 
 code_change(_OldVsn, StateName, State, _Extra) ->
     {ok, StateName, State}.
@@ -349,11 +349,15 @@ merge_branches([], BranchAccL) ->
 merge_branches([{BranchID, BranchBin}|Rest], BranchAccL) ->
     case lists:keyfind(BranchID, 1, BranchAccL) of
         false ->
-            % First repsonse has an empty accumulator
+            % First response has an empty accumulator
             merge_branches(Rest, [{BranchID, BranchBin}|BranchAccL]);
         {BranchID, BinAcc} ->
             BinAcc0 = leveled_tictac:merge_binaries(BranchBin, BinAcc),
-            lists:keyreplace(BranchID, 1, BranchAccL, {BranchID, BinAcc0})
+            merge_branches(Rest, 
+                            lists:keyreplace(BranchID, 
+                                                1, 
+                                                BranchAccL, 
+                                                {BranchID, BinAcc0}))
     end.
 
 %%%============================================================================
@@ -445,7 +449,7 @@ compare_branches(BlueBranches, PinkBranches) ->
             DirtySegs =
                 leveled_tictac:find_dirtysegments(BlueBranch, PinkBranch),
             lists:map(fun(S) -> 
-                            leveled_tictac:join_segment(BranchID, S) 
+                            leveled_tictac:join_segment(BranchID, S)
                         end,
                         DirtySegs) ++ Acc
         end,
@@ -453,11 +457,15 @@ compare_branches(BlueBranches, PinkBranches) ->
 
 -spec compare_clocks(list(tuple()), list(tuple())) -> list(tuple()).
 %% @doc
-%% Find the differences between the lists 
-compare_clocks(BlueList, PinkList) ->
-    BlueExcess = lists:subtract(BlueList, PinkList),
-    PinkExcess = lists:subtract(PinkList, BlueList),
-    lists:ukeymerge(1, BlueExcess, PinkExcess).
+%% Find the differences between the lists - and return Bucket/Key pairs
+%% TODO: allow for proper clock comparison e.g. which is more up to date
+compare_clocks(BlueList0, PinkList0) ->
+    BlueList = lists:usort(BlueList0),
+    PinkList = lists:usort(PinkList0),
+    MapToKeyFun =  fun({B, K, _V}) -> {B, K} end,
+    BlueExcess = lists:map(MapToKeyFun, lists:subtract(BlueList, PinkList)),
+    PinkExcess = lists:map(MapToKeyFun, lists:subtract(PinkList, BlueList)),
+    lists:umerge(BlueExcess, PinkExcess).
 
 -spec intersect_ids(list(integer()), list(integer())) -> list(integer()).
 %% @doc
@@ -474,10 +482,11 @@ intersect_ids(IDs0, IDs1) ->
 %% is expected that the tightest clustering will yield the most efficient 
 %% results. 
 select_ids(IDList, MaxOutput, StateName, ExchangeID) ->
+    IDList0 = lists:usort(IDList),
     FoldFun =
         fun(Idx, {BestIdx, MinOutput}) ->
-            Space = lists:nth(MaxOutput + Idx - 1, IDList) 
-                        - lists:nth(Idx, IDList),
+            Space = lists:nth(MaxOutput + Idx - 1, IDList0) 
+                        - lists:nth(Idx, IDList0),
             case Space < MinOutput of 
                 true ->
                     {Idx, Space};
@@ -485,18 +494,18 @@ select_ids(IDList, MaxOutput, StateName, ExchangeID) ->
                     {BestIdx, MinOutput}
             end
         end,
-    case length(IDList) > MaxOutput of 
+    case length(IDList0) > MaxOutput of 
         true ->
             aae_util:log("EX005", 
-                            [ExchangeID, length(IDList), StateName],
+                            [ExchangeID, length(IDList0), StateName],
                             logs()),
             {BestSliceStart, _Score} = 
                 lists:foldl(FoldFun, 
                             {0, infinity}, 
-                            lists:seq(1, 1 + length(IDList) - MaxOutput)),
-            lists:sublist(IDList, BestSliceStart, MaxOutput);
+                            lists:seq(1, 1 + length(IDList0) - MaxOutput)),
+            lists:sublist(IDList0, BestSliceStart, MaxOutput);
         false ->
-            IDList
+            IDList0
     end.
     
 -spec jitter_pause(pos_integer()) -> pos_integer().
@@ -556,6 +565,10 @@ select_id_test() ->
     L2 = [1, 2, 3, 5, 6, 7, 8],
     ?assertMatch(L0, select_ids(L2, 3, root_confirm, "t2")),
     ?assertMatch([5, 6, 7, 8], select_ids(L2, 4, root_confirm, "t3")),
-    ?assertMatch(L0, select_ids(intersect_ids(L1, L2), 3, root_confirm, "t4")).
+    ?assertMatch(L0, select_ids(intersect_ids(L1, L2), 3, root_confirm, "t4")),
+    L3 = [8, 7, 1, 3, 2, 5, 6],
+    ?assertMatch(L0, select_ids(L3, 3, root_confirm, "t5")),
+    ?assertMatch([5, 6, 7, 8], select_ids(L3, 4, root_confirm, "t6")),
+    ?assertMatch(L0, select_ids(intersect_ids(L1, L3), 3, root_confirm, "t7")).
 
 -endif.

@@ -77,16 +77,82 @@ dual_store_compare(_Config) ->
     % Confirm no dependencies when using different matching AAE exchanges
     RepairFun = fun(_KL) -> null end,  
 
-    {ok, _P, GUID} = 
+    {ok, _P1, GUID1} = 
         aae_exchange:start([{exchange_sendfun(Cntrl1), [{2,0}]}],
                                 [{exchange_sendfun(Cntrl2), [{3, 0}]}],
                                 RepairFun,
                                 ReturnFun),
-    io:format("Exchange id ~s~n", [GUID]),
-    ExchangeState = start_receiver(),
-    true = ExchangeState == root_compare,
+    io:format("Exchange id ~s~n", [GUID1]),
+    {ExchangeState1, 0} = start_receiver(),
+    true = ExchangeState1 == root_compare,
 
-    % Create a discrepancy and discove rit through exchange
+    {ok, _P2, GUID2} = 
+        aae_exchange:start([{exchange_sendfun(Cntrl1), [{2,1}]}],
+                                [{exchange_sendfun(Cntrl2), [{3, 1}, {3, 2}]}],
+                                RepairFun,
+                                ReturnFun),
+    io:format("Exchange id ~s~n", [GUID2]),
+    {ExchangeState2, 0} = start_receiver(),
+    true = ExchangeState2 == root_compare,
+
+    {ok, _P3, GUID3} = 
+        aae_exchange:start([{exchange_sendfun(Cntrl1), [{2, 0}, {2,1}]}],
+                                [{exchange_sendfun(Cntrl2), 
+                                    [{3, 0}, {3, 1}, {3, 2}]}],
+                                RepairFun,
+                                ReturnFun),
+    io:format("Exchange id ~s~n", [GUID3]),
+    {ExchangeState3, 0} = start_receiver(),
+    true = ExchangeState3 == root_compare,
+
+    {ok, _P4, GUID4} = 
+        aae_exchange:start([{exchange_sendfun(Cntrl1), [{2,0}]}, 
+                                    {exchange_sendfun(Cntrl1), [{2,1}]}],
+                                [{exchange_sendfun(Cntrl2), 
+                                    [{3, 0}, {3, 1}, {3, 2}]}],
+                                RepairFun,
+                                ReturnFun),
+    io:format("Exchange id ~s~n", [GUID4]),
+    {ExchangeState4, 0} = start_receiver(),
+    true = ExchangeState4 == root_compare,
+
+
+    % Create a discrepancy and discover it through exchange
+    BKVListN = gen_keys([], 10),
+    SL = lists:foldl(fun({B, K, _V}, Acc) -> 
+                            BK = aae_util:make_binarykey(B, K),
+                            Seg = leveled_tictac:keyto_segment48(BK),
+                            Seg0 = aae_keystore:generate_treesegment(Seg),
+                            io:format("Generate new key B ~w K ~w " ++ 
+                                        "for Segment ~w ~w ~w partition ~w ~w~n",
+                                        [B, K, Seg0,  Seg0 bsr 8, Seg0 band 255, 
+                                        calc_preflist(K, 2), calc_preflist(K, 3)]),
+                            [Seg0|Acc]
+                        end,
+                        [],
+                        BKVListN),
+    ok = put_keys(Cntrl1, 2, BKVListN),
+
+    ok = aae_controller:aae_fetchclocks(Cntrl1, 
+                                        [{2, 0}, {2, 1}], 
+                                        lists:usort(SL), 
+                                        ReturnFun),
+    FetchClockL1 = start_receiver(),
+    10 = length(FetchClockL1),
+
+    {ok, _P6, GUID6} = 
+        aae_exchange:start([{exchange_sendfun(Cntrl1), [{2,0}]}, 
+                                    {exchange_sendfun(Cntrl1), [{2,1}]}],
+                                [{exchange_sendfun(Cntrl2), 
+                                    [{3, 0}, {3, 1}, {3, 2}]}],
+                                RepairFun,
+                                ReturnFun),
+    io:format("Exchange id ~s~n", [GUID6]),
+    {ExchangeState6, 10} = start_receiver(),
+    true = ExchangeState6 == clock_compare,
+
+    % TODO:
+    % Add repair count to reply.  Wrong number of repairs!
 
 
 
@@ -192,15 +258,25 @@ exchange_sendfun(Cntrl) ->
             RPid = self(),
             ReturnFun = 
                 fun(R) -> 
-                    io:format("Preparing reply to ~w for colour ~w~n", 
-                                [RPid, Colour]),
+                    io:format("Preparing reply to ~w for msg ~w colour ~w~n", 
+                                [RPid, Msg, Colour]),
                     aae_exchange:reply(RPid, R, Colour)
                 end,
             case Msg of 
                 fetch_root ->
-                    io:format("fetch_root sent to ~w to return to ~w~n", 
-                                [Cntrl, RPid]),
-                    aae_controller:aae_mergeroot(Cntrl, Preflists, ReturnFun)
+                    aae_controller:aae_mergeroot(Cntrl, 
+                                                    Preflists, 
+                                                    ReturnFun);
+                {fetch_branches, BranchIDs} ->
+                    aae_controller:aae_mergebranches(Cntrl, 
+                                                        Preflists, 
+                                                        BranchIDs, 
+                                                        ReturnFun);
+                {fetch_clocks, SegmentIDs} ->
+                    aae_controller:aae_fetchclocks(Cntrl,
+                                                        Preflists,
+                                                        SegmentIDs,
+                                                        ReturnFun)
             end
         end,
     SendFun.
