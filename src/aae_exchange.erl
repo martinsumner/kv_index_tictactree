@@ -72,7 +72,7 @@
 
 -include("include/aae.hrl").
 
--define(TRANSITION_PAUSE_MS, 100).
+-define(TRANSITION_PAUSE_MS, 500).
     % A pause between phases - allow queue lengths to change, and avoid
     % generating an excess workload for AAE
 -define(CACHE_TIMEOUT_MS, 60000). 
@@ -120,7 +120,8 @@
                 blue_acc,
                 merge_fun,
                 start_time :: erlang:timestamp(),
-                pending_state :: atom()
+                pending_state :: atom(),
+                reply_timeout = 0 :: integer()
                 }).
 
 -type input_list() :: [{fun(), list(tuple())}].
@@ -174,24 +175,20 @@ init([BlueList, PinkList, RepairFun, ReplyFun, ExchangeID]) ->
                     repair_fun = RepairFun,
                     reply_fun = ReplyFun,
                     exchange_id = ExchangeID,
-                    pink_returns = {0, PinkTarget},
-                    blue_returns = {0, BlueTarget}},
+                    pink_returns = {PinkTarget, PinkTarget},
+                    blue_returns = {BlueTarget, BlueTarget}},
     aae_util:log("EX001", [ExchangeID, PinkTarget + BlueTarget], logs()),
-    {ok, prepare, State, jitter_pause(?TRANSITION_PAUSE_MS)}.
+    {ok, prepare, State, 0}.
 
 prepare(timeout, State) ->
     aae_util:log("EX006", [prepare, State#state.exchange_id], logs()),
-    ok = send_requests(fetch_root, 
-                        State#state.blue_list, State#state.pink_list, 
-                        always_blue),
-    {next_state, 
-        waiting_all_results, 
-        State#state{start_time = os:timestamp(),
-                    pending_state = root_compare,
-                    pink_acc = <<>>,
-                    blue_acc = <<>>,
-                    merge_fun = fun merge_root/2},
-        ?CACHE_TIMEOUT_MS}.
+    trigger_next(fetch_root, 
+                    root_compare, 
+                    fun merge_root/2, 
+                    <<>>, 
+                    false, 
+                    ?CACHE_TIMEOUT_MS, 
+                    State).
 
 root_compare(timeout, State) ->
     aae_util:log("EX006", [root_compare, State#state.exchange_id], logs()),
@@ -286,7 +283,8 @@ waiting_all_results({reply, Result, Colour}, State) ->
             {next_state, 
                 waiting_all_results, 
                 State0, 
-                set_timeout(State0#state.start_time, ?CACHE_TIMEOUT_MS)}
+                set_timeout(State0#state.start_time, 
+                            State0#state.reply_timeout)}
     end;
 waiting_all_results(timeout, State) ->
     {PC, PT} = State#state.pink_returns,
@@ -388,7 +386,8 @@ trigger_next(NextRequest, PendingStateName, MergeFun, InitAcc, StopTest,
                                 pink_returns = 
                                     reset(LoopState#state.pink_returns),
                                 blue_returns = 
-                                    reset(LoopState#state.blue_returns)},
+                                    reset(LoopState#state.blue_returns),
+                                reply_timeout = Timeout},
                 Timeout}
     end.
 
@@ -570,5 +569,37 @@ select_id_test() ->
     ?assertMatch(L0, select_ids(L3, 3, root_confirm, "t5")),
     ?assertMatch([5, 6, 7, 8], select_ids(L3, 4, root_confirm, "t6")),
     ?assertMatch(L0, select_ids(intersect_ids(L1, L3), 3, root_confirm, "t7")).
+
+compare_clocks_test() ->
+    KV1 = {<<"B1">>, <<"K1">>, [{a, 1}]},
+    KV2 = {<<"B1">>, <<"K2">>, [{b, 1}]},
+    KV3 = {<<"B1">>, <<"K3">>, [{a, 2}]},
+    KV4 = {<<"B1">>, <<"K1">>, [{a, 1}, {b, 2}]},
+    KV5 = {<<"B1">>, <<"K2">>, [{b, 1}, {c, 1}]},
+
+    BL1 = [KV1, KV2, KV3],
+    PL1 = [KV1, KV2, KV3],
+    ?assertMatch([], compare_clocks(BL1, PL1)),
+    BL2 = [KV2, KV3, KV4],
+    ?assertMatch([{<<"B1">>, <<"K1">>}], compare_clocks(BL2, PL1)),
+    ?assertMatch([{<<"B1">>, <<"K1">>}], compare_clocks(PL1, BL2)),
+    PL2 = [KV4, KV5],
+    ?assertMatch([{<<"B1">>, <<"K1">>}, 
+                    {<<"B1">>, <<"K2">>}, 
+                    {<<"B1">>, <<"K3">>}], compare_clocks(BL1, PL2)).
+
+clean_exit_ontimeout_test() ->
+    {stop, normal, State0} = 
+        waiting_all_results(timeout, #state{pink_returns={4, 5}, 
+                                            blue_returns={8, 8}}),
+    ?assertMatch(timeout, State0#state.pending_state).
+
+
+coverage_cheat_test() ->
+    {next_state, prepare, _State} = handle_event(null, prepare, #state{}),
+    {reply, ok, prepare, _State} = handle_sync_event(null, nobody, prepare, #state{}),
+    {next_state, prepare, _State} = handle_info(null, prepare, #state{}),
+    {ok, prepare, _State} = code_change(null, prepare, #state{}, null).
+
 
 -endif.
