@@ -166,6 +166,19 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
     {ExchangeState6, 10} = start_receiver(),
     true = ExchangeState6 == clock_compare,
 
+    % Same again, but request a missing partition, and should get same result
+
+    {ok, _P6a, GUID6a} = 
+        aae_exchange:start([{exchange_sendfun(Cntrl1), [{2,0}]}, 
+                                    {exchange_sendfun(Cntrl1), [{2,1}]}],
+                                [{exchange_sendfun(Cntrl2), 
+                                    [{3, 0}, {3, 1}, {3, 2}, {3, 3}]}],
+                                RepairFun,
+                                ReturnFun),
+    io:format("Exchange id ~s~n", [GUID6a]),
+    {ExchangeState6a, 10} = start_receiver(),
+    true = ExchangeState6a == clock_compare,
+
     % Nothing repaired last time.  The deltas are all new keys though, so
     % We can repair by adding them in to the other vnode
 

@@ -543,9 +543,9 @@ logs() ->
             {info, "Exchange id=~s led to prompting of repair_count=~w"}},
         {"EX005",
             {info, "Exchange id=~s throttled count=~w at state=~w"}},
-        {"EX006", % should be debug in production
+        {"EX006", % TODO: should be debug in production
             {info, "State change to ~w for exchange id=~s"}},
-        {"EX007", % should be changed to debug in production
+        {"EX007", % TODO: should be changed to debug in production
             {info, "Reply received for colour=~w in exchange id=~s"}}
         ].
 

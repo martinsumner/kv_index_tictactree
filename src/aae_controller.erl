@@ -161,12 +161,10 @@ aae_fetchroot(Pid, IndexNs, ReturnFun) ->
 aae_mergeroot(Pid, IndexNs, ReturnFun) ->
     MergeFoldFun =
         fun({_IndexN, Root}, RootAcc) ->
-            Root0 = 
-                case Root of 
-                    false -> <<>>;
-                    R -> R
-                end,
-            aae_exchange:merge_root(Root0, RootAcc)
+            case Root of 
+                false -> RootAcc;
+                R -> aae_exchange:merge_root(R, RootAcc)
+            end
         end,
     WrappedReturnFun = 
         fun(Result) ->
