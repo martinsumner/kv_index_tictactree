@@ -113,13 +113,13 @@
                 reply_fun,
                 blue_list = [] :: input_list(),
                 pink_list = [] :: input_list(),
-                exchange_id :: list(),
-                blue_returns :: {integer(), integer()},
-                pink_returns :: {integer(), integer()},
+                exchange_id = "not_set" :: list(),
+                blue_returns = {0, 0} :: {integer(), integer()},
+                pink_returns = {0, 0} :: {integer(), integer()},
                 pink_acc,
                 blue_acc,
                 merge_fun,
-                start_time :: erlang:timestamp(),
+                start_time = os:timestamp() :: erlang:timestamp(),
                 pending_state :: atom(),
                 reply_timeout = 0 :: integer()
                 }).
@@ -589,17 +589,16 @@ compare_clocks_test() ->
                     {<<"B1">>, <<"K3">>}], compare_clocks(BL1, PL2)).
 
 clean_exit_ontimeout_test() ->
-    {stop, normal, State0} = 
-        waiting_all_results(timeout, #state{pink_returns={4, 5}, 
-                                            blue_returns={8, 8}}),
-    ?assertMatch(timeout, State0#state.pending_state).
+    State0 = #state{pink_returns={4, 5}, blue_returns={8, 8}},
+    State1 = State0#state{pending_state = timeout},
+    {stop, normal, State1} = waiting_all_results(timeout, State0).
 
 
 coverage_cheat_test() ->
-    {next_state, prepare, _State} = handle_event(null, prepare, #state{}),
-    {reply, ok, prepare, _State} = handle_sync_event(null, nobody, prepare, #state{}),
-    {next_state, prepare, _State} = handle_info(null, prepare, #state{}),
-    {ok, prepare, _State} = code_change(null, prepare, #state{}, null).
+    {next_state, prepare, _State0} = handle_event(null, prepare, #state{}),
+    {reply, ok, prepare, _State1} = handle_sync_event(null, nobody, prepare, #state{}),
+    {next_state, prepare, _State2} = handle_info(null, prepare, #state{}),
+    {ok, prepare, _State3} = code_change(null, prepare, #state{}, null).
 
 
 -endif.

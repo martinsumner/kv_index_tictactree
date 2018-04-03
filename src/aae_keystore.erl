@@ -51,23 +51,23 @@
             value_indexhash/1,
             value_aaesegment/1]).
 
--record(state, {vnode :: pid(),
-                store :: pid(),
+-record(state, {vnode :: pid()|undefined,
+                store :: pid()|undefined,
                 id = "KeyStore" :: any(),
                 store_type :: supported_stores(),
                 change_queue = [] :: list(),
                 change_queue_counter = 0 :: integer(),
                 load_counter = 0 :: integer(),
-                current_guid :: list(),
-                root_path :: list(),
+                current_guid :: list()|undefined,
+                root_path :: list()|undefined,
                 last_rebuild :: os:timestamp()|never,
-                load_store :: pid(),
-                load_guid :: list(),
-                backend_opts :: list(),
+                load_store :: pid()|undefined,
+                load_guid :: list()|undefined,
+                backend_opts = [] :: list(),
                 shutdown_guid = none :: list()|none}).
 
--record(manifest, {current_guid :: list(), 
-                    pending_guid :: list(), 
+-record(manifest, {current_guid :: list()|undefined, 
+                    pending_guid :: list()|undefined, 
                     last_rebuild = never :: erlang:timestamp()|never, 
                     shutdown_guid = none :: list()|none}).
 
@@ -1000,11 +1000,12 @@ timed_bulk_put(Store, ObjectSpecs, StoreType) ->
     SubLists.
 
 coverage_cheat_test() ->
-    {reply, ok, native, _State} = native(null, self(), #state{}),
-    {next_state, native, _State} = native(null, #state{}),
-    {next_state, native, _State} = handle_event(null, native, #state{}),
-    {next_state, native, _State} = handle_info(null, native, #state{}),
-    {ok, native, _State} = code_change(null, native, #state{}, null).
+    State = #state{store_type = leveled_so},
+    {reply, ok, native, _State} = native(null, self(), State),
+    {next_state, native, _State} = native(null, State),
+    {next_state, native, _State} = handle_event(null, native, State),
+    {next_state, native, _State} = handle_info(null, native, State),
+    {ok, native, _State} = code_change(null, native, State, null).
 
 dumb_value_test() ->
     V = generate_value({0, 3}, 0, {a, 1}, erlang:phash2(<<>>), 

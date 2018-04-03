@@ -46,18 +46,18 @@
 -define(BATCH_LENGTH, 32).
 
 
--record(state, {key_store :: pid(),
-                tree_caches :: tree_caches(),
-                index_ns :: list(responsible_preflist()),
+-record(state, {key_store :: pid()|undefined,
+                tree_caches = [] :: tree_caches(),
+                index_ns = [] :: list(responsible_preflist()),
                 initiate_node_worker_fun,
                 object_splitfun,
                 reliable = false :: boolean(),
-                next_rebuild :: erlang:timestamp(),
-                prompt_cacherebuild :: boolean(),
-                parallel_keystore :: boolean(),
+                next_rebuild = os:timestamp() :: erlang:timestamp(),
+                prompt_cacherebuild = false :: boolean(),
+                parallel_keystore = true :: boolean(),
                 objectspecs_queue = [] :: list(),
-                root_path :: list(),
-                runner :: pid()}).
+                root_path :: list()|undefined,
+                runner :: pid()|undefined}).
 
 -record(options, {keystore_type :: keystore_type(),
                     startup_storestate :: startup_storestate(),

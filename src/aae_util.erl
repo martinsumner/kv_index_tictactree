@@ -156,7 +156,7 @@ flip_byte(Binary, Offset, Length) ->
 test_key_generator(hash) -> 
     ValueFun = 
         fun() -> 
-            V = random:uniform(1000),
+            V = leveled_rand:uniform(1000),
             <<Hash:32/integer, _Rest/binary>> 
                 = crypto:hash(md5, <<V:32/integer>>),
             Hash
@@ -165,10 +165,10 @@ test_key_generator(hash) ->
 test_key_generator(v1) ->
     ValueFun = 
         fun() -> 
-            Clock = {random:uniform(1000), random:uniform(1000)},
+            Clock = {leveled_rand:uniform(1000), leveled_rand:uniform(1000)},
             BClock = term_to_binary(Clock),
-            Size = random:uniform(100000),
-            SibCount = random:uniform(3),
+            Size = leveled_rand:uniform(100000),
+            SibCount = leveled_rand:uniform(3),
             <<Hash:32/integer, _Rest/binary>> = crypto:hash(md5, BClock),
             {Clock, Hash, Size, SibCount}
         end,

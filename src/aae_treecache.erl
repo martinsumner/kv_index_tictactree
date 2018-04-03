@@ -32,13 +32,13 @@
 -define(FINAL_EXT, ".aae").
 -define(START_SQN, 1).
 
--record(state, {save_sqn :: integer(),
-                is_restored :: boolean(),
+-record(state, {save_sqn = 0 :: integer(),
+                is_restored = false :: boolean(),
                 tree :: leveled_tictac:tictactree(),
-                root_path :: list(),
-                partition_id :: integer(),
+                root_path :: list()|undefined,
+                partition_id :: integer()|undefined,
                 loading = false :: boolean(),
-                change_queue :: list()}).
+                change_queue = [] :: list()}).
 
 -type partition_id() :: integer()|{integer(), integer()}.
 
