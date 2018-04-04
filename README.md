@@ -20,19 +20,21 @@ The purpose of these changes, and other small improvements, to standard Merkle t
 
 - Parallel stores to be maintained during rebuild so that AAE is always on, and entropy managers don't have to consider long periods of downtime for individual partitions during rebuild.
 
-- A partition controller to support a `parallel` key store for finding keys and logical value identifiers (e.g. version vectors or object hashes) from tree segments, where the partition's actual Key/Value store does not support accelerated lookup by segment.  This store can either use segment-ordering, or key-ordering (with segment acceleration) so that it is also usable for other purposes (e.g. building AAE trees by bucket).
+- The AAE controller to support a `parallel` key store for finding keys and logical value identifiers (e.g. version vectors or object hashes) from tree segments, where the partition's actual Key/Value store does not support accelerated lookup by segment.  This store can either use segment-ordering, or key-ordering (with segment acceleration) so that it is also usable for other purposes (e.g. building AAE trees by bucket).
 
-- A partition controller to as an alternative to a `parallel` store to be run in `native` mode should the actual partition store support the AAE API with appropriate acceleration.  
+- The AAE controller to support as an alternative to a `parallel` store, the store to be run in `native` mode should the actual partition store support the AAE API with appropriate acceleration - so no separate store is required and folds per segment ID can be routed back round to the native store and still handled efficiently.  
 
 - A consistent set of features to be made available between AAE in both `parallel` and `native` key store mode.
 
-- Full async API to the AAE partition controller so that the actual partition (vnode) management process can run an AAE controller without being blocked by AAE activity.
+- Full async API to the AAE controller so that the actual partition (vnode) management process can run an AAE controller without being blocked by AAE activity.
 
 ## Actors
 
 The primary actor is the controller - which provides the API to startup and shutdown an AAE controller for partition which will manage TicTac tree caches (`aae_treecache`) and a parallel Key Store (`aae_keystore`), which can be updated by the actual vnode (partition) manager, and accessed by AAE Exchanges.
 
 The AAE exchanges (`aae_exchange`) are finite-state machines which are initialised with a Blue List and a Pink List to compare.  In the simplest form the two lists can be a single vnode and partition identifier each - or they could be different coverage plans consisting of multiple vnodes and multiple partition identifiers by vnode.  The exchanges pass through two root comparison stages (to compare the root of the trees, taking the intersection of branch mismatches from both comparisons), two branch comparison stages, and then a Key and logical identifier exchange based on the leaf segment ID differences found, and finally a repair.
+
+[More detail on the design can be found here](docs/DESIGN.md).
 
 ## Using the Library
 
