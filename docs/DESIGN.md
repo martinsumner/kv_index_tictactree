@@ -56,8 +56,7 @@ The objective is to have a simple and efficient way of validating all these rela
 
 The issue of how to handle timestamped objects with automatic background expiry is important, but is not currently thought through.
 
-
-## Actors
+## Actors
 
 It is assumed that there are actor currently managing vnodes within the stores, and mechanisms for communicating within and between the vnodes in the stores, and determining membership relationships between partitions and vnodes.
 
@@ -188,4 +187,4 @@ It would be quicker to just perform the 3 comparisons necessary to rotate around
 
 ....
 
-### Support for LWW on Bitcask 
+### Support for LWW on Bitcask
