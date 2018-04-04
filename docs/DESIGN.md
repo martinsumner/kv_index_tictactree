@@ -54,6 +54,7 @@ The objective is to have a simple and efficient way of validating all these rela
 
 - It can be generally assumed that the vnode is aware of both the before and after state of objects subject to change (to inform the AAE process), but there may be exceptional circumstances (e.g. in Riak with LWW=true on a non-2i backend), where the AAe process itself may need to determine the before state.  It may be that this process is less efficient as it is generally assumed that a system that cares enough about data loss to run anti-entropy, will also care enough to read before a write.
 
+
 ## Actors
 
 It is assumed that there are actor currently managing vnodes within the stores, and mechanisms for communicating within and between the vnodes in the stores, and determining membership relationships between partitions and vnodes.
@@ -145,6 +146,8 @@ There exists the potential for further improvements of vnode store to aae coordi
 
 ### Intra-Cluster AAE
 
+The `aae_exchange` is flexible so that intra-cluster AAE can be done pairwise or between coverage offsets.  If we have a ring size of 128, and a single n-val of 3, there are 384 pairwise exchanges.  So an entropy_manager could be elected in the cluster which rotates around those pairwise exchanges.
 
+It would be quicker to just perform the 3 comparisons necessary to rotate around the 3 coverage plans (with the 3 different offsets), and compare those coverage plans.  However, in the scenario where a single
 
 ### AAE cluster Full-Sync

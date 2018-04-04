@@ -6,7 +6,7 @@ An Active Anti-Entropy library for Key-Value stores.
 
 Library to provide an Active-Anti-Entropy (AAE) capability in a KV store.  The AAE functionality is based on that normally provided through [Merkle Trees](https://github.com/basho/riak_core/blob/2.1.9/src/hashtree.erl), but with two changes from standard practice:
 
-- The Merkle trees are not cryptographically secure (as it is assumed that the system will use them only for comparison between trusted actors over secure channels).  This relaxation of security reduces significantly the cost of maintenance, without reducing their effectiveness for comparison over private channels.  To differentiate from secure Merkle trees the name TicTac Merkle trees is used.
+- The Merkle trees are not cryptographically secure (as it is assumed that the system will use them only for comparison between trusted actors over secure channels).  This relaxation of security reduces significantly the cost of maintenance, without reducing their effectiveness for comparison over private channels.  To differentiate from secure Merkle trees the name TicTac Merkle trees is used.  [Further details on Tictac trees can be found here](docs/TICTAC.md).
 
 - Indexing of key stores within the AAE system can be 2-dimensional, where the store supports scanning by segment within the store as well as the natural order for the store (e.g. key order).  The key store used is a Log-Structured Merge tree but the bloom-style indexes that are used within the store to accelerate normal access have been dual-purposed to align with the hashes used to map to a key into the Merkle tree, and therefore to accelerate access per-segment without requiring ordering by segment.
 
