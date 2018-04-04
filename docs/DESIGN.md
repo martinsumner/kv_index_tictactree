@@ -64,11 +64,87 @@ For each vnode an `aae_controller` will be started, with the controller requeste
 
 The `aae_controller` is responsible for marshalling all requests from the vnode, and for checking that the keystore, treecache and vnode partition stores remain locally synchronised.  It primarily receives the follow requests:
 
+- put
+    - Make a change to a TreeCache and update the KeyStore to represent a vnode change.  The put request should inform the controller of the current clock, the previous clock, and the partition reference.
+- merge_root/merge_branches
+    - Return the merged root of the tree roots for a list of partitions, or the merged branches of a list of Branch IDs.
+- fetch_clocks
+    - for a given set of leaf identifiers and partitions return all the keys and version clocks for the objects in the system (from the key store).
+- rebuild
+    - prompt the store to rebuild from the vnode store all state.
+- open/close
+    - Open and close, using a shutdown GUID reference on close (then open) to confirm if open and close events are known to have returned the data and the AAE system to a consistent state (the same shutdown GUID should be persisted in the vnode data store at shutdown).
+- fold_keystore
+    - Allow a general fold over the keystore covering all of the store, or a list of buckets, with a function to apply to each key/metadata pair in the store.
+
 
 ### TreeCache
+
+The `aae_treecache` is responsible for an individual partition reference.  The partition reference is expected to be a combination of {n_val, partition_id} - so in a cluster any given vnode will have as many partition references as the sum of the n_vals supported by the cluster.
+
+The tree cache is an in-memory tictac tree using the `leveled_tictac` module.  Changes are made as they are received (via async message).
+
+The `aae_treecache` process can also be placed in a load mode.  When in load mode, deltas are queued as well as being applied to the current cache.  When ready, `complete_load` can be called with a TicTac Tree formed from a snapshot taken as part of the same unit of work when the load was initialised.  At this stage, the original tree can be destroyed, and the queue of changes can be applied to the new tree.  This process can be used by the `aae_controller` to refresh the tree from Key Store, without ever having the tree cache go inactive.
 
 
 ### KeyStore
 
+The `aae_keystore` is a FSM that can be in three states:
+
+- `loading`
+    - In the `loading` state store updates are PUT into the store, but queued for a second (replacement) store.  The keystore can also receive load requests, which are only added into the replacement store.  When the load is complete, the queued requests are put into the replacement store and the original store may be discarded.  This allows the keystore to be rebuilt.
+- `parallel`
+    - In the `parallel` state, a keystore is kept in parallel to the vnode store, to resolve any fold requests passed in.  A `parallel` store may transition in and out of the `loading` state (back into the `parallel` state).
+- `native`
+    - In the `native` state, not parallel store is kept, but a reference is kept by the `aae_keystore` process to the vnode backend, and queries are resolved by calling the actual vnode backend.  This requires the vnode backend to support the same API is the parallel `aae_keystore` (and so would currently in riak need to be the leveled backend).  There is no transition in and out of `loading` from the `native` state.
+
+There are two types of parallel stores currently supported (but adding other stores should be simple):
+
+- `leveled_so` (leveled backend but with a key that is ordered first by segment ID)
+- `leveled_ko` (leveled backend but ordered by the actual object {Bucket, Key} pair, but with accelerated scanning over a sublist of segment IDs).
+
 
 ### Exchange
+
+The `aae_exchange` is a FSM used for managing a single anti-entropy exchange to find keys to repair based on comparison between two lists - the `blue` and `pink` lists.  The lists for the comparison are a list of `[{SendFun, PartitionRefList}]` tuples, where the SendFun encapsulates a mechanism for reaching a given `aae_controller`, and the PartitionRefList is a list of Partition References which are required from that controller.  
+
+The lists can have multiple items (e.g. require contact with multiple controllers), and request multiple partition references from each controller - which would be normal for comparing coverage plans.  The lists do not need to be of equivalent dimensions between `blue` and `pink`.
+
+The FSM process will alternate between multiple 'checking' states and the special state `waiting_all_results`, until a 'checking' state reveals a full match.  The 'checking' state are:
+
+- `root_compare` - fetch the tree roots and compare.
+- `root_confirm` - fetch the tree roots and compare, select the intersection of branch IDs from this first pass and the last pass to use at the next stage.
+- `branch_compare` - fetch the tree branches which differ in the root and compare.
+- `branch_confirm` - fetch the tree branches which differ in the root and compare, select the intersection of segment leaf IDs from the first pass and last pass to use at the next stages.
+- `clock_compare` - fetch the keys and clocks associated with the segment leaf IDs and compare - passing any deltas to a RepairFun provided by the calling process to repair.
+
+The exchange is throttled in two ways.  Firstly, there is a jittered pause between each state transition.  Secondly, the number of IDs (branch or segment leaf IDs) that can be passed from a confirm state is limited.  This will increase the number of iterations required to fill-in an entirely diverse vnode.  The RepairFun that makes the repair is passed-in, and may apply its own throttle, but the `aae_exchange` will not explicitly throttle the repairs.
+
+
+## Notes on Riak Implementation
+
+Although the AAE library is intended to be generic, it is primarily focused on being a new AAE mechanism for Riak.  Some notes on how this should be implemented within Riak, and functionality that can be expected.
+
+### Transition
+
+Transition between AAE releases is hard (as demonstrated by the difficulties of the hash algorithm change from legacy to version 0 in the existing riak_kv_index_hashtree implementation).  The intention is to allow this AAE to be a plugin over and above the existing AAE implementation, making transition an administrative task: the tictac tree AAE can be run in Riak oblivious to whether existing AAE versions are running.
+
+### Startup, Shutdown and Synchronisation
+
+The `riak_kv_vnode` is expected to be responsible for stopping and starting the `aae_controller` should this version of AAE be implemented.  The `aae_controller` should only be started after the vnode backend has been started, and the Shutdown GUID read - but before the vnode is marked as ready.  If there is wither a match on the Shutdown GUIDs in the controller with the vnode backend, then the two can be considered in sync.  If the two are not in sync, then the rebuild time should be set to the current time, so that a rebuild can bring the stores back into sync.  
+
+Whilst the stores are potentially out of sync, then the controller should operate as normal - this will potentially lead to false repairs until the rebuild is complete.  If to an administrator, the possibility of non-synchronisation is a known possibility, such as when a node is restarting following a hard crash - then the [participate in coverage](https://github.com/basho/riak_core/pull/917) feature can be used to remove the node's vnodes from any coverage plan based AAE exchanges.
+
+There may be options to better automate this by communication of the synchronisation status to the riak_core to be gossiped through the ring.  It is assumed that deferring the vnode being active until the rebuild is complete is not acceptable, as the time required to complete the rebuild is unknown, and may be many minutes.
+
+On startup any previous Shutdown GUID should be removed from both backend vnode and `aae_keystore`.  On shutdown, the backend vnode should have  anew Shutdown GUID inserted before close, and the shutdown of the `aae_controller` should be deferred until the close of the vnode backend is complete.
+
+The `aae_treecache` is not persisted other than at shutdown.  This is as the cost of rebuilding a tree cache is relatively once a parallel key_store is up to date (or using a native key store) is low.
+
+There exists the potential for further improvements of vnode store to aae coordination, should the aae store be used for additional functional reasons in the future.
+
+### Intra-Cluster AAE
+
+
+
+### AAE cluster Full-Sync
