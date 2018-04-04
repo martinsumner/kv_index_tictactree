@@ -5,7 +5,7 @@ covers the key is checked starting at the top level, and working down until the 
 
 It is important to read performance that SST files that don't contain the key can provide a negative response in an efficient manner, so that the level can be skipped through without delay.  In order to achieve this, some form of [bloom filter](https://en.wikipedia.org/wiki/Bloom_filter) is generally used.
 
-Within the [leveled LSM tree](https://github.com/martinsumner/leveled/tree/master/src), there has been attempt to align these filters with the hashing to a position in a Merkle tree - to allow for the same index to be used to both accelerate fetch misses, but also to skip blocks within an SST when scanning an LSM tree in key order to find a subset of keys associated with particular leaves within a Merkle Tree that represents the data in the store.
+Within the [leveled LSM tree](https://github.com/martinsumner/leveled/tree/master/src), there has been attempt to align these filters with the hashing to a position in a (Tictac) Merkle tree - to allow for the same index to be used to both accelerate fetch misses, but also to skip blocks within an SST when scanning an LSM tree in key order to find a subset of keys associated with particular leaves within a Merkle Tree that represents the data in the store.
 
 There are two methods which have been investigated for implement this capability:
 
@@ -30,7 +30,7 @@ This is less efficient than a bloom filter, as for the size the false positive r
 
 ## Rice-encoded Segment Filter
 
-A Rice-encoded filter is a way of providing improved memory efficiency compared to the Slot-based Segment Index.  Rice-encoding filter is a bloom filter based on a single hash function (as above), but now the filter is packed using [rice encoding](https://en.wikipedia.org/wiki/Golomb_coding), which encodes the bloom an array of deltas base don the assumption of roughly equal spacing between deltas.
+A Rice-encoded filter is a way of providing improved memory efficiency compared to the Slot-based Segment Index.  Rice-encoding filter is a bloom filter based on a single hash function (as above), but now the filter is packed using [rice encoding](https://en.wikipedia.org/wiki/Golomb_coding), which encodes the bloom an array of deltas based on the assumption of roughly equal spacing between deltas - which should be an expected outcome of using a 'good' hash function.
 
 So if there are 15-bits to the hash in the bloom, and 128 keys in the bloom, then it can be assumed that the deltas are around 256 numbers apart, and so an 8-bit remainder is used, and:
 
@@ -40,7 +40,7 @@ So if there are 15-bits to the hash in the bloom, and 128 keys in the bloom, the
 
 So the approximate overall size of the filter will be around 10 bits per key.  This would no longer yield the block and position, so to extend this, the full position can be added by bit-shifting the SegmentID and adding the position to each entry before rice encoded.  This would provide equivalent size and false positive rate to the Slot-based Segment Index, but with the added advantage that the filter would only need to be processed until the accumulated count exceeds the bit-shifted SegmentID that is being searched.
 
-Most of the efficiency is gained from identifying the block, and not the full position - so a compromise might be just to add a 3-bit block ID rather than a 7-bit position, and this would allow for either a 4-bit reduction in size of a 4x improvement in false positive rate.
+Most of the efficiency is gained from identifying the block, and not the full position - so a compromise might be just to add a 3-bit block ID rather than a 7-bit position, and this would allow for either a 4-bit reduction in size, or a 4x improvement in false positive rate.
 
 
 ## Efficiency of Segment-filtering

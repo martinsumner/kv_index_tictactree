@@ -40,7 +40,7 @@ There are a number of different relationships with regards to the data ownership
 
 ### Constraints
 
-The objective is to have a simple and efficient way of validating all these relationships subject to the following constraints:
+The objective is to have a simple and efficient way of validating all these relationships subject to the following constraints and conditions:
 
 - The AAE system should not place a dependancy on how the vnodes store their data in the partitions.
 
@@ -52,7 +52,9 @@ The objective is to have a simple and efficient way of validating all these rela
 
 - Any rebuild process (where state is refreshed to reflect current on-disk status in the main store), must be safe to throttle without impacting exchange availability.
 
-- It can be generally assumed that the vnode is aware of both the before and after state of objects subject to change (to inform the AAE process), but there may be exceptional circumstances (e.g. in Riak with LWW=true on a non-2i backend), where the AAe process itself may need to determine the before state.  It may be that this process is less efficient as it is generally assumed that a system that cares enough about data loss to run anti-entropy, will also care enough to read before a write.
+- It can be generally assumed that the vnode is aware of both the before and after state of objects subject to change (to inform the AAE process), but there may be exceptional circumstances (e.g. in Riak with LWW=true on a non-2i backend), where the AAE process itself may need to determine the before state.  It may be that this process is less efficient as it is generally assumed that a system that cares enough about data loss to run anti-entropy, will also care enough to read before a write.
+
+The issue of how to handle timestamped objects with automatic background expiry is important, but is not currently thought through.
 
 
 ## Actors
@@ -150,4 +152,40 @@ The `aae_exchange` is flexible so that intra-cluster AAE can be done pairwise or
 
 It would be quicker to just perform the 3 comparisons necessary to rotate around the 3 coverage plans (with the 3 different offsets), and compare those coverage plans.  However, in the scenario where a single
 
-### AAE cluster Full-Sync
+### AAE Cluster Full-Sync
+
+....
+
+### MapFold changes - cross-backend Support
+
+....
+
+### Bitcask and HEAD requests
+
+....
+
+### Bitcask and 2i Support
+
+....
+
+### Improved Vnode Synchronisation on Abrupt Shutdown
+
+....
+
+### Backup Use-case
+
+....
+
+### AAE for 2i Terms
+
+....
+
+### 2i Repair
+
+....
+
+### Rehash Support - Consideration for W1 Misuse
+
+....
+
+### Support for LWW on Bitcask 

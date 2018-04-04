@@ -33,7 +33,7 @@ The purpose of these changes, and other small improvements, to standard Merkle t
 
 ## Actors
 
-The primary actor in the library is the controller (`aae_controller`) - which provides the API to startup and shutdown a server for which will manage a TicTac tree caches (`aae_treecache`) and a parallel Key Store (`aae_keystore`).  The `aae_controller` can be updated by the actual vnode (partition) manager, and accessed by AAE Exchanges.
+The primary actor in the library is the controller (`aae_controller`) - which provides the API to startup and shutdown a server for which will manage TicTac tree caches (`aae_treecache`) and a parallel Key Store (`aae_keystore`).  The `aae_controller` can be updated by the actual vnode (partition) manager, and accessed by AAE Exchanges.
 
 The AAE exchanges (`aae_exchange`) are finite-state machines which are initialised with a Blue List and a Pink List to compare.  In the simplest form the two lists can be a single vnode and partition identifier each - or they could be different coverage plans consisting of multiple vnodes and multiple partition identifiers by vnode.  The exchanges pass through two root comparison stages (to compare the root of the trees, taking the intersection of branch mismatches from both comparisons), two branch comparison stages, and then a Key and logical identifier exchange based on the leaf segment ID differences found, and finally a repair.
 
