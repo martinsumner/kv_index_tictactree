@@ -38,7 +38,8 @@
             store_mput/2,
             store_mload/2,
             store_prompt/2,
-            store_fold/4]).
+            store_fold/4,
+            store_fetchclock/3]).
 
 -export([define_objectspec/5,
             generate_value/5,
@@ -191,6 +192,12 @@ store_fold(Pid, Limiter, FoldObjectsFun, InitAcc) ->
                             infinity).
 
 
+-spec store_fetchclock(pid(), binary(), binary()) -> aae_controller:version().
+%% @doc
+%% Return the clock of a given Bucket and Key
+store_fetchclock(Pid, Bucket, Key) ->
+    gen_fsm:sync_send_event(Pid, {fetch_clock, Bucket, Key}, infinity).
+
 %%%============================================================================
 %%% gen_fsm callbacks
 %%%============================================================================
@@ -247,6 +254,9 @@ loading({fold, Limiter, FoldObjectsFun, InitAcc}, _From, State) ->
     Result = do_fold(State#state.store_type, State#state.store,
                         Limiter, FoldObjectsFun, InitAcc),
     {reply, Result, loading, State};
+loading({fetch_clock, Bucket, Key}, _From, State) ->
+    VV = do_fetchclock(State#state.store_type, State#state.store, Bucket, Key),
+    {reply, VV, loading, State};
 loading({close, ShutdownGUID}, _From, State) ->
     ok = delete_store(State#state.store_type, State#state.load_store),
     ok = close_store(State#state.store_type, State#state.store),
@@ -256,6 +266,9 @@ parallel({fold, Limiter, FoldObjectsFun, InitAcc}, _From, State) ->
     Result = do_fold(State#state.store_type, State#state.store,
                         Limiter, FoldObjectsFun, InitAcc),
     {reply, Result, parallel, State};
+parallel({fetch_clock, Bucket, Key}, _From, State) ->
+    VV = do_fetchclock(State#state.store_type, State#state.store, Bucket, Key),
+    {reply, VV, parallel, State};
 parallel({close, ShutdownGUID}, _From, State) ->
     ok = close_store(State#state.store_type, State#state.store),
     {stop, normal, ok, State#state{shutdown_guid = ShutdownGUID}};
@@ -511,6 +524,39 @@ dedup_map(leveled_ko, ObjectSpecs) ->
     {UpdSpecL, _MemberL} = lists:foldl(FoldFun, {[], []}, ObjectSpecs),
     UpdSpecL.
             
+
+-spec do_fetchclock(supported_stores(), pid(), binary(), binary()) 
+                                            -> aae_controller:version_vector().
+%% @doc
+%% Fetch an indicvidual clokc for an individual key.  This will be done by 
+%% direct fetch for key-ordered backends, and by fold for segment_ordered 
+%% backends
+do_fetchclock(leveled_so, Store, Bucket, Key) ->
+    Seg = leveled_tictac:keyto_segment48(aae_util:make_binarykey(Bucket, Key)),
+    Seg0 = generate_treesegment(Seg),
+    do_fetchclock(leveled_so, Store, Bucket, Key, Seg0);
+do_fetchclock(leveled_ko, Store, Bucket, Key) ->
+    case leveled_bookie:book_head(Store, Bucket, Key, ?HEAD_TAG) of 
+        not_found ->
+            none;
+        {ok, V} ->
+            value_clock(V)
+    end.
+
+do_fetchclock(leveled_so, Store, Bucket, Key, Seg) ->
+    FoldObjFun  = 
+        fun(B, K, V, Acc) ->
+            case {B, K} of 
+                {Bucket, Key} ->
+                    value_clock(V);
+                _ ->
+                    Acc
+            end
+        end,
+    InitAcc = none,
+    {async, Folder} = 
+        do_fold(leveled_so, Store, {segments, [Seg]}, FoldObjFun, InitAcc),
+    Folder().
 
 -spec do_fold(supported_stores(), pid(), tuple()|all, fun(), any()) 
                                                             -> {async, fun()}.
@@ -804,6 +850,11 @@ load_tester(StoreType) ->
     
     ok = store_prompt(Store0, rebuild_start),
 
+    % Need to prove fetch_clock in loading state, otherwise not covered
+    [{FirstKey, FirstValue}|_RestIK] = InitialKeys,
+    FirstClock = element(1, FirstValue),
+    ?assertMatch(FirstClock, store_fetchclock(Store0, <<"B1">>, FirstKey)),
+
     {async, Folder1} = store_fold(Store0, all, FoldObjectsFun, []),
     Res1 = lists:usort(Folder1()),
     ?assertMatch(Res0, Res1),
@@ -885,6 +936,44 @@ split_lists(L, SplitSize, Acc) when length(L) =< SplitSize ->
 split_lists(L, SplitSize, Acc) ->
     {LL, RL} = lists:split(SplitSize, L),
     split_lists(RL, SplitSize, [LL|Acc]).
+
+
+fetch_clock_test() ->
+    RootPath = "test/keystore4/",
+    ok = filelib:ensure_dir(RootPath),
+    aae_util:clean_subdir(RootPath),
+    % When fetching clocks we may have multiple matches on a segment ID
+    % Want to prove that here.  Rather than trying to force a hash collision
+    % on the segment ID, we will just generate false segment IDs
+    GenVal =
+        fun(Clock) ->
+            generate_value({1, 3}, 1, Clock, 0, {0, 1, 0, null})
+        end,
+    Spc1 = define_objectspec(add, 1, <<"B1">>, <<"K2">>, GenVal([{"a", 1}])),
+    Spc2 = define_objectspec(add, 1, <<"B1">>, <<"K3">>, GenVal([{"b", 1}])),
+    Spc3 = define_objectspec(add, 1, <<"B2">>, <<"K1">>, GenVal([{"c", 1}])),
+    Spc4 = define_objectspec(add, 1, <<"B1">>, <<"K1">>, GenVal([{"d", 1}])),
+
+    {ok, Store0} = open_store(leveled_so, 
+                                ?LEVELED_BACKEND_OPTS, 
+                                RootPath,
+                                leveled_codec:generate_uuid()),
+
+    do_load(leveled_so, Store0, [Spc1, Spc2, Spc3, Spc4]),
+
+    ?assertMatch([{"a", 1}], 
+                    do_fetchclock(leveled_so, Store0, <<"B1">>, <<"K2">>, 1)),
+    ?assertMatch([{"b", 1}], 
+                    do_fetchclock(leveled_so, Store0, <<"B1">>, <<"K3">>, 1)),
+    ?assertMatch([{"c", 1}],
+                    do_fetchclock(leveled_so, Store0, <<"B2">>, <<"K1">>, 1)),
+    ?assertMatch([{"d", 1}],
+                    do_fetchclock(leveled_so, Store0, <<"B1">>, <<"K1">>, 1)),
+    
+    ok = close_store(leveled_so, Store0),
+    aae_util:clean_subdir(RootPath).
+    
+
 
 
 so_big_load_test_() ->

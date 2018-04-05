@@ -97,7 +97,16 @@
         % scheduled by adding a random integer number of seconds (between 0 
         % and the jitter value) to the minimum time
 -type version_vector()
-        :: list(tuple())|none.
+        :: list(tuple())|none|undefined.
+        % The version vector is normally a list of tuples.  The vector could 
+        % be none if this is a put of a new item (when the previous vector 
+        % would be none), or a deletion of an existing item (when the current
+        % vector would be none).
+        %
+        % `undefined` is speficially resrved for the case that an object may 
+        % be being replaced but the vnode does not know if it is being 
+        % replaced.  In this case, it is the responsiblity of the controller 
+        % to best determine what the previous version was. 
 
 
 %%%============================================================================
@@ -392,7 +401,16 @@ handle_cast({put, IndexN, Bucket, Key, Clock, PrevClock, BinaryObj}, State) ->
     % Setup
     TreeCaches = State#state.tree_caches,
     BinaryKey = aae_util:make_binarykey(Bucket, Key),
-    {CH, OH} = hash_clocks(Clock, PrevClock),
+    PrevClock0 = 
+        case PrevClock of 
+            undefined ->
+                % Should never be native
+                resolve_clock(Bucket, Key, State#state.key_store);
+            _ ->
+                PrevClock
+        end,
+                
+    {CH, OH} = hash_clocks(Clock, PrevClock0),
 
     
     % Update the TreeCache associated with the Key (should a cache exist for
@@ -540,6 +558,13 @@ foldobjects_buildtrees(IndexNs, IndexNFun, ExtractHashFun) ->
 %%%============================================================================
 %%% Internal functions
 %%%============================================================================
+
+-spec resolve_clock(binary(), binary(), pid()) -> version_vector().
+%% @doc
+%% Get the Keystore to return the current clock or none if the key is not 
+%% present
+resolve_clock(Bucket, Key, Store) ->
+    aae_keystore:store_fetchclock(Store, Bucket, Key).
 
 
 -spec flush_puts(pid(), list()) -> ok.

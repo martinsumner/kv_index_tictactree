@@ -38,18 +38,20 @@ So if there are 15-bits to the hash in the bloom, and 128 keys in the bloom, the
 - A delta of 257 would be represented as 10 0000 0001;
 - A delta of 1000 would be represented as 1110 1101 1000.
 
-So the approximate overall size of the filter will be around 10 bits per key.  This would no longer yield the block and position, so to extend this, the full position can be added by bit-shifting the SegmentID and adding the position to each entry before rice encoded.  This would provide equivalent size and false positive rate to the Slot-based Segment Index, but with the added advantage that the filter would only need to be processed until the accumulated count exceeds the bit-shifted SegmentID that is being searched.
+So the approximate overall size of the filter will be around 10 bits per key, for the same false positive rate as using a 16-bit per key Segment Index.
 
-Most of the efficiency is gained from identifying the block, and not the full position - so a compromise might be just to add a 3-bit block ID rather than a 7-bit position, and this would allow for either a 4-bit reduction in size, or a 4x improvement in false positive rate.
+This no longer reveals the position of the entry in the slot - but, most of the value in revealing the position comes from knowing just the block identifier (as the difference in small blocks between lists:nth/2 and lists:keyfind/3 is expected to be marginal).
+
+The block knowledge problem could be resolved by bit-shifting the segment ID and adding a 3-bit position ID to the segmentID before encoding, and this would allow for either a 3-bit reduction in size, or a 8x improvement in false positive rate. 
 
 
 ## Efficiency of Segment-filtering
 
-In the slot-based segment index there is a false-positive rate per slot of 1:256.  With the same size Rice-encoded filter this can be improved to 1:4096 if the exact position is dropped from the requirement, and the same size filter is used.
+In the slot-based segment index there is a false-positive rate per slot of 1:256.  With the same size Rice-encoded filter this can be improved to 1:2048 if the exact position is dropped from the requirement, and the same size filter is used.
 
 If there is a LSM tree containing 10M keys, than across the tree there will be approximately 90K slots, and 450K blocks.
 
-If we want to scan for 32 different segment IDs  - there will be around 600 blocks which need to be opened to find all the keys within those segments.  Using a slot-based segment index around 90% of the blocks will be skipped, but 100 times more blocks will be opened than is optimal.  Using the 4-bits of improvement in the rice encoded example will lead to an improvement greater than one order of magnitude - with > 99% skipped, and only around 3K blocks unnecessarily being opened.
+If we want to scan for 32 different segment IDs  - there will be around 600 blocks which need to be opened to find all the keys within those segments.  Using a slot-based segment index around 90% of the blocks will be skipped, but 100 times more blocks will be opened than is optimal.  Using the 4-bits of improvement in the rice encoded example will lead to an improvement greater than one order of magnitude - with > 98% skipped, and only around 6K blocks unnecessarily being opened.
 
 However, this assumes that the Segment IDs we're looking for are evenly distributed.  In the current implementation when we look for a subset of SegmentIDs, it will look for the subset SegmentIDs that are numerically closest.
 

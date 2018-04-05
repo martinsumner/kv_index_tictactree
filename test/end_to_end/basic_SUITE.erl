@@ -58,8 +58,15 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
                                     SplitF),
     
     BKVList = gen_keys([], InitialKeyCount),
-    ok = put_keys(Cntrl1, 2, BKVList),
-    ok = put_keys(Cntrl2, 3, BKVList),
+    ok = put_keys(Cntrl1, 2, BKVList, none),
+    ok = put_keys(Cntrl2, 3, BKVList, none),
+
+    % Change some of the keys - cheat by using undefined rather than replace 
+    % properly
+
+    BKVListR = gen_keys([], InitialKeyCount div 10),
+    ok = put_keys(Cntrl1, 2, BKVListR, undefined),
+    ok = put_keys(Cntrl2, 3, BKVListR, undefined),
     
     % Confirm all partitions are aligned as expected using direct access to 
     % the controller
@@ -258,15 +265,18 @@ gen_keys(KeyList, Count, Floor) ->
                 Count - 1,
                 Floor).
 
-put_keys(_Cntrl, _Nval, []) ->
+put_keys(Cntrl, NVal, KL) ->
+    put_keys(Cntrl, NVal, KL, none).
+
+put_keys(_Cntrl, _Nval, [], _PrevVV) ->
     ok;
-put_keys(Cntrl, Nval, [{Bucket, Key, VersionVector}|Tail]) ->
+put_keys(Cntrl, Nval, [{Bucket, Key, VersionVector}|Tail], PrevVV) ->
     ok = aae_controller:aae_put(Cntrl, 
                                 calc_preflist(Key, Nval), 
                                 Bucket, 
                                 Key, 
                                 VersionVector, 
-                                none, 
+                                PrevVV, 
                                 <<>>),
     put_keys(Cntrl, Nval, Tail).
 
