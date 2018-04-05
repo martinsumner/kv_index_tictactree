@@ -155,9 +155,27 @@ It would be quicker to just perform the 3 comparisons necessary to rotate around
 
 ....
 
-### MapFold changes - cross-backend Support
+### MapFold Changes - Backend Independent
 
-....
+Previously there had been some work down to add [MapFold](https://github.com/martinsumner/riak_kv/blob/mas-2.1.7-foldobjects/docs/MAPFOLD.md) as a feature to Riak.  This is in someways an alternative to the work done by Basho on riak_kv_sweeper - there is a generic need to have functions that fold over objects, that produce outputs that aren't required immediately.  This is especially true for operational reasons e.g.:
+
+- find all sibling'd objects;
+- count then number of objects in a bucket;
+- what is the average object size in the database;
+- provide a histogram of last modified dates on objects in a bucket).
+
+There may also be functional reasons whereby we might want to have non-disruptive folds with bespoke functions and accumulators - especially for reporting (e.g. count all the people by age-range and gender), that currently require a secondary index and for all 2i terms to be fed back to the application for processing, with the application needing to control throttling of the query.
+
+Riak previously had Map/Reduce which could answer these problems, but Map/Reduce was designed to be fast.  It was controlled in the sense it has back pressure to prevent the reading of data from overwhelming the processing of that data - but it was not controlled to prevent a Map/Reduce workload from overloading standard K/V GET/PUT activity.  Also Map/Reduce required the reading of the whole object, so didn't offer any optimisation if the interesting information was on a 2i term or in object metadata.
+
+The Mapfold work provided to a solution to this, but to be efficient it depended on
+the backend supporting secondary indexes and/or fold_heads.  The Mapfold work was optimised for the leveled backend, but left other backends behind.
+
+One side effect of kv_index_tictactree is that provides a parallel store (when leveled is not used), that can still be key-ordered.  The metadata that gets put into that parallel store could be extended to include the full object head.  So the same queries that work with a native leveled backend, will work with a parallel AAE leveled key-ordered backend.  Potentially this would mean that MapFold could be supported efficiently with any backend where AAE has been enabled.
+
+### Per-Bucket MDC Replication
+
+...
 
 ### Bitcask and HEAD requests
 
@@ -173,7 +191,18 @@ It would be quicker to just perform the 3 comparisons necessary to rotate around
 
 ### Backup Use-case
 
-....
+Backups in Riak are hard.  Hard for good reasons:
+
+- the difficulty of co-ordinating a snapshot in a point in time across many processes on many machines;
+- the volume of data traditionally used by people who need a distributed database;
+- the inherent duplication of data in Riak;
+- the write amplification in some Riak backends (leveldb) increasing the cost of any rsync based mechanism for backup.
+
+Historically different approaches have been tried, and ultimately most Riak systems either end up running without historic backups (just MDC replication), or with a bespoke backup approach integrated into either the database and/or the application.
+
+One possibility is to be able to run a very small cluster with dense storage machines, in a backup configuration:  e.g. node count of 1, ring size of 8, n/r/w-val of 1, vnode backend rsync friendly (leveled/bitcask) with 2i disabled.  If we can now replicate from a production scale cluster to this (using rabl for real time-replication so that peak load is queued), then stopping this single node cluster and running rsync periodically could produce a more traditional backup approach without impeding on decision making wrt production database setup (e.g. ring size, n-val and write-amplification and query support in the backend).
+
+The combination of repl replication, and AAE full-sync independent of ring-size and n-val might make such a solution possible without bespoke application effort.
 
 ### AAE for 2i Terms
 
@@ -188,3 +217,5 @@ It would be quicker to just perform the 3 comparisons necessary to rotate around
 ....
 
 ### Support for LWW on Bitcask
+
+....
