@@ -543,6 +543,12 @@ do_fetchclock(leveled_ko, Store, Bucket, Key) ->
             value_clock(V)
     end.
 
+-spec do_fetchclock(leveled_so,pid(), binary(), binary(), integer())
+                                            -> aae_controller:version_vector().
+%% @doc
+%% Specific function to allow fetch_clock from leveled segment_ordered backend.
+%% This function is split-out from do_fetchclock/4 to make unit testing of this
+%% scenario easier.
 do_fetchclock(leveled_so, Store, Bucket, Key, Seg) ->
     FoldObjFun  = 
         fun(B, K, V, Acc) ->
