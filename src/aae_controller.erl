@@ -75,7 +75,8 @@
         % A map between the responsible_preflist reference and the tree_cache 
         % for that preflist
 -type keystore_type() 
-        :: {parallel, aae_keystore:supported_stores()}|{native, pid()}.
+        :: {parallel, aae_keystore:parallel_stores()}|
+            {native, aae_keystore:native_stores(), pid()}.
         % Key Store can be native (no separate AAE store required) or
         % parallel when a seperate Key Store is needed for AAE.  The Type
         % for parallel stores must be a supported KV store by the aae_keystore
@@ -271,8 +272,7 @@ init([Opts]) ->
     {ok, State0} = 
         case Opts#options.keystore_type of 
             {parallel, StoreType} ->
-                StoreRP = 
-                    filename:join([RootPath, StoreType, ?STORE_PATH]),
+                StoreRP = filename:join([RootPath, StoreType, ?STORE_PATH]),
                 {ok, {LastRebuild, ShutdownGUID, IsEmpty}, Pid} =
                     aae_keystore:store_parallelstart(StoreRP, StoreType),
                 case Opts#options.startup_storestate of 
@@ -292,10 +292,21 @@ init([Opts]) ->
                                         next_rebuild = os:timestamp(), 
                                         reliable = false,
                                         parallel_keystore = true}}
-                end
-            % KeyStoreType ->
-            %     aae_util:log("AAE02", [KeyStoreType], logs())
-            % Native stores not yet implemented
+                end;
+            {native, StoreType, BackendPid} ->
+                aae_util:log("AAE02", [StoreType], logs()),
+                StoreRP = filename:join([RootPath, StoreType, ?STORE_PATH]),
+                {ok, {LastRebuild, _GUID, _IsE}, KeyStorePid} =
+                    aae_keystore:store_nativestart(StoreRP, 
+                                                    StoreType, 
+                                                    BackendPid),
+                RebuildTS = 
+                    schedule_rebuild(LastRebuild, 
+                                        Opts#options.rebuild_schedule),
+                {ok, #state{key_store = KeyStorePid, 
+                                next_rebuild = RebuildTS, 
+                                reliable = true,
+                                parallel_keystore = false}}
         end,
 
     % Start the TreeCaches

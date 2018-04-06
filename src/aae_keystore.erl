@@ -33,6 +33,7 @@
             native/3]).
 
 -export([store_parallelstart/2,
+            store_nativestart/3,
             store_startupdata/1,
             store_close/2,
             store_mput/2,
@@ -55,7 +56,7 @@
 -record(state, {vnode :: pid()|undefined,
                 store :: pid()|undefined,
                 id = "KeyStore" :: any(),
-                store_type :: supported_stores(),
+                store_type :: parallel_stores()|native_stores(),
                 change_queue = [] :: list(),
                 change_queue_counter = 0 :: integer(),
                 load_counter = 0 :: integer(),
@@ -95,17 +96,20 @@
     % file extension to be used once manifest write is pending
 -define(VALUE_VERSION, 1).
 
--type supported_stores() :: leveled_so|leveled_ko. 
+-type parallel_stores() :: leveled_so|leveled_ko. 
     % Stores supported for parallel running
+-type native_stores() :: leveled_ko.
+    % Vnode backends which can support aae_keystore running in native mode
 -type manifest() :: #manifest{}.
     % Saves state of what store is currently active
 -type objectspec() :: #objectspec{}.
+    % Object specification required by the store within mputs
 
 %%%============================================================================
 %%% API
 %%%============================================================================
 
--spec store_parallelstart(list(), supported_stores()) -> 
+-spec store_parallelstart(list(), parallel_stores()) -> 
                 {ok, {os:timestamp()|never, list()|none, boolean()}, pid()}.
 %% @doc
 %% Start a store to be run in parallel mode
@@ -123,6 +127,18 @@ store_parallelstart(Path, leveled_ko) ->
             {backend_opts, ?LEVELED_BACKEND_OPTS}],
     {ok, Pid} = gen_fsm:start(?MODULE, [Opts], []),
     store_startupdata(Pid).
+
+-spec store_nativestart(list(), native_stores(), pid()) ->
+                {ok, {os:timestamp()|never, list()|none, boolean()}, pid()}.
+%% @doc
+%% Start a keystore in native mode.  In native mode the store is just a pass
+%% through for queries - and there will be no puts
+store_nativestart(Path, NativeStoreType, BackendPid) ->
+    Opts = 
+        [{root_path, Path}, {native, {true, NativeStoreType, BackendPid}}],
+    {ok, Pid} = gen_fsm:start(?MODULE, [Opts], []),
+    store_startupdata(Pid).
+
 
 -spec store_startupdata(pid()) ->
                 {ok, {os:timestamp()|never, list()|none, boolean()}, pid()}.
@@ -203,28 +219,19 @@ store_fetchclock(Pid, Bucket, Key) ->
 %%%============================================================================
 
 init([Opts]) ->
+    RootPath = aae_util:get_opt(root_path, Opts),
+    Manifest0 =
+        case open_manifest(RootPath) of 
+            false ->
+                GUID = leveled_codec:generate_uuid(),
+                #manifest{current_guid = GUID};
+            {ok, M} ->
+                M 
+        end,
+
     case aae_util:get_opt(native, Opts) of 
-        % true ->
-        %    {stop, not_yet_implemented};
         {false, StoreType} ->
-            RootPath = aae_util:get_opt(root_path, Opts),
-            Manifest0 =
-                case open_manifest(RootPath) of 
-                    false ->
-                        GUID = leveled_codec:generate_uuid(),
-                        #manifest{current_guid = GUID};
-                    {ok, M} ->
-                        M 
-                end,
-            
             Manifest1 = clear_pendingpath(Manifest0, RootPath),
-                
-            BackendOpts0 = aae_util:get_opt(backend_opts, Opts),
-            {ok, Store} = open_store(StoreType, 
-                                        BackendOpts0, 
-                                        RootPath,
-                                        Manifest1#manifest.current_guid),
-            
             LastRebuild = 
                 % Need to determine when the store was last rebuilt, if it 
                 % can't be determined that the store has been safely rebuilt, 
@@ -236,8 +243,13 @@ init([Opts]) ->
                         Manifest1#manifest.last_rebuild
                 end,
             Manifest2 = 
-                Manifest1#manifest{shutdown_guid = none, 
-                                    last_rebuild = LastRebuild},
+                Manifest1#manifest{shutdown_guid = none, last_rebuild = LastRebuild},
+            BackendOpts0 = aae_util:get_opt(backend_opts, Opts),
+            {ok, Store} = open_store(StoreType, 
+                                        BackendOpts0, 
+                                        RootPath,
+                                        Manifest1#manifest.current_guid),
+            
             ok = store_manifest(RootPath, Manifest2),
             {ok, 
                 parallel, 
@@ -247,7 +259,15 @@ init([Opts]) ->
                         current_guid = Manifest0#manifest.current_guid,
                         shutdown_guid = Manifest0#manifest.shutdown_guid,
                         last_rebuild = LastRebuild,
-                        backend_opts = BackendOpts0}}
+                        backend_opts = BackendOpts0}};
+        {true, StoreType, BackendPid} ->
+            {ok, 
+                native,
+                #state{store = BackendPid,
+                        store_type = StoreType,
+                        root_path = RootPath,
+                        current_guid = Manifest0#manifest.current_guid,
+                        last_rebuild = Manifest0#manifest.last_rebuild}}
     end.
 
 loading({fold, Limiter, FoldObjectsFun, InitAcc}, _From, State) ->
@@ -279,8 +299,10 @@ parallel(startup_metadata, _From, State) ->
         parallel, 
         State#state{shutdown_guid = none}}.
 
-native(_Msg, _From, State) ->
-    {reply, ok, native, State}.
+native({fold, Limiter, FoldObjectsFun, InitAcc}, _From, State) ->
+    Result = do_fold(State#state.store_type, State#state.store,
+                        Limiter, FoldObjectsFun, InitAcc),
+    {reply, Result, native, State}.
 
 
 loading({mput, ObjectSpecs}, State) ->
@@ -315,10 +337,13 @@ loading({prompt, rebuild_complete}, State) ->
     StoreType = State#state.store_type,
     LoadStore = State#state.load_store,
     GUID = State#state.load_guid,
+    aae_util:log("KS007", [rebuild_complete, GUID], logs()),
     LoadFun = fun(OS) -> do_load(StoreType, LoadStore, OS) end,
     lists:foreach(LoadFun, lists:reverse(State#state.change_queue)),
+    LastRebuild = os:timestamp(),
     ok = store_manifest(State#state.root_path, 
-                        #manifest{current_guid = GUID}),
+                        #manifest{current_guid = GUID,
+                                    last_rebuild = LastRebuild}),
     ok = delete_store(StoreType, State#state.store),
     {next_state, 
         parallel, 
@@ -326,13 +351,15 @@ loading({prompt, rebuild_complete}, State) ->
                     change_queue_counter = 0,
                     load_counter = 0,
                     store = LoadStore,
-                    current_guid = GUID}}.
+                    current_guid = GUID,
+                    last_rebuild = LastRebuild}}.
 
 parallel({mput, ObjectSpecs}, State) ->
     ok = do_load(State#state.store_type, State#state.store, ObjectSpecs),
     {next_state, parallel, State};
 parallel({prompt, rebuild_start}, State) ->
     GUID = leveled_codec:generate_uuid(),
+    aae_util:log("KS007", [rebuild_start, GUID], logs()),
     {ok, Store} =  open_store(State#state.store_type, 
                                 State#state.backend_opts, 
                                 State#state.root_path, 
@@ -342,8 +369,19 @@ parallel({prompt, rebuild_start}, State) ->
                                     pending_guid = GUID}),
     {next_state, loading, State#state{load_store = Store, load_guid = GUID}}.
 
-native(_Msg, State) ->
-    {next_state, native, State}.
+native({prompt, rebuild_start}, State) ->
+    GUID = leveled_codec:generate_uuid(),
+    aae_util:log("KS007", [rebuild_start, GUID], logs()),
+    {next_state, native, State#state{current_guid = GUID}};
+native({prompt, rebuild_complete}, State) ->
+    GUID = State#state.current_guid,
+    aae_util:log("KS007", [rebuild_complete, GUID], logs()),
+    LastRebuild = os:timestamp(),
+    ok = store_manifest(State#state.root_path, 
+                        #manifest{current_guid = GUID,
+                                    last_rebuild = LastRebuild}),
+    {next_state, native, State#state{last_rebuild = LastRebuild}}.
+
 
 
 handle_sync_event(current_status, _From, StateName, State) ->
@@ -355,10 +393,13 @@ handle_event(_Msg, StateName, State) ->
 handle_info(_Msg, StateName, State) ->
     {next_state, StateName, State}.
 
+terminate(normal, native, _State) ->
+    ok;
 terminate(normal, _StateName, State) ->
     store_manifest(State#state.root_path, 
                     #manifest{current_guid = State#state.current_guid, 
-                                shutdown_guid = State#state.shutdown_guid}).
+                                shutdown_guid = State#state.shutdown_guid,
+                                last_rebuild = State#state.last_rebuild}).
 
 code_change(_OldVsn, StateName, State, _Extra) ->
     {ok, StateName, State}.
@@ -438,7 +479,7 @@ value_aaesegment({1, ValueItems}) ->
 %%% Store functions
 %%%============================================================================
 
--spec is_empty(supported_stores(), pid()) -> boolean().
+-spec is_empty(parallel_stores(), pid()) -> boolean().
 %% @doc
 %% Check to see if the store is empty
 is_empty(leveled_so, Store) ->
@@ -446,7 +487,7 @@ is_empty(leveled_so, Store) ->
 is_empty(leveled_ko, Store) ->
     leveled_bookie:book_isempty(Store, ?HEAD_TAG).
 
--spec close_store(supported_stores(), pid()) -> ok.
+-spec close_store(parallel_stores(), pid()) -> ok.
 %% @doc
 %% Wait for store to close
 close_store(leveled_so, Store) ->
@@ -454,7 +495,7 @@ close_store(leveled_so, Store) ->
 close_store(leveled_ko, Store) ->
     leveled_bookie:book_close(Store).
 
--spec open_store(supported_stores(), list(), list(), list()) -> {ok, pid()}.
+-spec open_store(parallel_stores(), list(), list(), list()) -> {ok, pid()}.
 %% @doc
 %% Open a parallel backend key store
 open_store(leveled_so, BackendOpts0, RootPath, GUID) ->
@@ -473,7 +514,7 @@ add_path_toopts(BackendOpts, RootPath, GUID) ->
     [{root_path, Path}|BackendOpts].
 
 
--spec delete_store(supported_stores(), pid()) -> ok.
+-spec delete_store(parallel_stores(), pid()) -> ok.
 %% @doc
 %% delete the store - as it has been replaced by a rebuild
 delete_store(leveled_so, Store) ->
@@ -481,7 +522,7 @@ delete_store(leveled_so, Store) ->
 delete_store(leveled_ko, Store) ->
     leveled_bookie:book_destroy(Store).
 
--spec do_load(supported_stores(), pid(), list(tuple())) -> ok.
+-spec do_load(parallel_stores(), pid(), list(tuple())) -> ok.
 %% @doc
 %% Load a batch of object specifications into the store
 do_load(leveled_so, Store, ObjectSpecs) ->
@@ -491,7 +532,7 @@ do_load(leveled_ko, Store, ObjectSpecs) ->
     leveled_bookie:book_mput(Store, dedup_map(leveled_ko, ObjectSpecs)),
     ok.
 
--spec dedup_map(supported_stores(), list(objectspec())) -> list(tuple()).
+-spec dedup_map(parallel_stores(), list(objectspec())) -> list(tuple()).
 %% @doc
 %% Map the spec records into tuples as required by the backend store type, 
 %% and dedup assuming the left-most record is the most recent Bucket/Key
@@ -525,7 +566,7 @@ dedup_map(leveled_ko, ObjectSpecs) ->
     UpdSpecL.
             
 
--spec do_fetchclock(supported_stores(), pid(), binary(), binary()) 
+-spec do_fetchclock(parallel_stores(), pid(), binary(), binary()) 
                                             -> aae_controller:version_vector().
 %% @doc
 %% Fetch an indicvidual clokc for an individual key.  This will be done by 
@@ -564,7 +605,7 @@ do_fetchclock(leveled_so, Store, Bucket, Key, Seg) ->
         do_fold(leveled_so, Store, {segments, [Seg]}, FoldObjFun, InitAcc),
     Folder().
 
--spec do_fold(supported_stores(), pid(), tuple()|all, fun(), any()) 
+-spec do_fold(parallel_stores(), pid(), tuple()|all, fun(), any()) 
                                                             -> {async, fun()}.
 %% @doc
 %% Fold over the store applying FoldObjectsFun to each object and the 
@@ -739,7 +780,9 @@ logs() ->
         {"KS005",
             {info, "Clean opening of manifest with current GUID ~s"}},
         {"KS006",
-            {warn, "Pending store is garbage and should be deleted at ~s"}}
+            {warn, "Pending store is garbage and should be deleted at ~s"}},
+        {"KS007",
+            {info, "Rebuild prompt ~w with GUID ~w"}}
 
         ].
 
@@ -1034,8 +1077,9 @@ big_load_tester(StoreType) ->
 
     ok = store_close(Store0, ShutdownGUID0 = leveled_codec:generate_uuid()),
 
-    {ok, {never, ShutdownGUID0, false}, Store1} 
+    {ok, {RebuildTS, ShutdownGUID0, false}, Store1} 
         = store_parallelstart(RootPath, StoreType),
+    ?assertMatch(true, RebuildTS < os:timestamp()),
     
     timed_fold(Store1, KeyCount, FoldObjectsFun, StoreType, true),
 
@@ -1059,9 +1103,10 @@ big_load_tester(StoreType) ->
     M0 = clear_pendingpath(PendingManifest, RootPath),
     ?assertMatch(undefined, M0#manifest.pending_guid),
 
-    {ok, {never, ShutdownGUID1, false}, Store2} 
+    {ok, {RebuildTS2, ShutdownGUID1, false}, Store2} 
         = store_parallelstart(RootPath, StoreType),
-    
+    ?assertMatch(RebuildTS, RebuildTS2),
+
     timed_fold(Store2, KeyCount, FoldObjectsFun, StoreType, true),
 
     ok = store_close(Store2, none),
@@ -1096,8 +1141,6 @@ timed_bulk_put(Store, ObjectSpecs, StoreType) ->
 
 coverage_cheat_test() ->
     State = #state{store_type = leveled_so},
-    {reply, ok, native, _State} = native(null, self(), State),
-    {next_state, native, _State} = native(null, State),
     {next_state, native, _State} = handle_event(null, native, State),
     {next_state, native, _State} = handle_info(null, native, State),
     {ok, native, _State} = code_change(null, native, State, null).

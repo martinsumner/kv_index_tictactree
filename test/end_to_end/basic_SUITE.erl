@@ -11,6 +11,7 @@ all() -> [dual_store_compare_medium_so,
             dual_store_compare_large_so,
             dual_store_compare_large_ko].
 
+
 -define(ROOT_PATH, "test/").
 
 dual_store_compare_medium_so(_Config) ->
@@ -24,8 +25,6 @@ dual_store_compare_large_so(_Config) ->
 
 dual_store_compare_large_ko(_Config) ->
     dual_store_compare_tester(100000, leveled_ko).
-
-
 
 
 dual_store_compare_tester(InitialKeyCount, StoreType) ->
@@ -218,7 +217,6 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
     ok = aae_controller:aae_close(Cntrl1, none),
     ok = aae_controller:aae_close(Cntrl2, none),
     RootPath = reset_filestructure().
-
 
 
 reset_filestructure() ->
