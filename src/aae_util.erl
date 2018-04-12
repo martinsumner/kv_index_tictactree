@@ -165,7 +165,7 @@ test_key_generator(hash) ->
 test_key_generator(v1) ->
     ValueFun = 
         fun() -> 
-            Clock = {leveled_rand:uniform(1000), leveled_rand:uniform(1000)},
+            Clock = [{leveled_rand:uniform(1000), leveled_rand:uniform(1000)}],
             BClock = term_to_binary(Clock),
             Size = leveled_rand:uniform(100000),
             SibCount = leveled_rand:uniform(3),

@@ -39,19 +39,13 @@
             store_mput/2,
             store_mload/2,
             store_prompt/2,
-            store_fold/4,
+            store_fold/5,
             store_fetchclock/3]).
 
 -export([define_objectspec/5,
             generate_value/5,
             generate_treesegment/1,
-            value_preflist/1,
-            value_clock/1,
-            value_hash/1,
-            value_size/1,
-            value_sibcount/1,
-            value_indexhash/1,
-            value_aaesegment/1]).
+            value/3]).
 
 -record(state, {vnode :: pid()|undefined,
                 store :: pid()|undefined,
@@ -85,8 +79,6 @@
                                     {sync_strategy, none},
                                     {max_journalsize, 1000000}]).
 -define(CHANGEQ_LOGFREQ, 10000).
--define(HEAD_TAG, h). 
-    % Used in leveled as a Tag for head-only objects
 -define(STATE_BUCKET, <<"state">>).
 -define(MANIFEST_FN, "keystore"). 
     % filename for Keystore manifes
@@ -98,12 +90,18 @@
 
 -type parallel_stores() :: leveled_so|leveled_ko. 
     % Stores supported for parallel running
--type native_stores() :: leveled_ko.
+-type native_stores() :: leveled_nko.
     % Vnode backends which can support aae_keystore running in native mode
 -type manifest() :: #manifest{}.
     % Saves state of what store is currently active
 -type objectspec() :: #objectspec{}.
     % Object specification required by the store within mputs
+-type value_element() 
+    :: {preflist|clock|hash|size|sibcount|indexhash|aae_segment, fun()|null}.
+    % A request for a value element to be returned from a value, and the
+    % function to apply to the f(Bucket, Key) for elements where the item
+    % needs to be calculated (like IndexN in native stores)
+
 
 %%%============================================================================
 %%% API
@@ -198,13 +196,14 @@ store_prompt(Pid, Prompt) ->
     gen_fsm:send_event(Pid, {prompt, Prompt}).
 
 
--spec store_fold(pid(), tuple()|all, fun(), any()) -> any()|{async, fun()}.
+-spec store_fold(pid(), tuple()|all, fun(), any(), list(value_element())) 
+                                                    -> any()|{async, fun()}.
 %% @doc
 %% Return a fold function to asynchronously run a fold over a snapshot of the
 %% store
-store_fold(Pid, Limiter, FoldObjectsFun, InitAcc) ->
+store_fold(Pid, Limiter, FoldObjectsFun, InitAcc, Elements) ->
     gen_fsm:sync_send_event(Pid, 
-                            {fold, Limiter, FoldObjectsFun, InitAcc}, 
+                            {fold, Limiter, FoldObjectsFun, InitAcc, Elements},
                             infinity).
 
 
@@ -270,9 +269,10 @@ init([Opts]) ->
                         last_rebuild = Manifest0#manifest.last_rebuild}}
     end.
 
-loading({fold, Limiter, FoldObjectsFun, InitAcc}, _From, State) ->
+loading({fold, Limiter, FoldObjectsFun, InitAcc, Elements}, _From, State) ->
+    FoldElementsFun = fold_elements_fun(FoldObjectsFun, Elements, parallel),
     Result = do_fold(State#state.store_type, State#state.store,
-                        Limiter, FoldObjectsFun, InitAcc),
+                        Limiter, FoldElementsFun, InitAcc),
     {reply, Result, loading, State};
 loading({fetch_clock, Bucket, Key}, _From, State) ->
     VV = do_fetchclock(State#state.store_type, State#state.store, Bucket, Key),
@@ -282,9 +282,10 @@ loading({close, ShutdownGUID}, _From, State) ->
     ok = close_store(State#state.store_type, State#state.store),
     {stop, normal, ok, State#state{shutdown_guid = ShutdownGUID}}.
 
-parallel({fold, Limiter, FoldObjectsFun, InitAcc}, _From, State) ->
+parallel({fold, Limiter, FoldObjectsFun, InitAcc, Elements}, _From, State) ->
+    FoldElementsFun = fold_elements_fun(FoldObjectsFun, Elements, parallel),
     Result = do_fold(State#state.store_type, State#state.store,
-                        Limiter, FoldObjectsFun, InitAcc),
+                        Limiter, FoldElementsFun, InitAcc),
     {reply, Result, parallel, State};
 parallel({fetch_clock, Bucket, Key}, _From, State) ->
     VV = do_fetchclock(State#state.store_type, State#state.store, Bucket, Key),
@@ -299,14 +300,15 @@ parallel(startup_metadata, _From, State) ->
         parallel, 
         State#state{shutdown_guid = none}}.
 
-native({fold, Limiter, FoldObjectsFun, InitAcc}, _From, State) ->
+native({fold, Limiter, FoldObjectsFun, InitAcc, Elements}, _From, State) ->
+    FoldElementsFun = fold_elements_fun(FoldObjectsFun, Elements, native),
     Result = do_fold(State#state.store_type, State#state.store,
-                        Limiter, FoldObjectsFun, InitAcc),
+                        Limiter, FoldElementsFun, InitAcc),
     {reply, Result, native, State};
 native(startup_metadata, _From, State) ->
     {reply, 
         {State#state.last_rebuild, none, false}, 
-        parallel, 
+        native, 
         State#state{shutdown_guid = none}}.
 
 
@@ -457,32 +459,88 @@ generate_value(PreflistID, SegTS_int, Clock, Hash,
 %% Some helper functions for accessing individual value elements by version, 
 %% intended to make it easier to uplift the version of the value format at a
 %% later date
+%%
+%% These value functions will change between native and parallel stores
 
-value_preflist({1, ValueItems}) ->
-    element(1, ValueItems).
 
-value_clock({1, ValueItems}) ->
-    element(2, ValueItems).
+-spec value(parallel|native, {atom(), fun()|null}, tuple()) -> any().
+%% @doc
+%% Return the value referenced by the secend input from the tuple containing
+%% {Bucket, Key, Value}.  For the parallel store this should be a straight 
+%% element fetch.  For the native store this will require the binary to be 
+%% processed.  A function can be passed in to handle the scenario where this
+%% is not pre-defined
+value(parallel, {preflist, _F}, {_B, _K, {1, ValueItems}}) ->
+    element(1, ValueItems);
+value(parallel, {clock, _F}, {_B, _K, {1, ValueItems}}) ->
+    element(2, ValueItems);
+value(parallel, {hash, _F}, {_B, _K, {1, ValueItems}}) ->
+    element(3, ValueItems);
+value(parallel, {size, _F}, {_B, _K, {1, ValueItems}}) ->
+    element(4, ValueItems);
+value(parallel, {sibcount, _F}, {_B, _K, {1, ValueItems}}) ->
+    element(5, ValueItems);
+value(parallel, {indexhash, _F}, {_B, _K, {1, ValueItems}}) ->
+    element(6, ValueItems);
+value(parallel, {aae_segment, _F}, {_B, _K, {1, ValueItems}}) ->
+    element(7, ValueItems);
+value(native, {clock, _F}, {_B, _K, V}) ->
+    element(1, summary_from_native(V));
+value(native, {hash, _F}, {_B, _K, V}) ->
+    {VC, _Sz, _SC} = summary_from_native(V),
+    element(1, aae_controller:hash_clocks(VC, none));
+value(native, {size, _F}, {_B, _K, V}) ->
+    element(2, summary_from_native(V));
+value(native, {sibcount, _F}, {_B, _K, V}) ->
+    element(3, summary_from_native(V));
+value(native, {_NotExposed, F}, {B, K, _V}) ->
+    % preflist, aae_segment, index_hash
+    F(B, K).
 
-value_hash({1, ValueItems}) ->
-    element(3, ValueItems).
 
-value_size({1, ValueItems}) ->
-    element(4, ValueItems).
+-spec summary_from_native(binary()) 
+                        -> {aae_controller:version_vector(), 
+                            non_neg_integer(), non_neg_integer()}.
+%% @doc
+%% Extract only sumarry infromation from the binary - the vector, the object 
+%% size and the sibling count
+summary_from_native(<<131, _Rest/binary>>=ObjBin) ->  
+    {proxy_object, HeadBin, ObjSize, _Fetcher} 
+        = binary_to_term(ObjBin),
+    summary_from_native(HeadBin, ObjSize).
 
-value_sibcount({1, ValueItems}) ->
-    element(5, ValueItems).
-    
-value_indexhash({1, ValueItems}) ->
-    element(6, ValueItems).
-
-value_aaesegment({1, ValueItems}) ->
-    element(7, ValueItems).
+-spec summary_from_native(binary(), integer()) ->
+    {aae_controller:version_vector(), non_neg_integer(), non_neg_integer()}.
+%% @doc 
+%% Return afrom a version 1 binary the vector clock and siblings
+summary_from_native(ObjBin, ObjSize) ->
+    <<?MAGIC:8/integer, 
+        1:8/integer, 
+        VclockLen:32/integer, VclockBin:VclockLen/binary, 
+        SibCount:32/integer, 
+        _MetaBin/binary>> = ObjBin,
+    {binary_to_term(VclockBin), ObjSize, SibCount}.
 
 
 %%%============================================================================
 %%% Store functions
 %%%============================================================================
+
+-spec fold_elements_fun(fun(), list(value_element()), native|parallel) 
+                                                                    -> fun().
+%% @doc
+%% Add a filter to the Fold Objects Fun so that the passe din fun sees a tuple
+%% whose elements are the requested elements passed in, rather than the actual
+%% value
+fold_elements_fun(FoldObjectsFun, Elements, StoreType) ->
+    fun(B, K, V, Acc) ->
+        ValueMapFun =
+            fun(E) ->
+                value(StoreType, E, {B, K, V})
+            end,
+        ElementValues = lists:map(ValueMapFun, Elements),
+        FoldObjectsFun(B, K, list_to_tuple(ElementValues), Acc)
+    end.
 
 -spec is_empty(parallel_stores(), pid()) -> boolean().
 %% @doc
@@ -586,7 +644,7 @@ do_fetchclock(leveled_ko, Store, Bucket, Key) ->
         not_found ->
             none;
         {ok, V} ->
-            value_clock(V)
+            value(parallel, {clock, null}, {Bucket, Key, V})
     end.
 
 -spec do_fetchclock(leveled_so,pid(), binary(), binary(), integer())
@@ -600,7 +658,7 @@ do_fetchclock(leveled_so, Store, Bucket, Key, Seg) ->
         fun(B, K, V, Acc) ->
             case {B, K} of 
                 {Bucket, Key} ->
-                    value_clock(V);
+                    value(parallel, {clock, null}, {Bucket, Key, V});
                 _ ->
                     Acc
             end
@@ -634,7 +692,8 @@ do_fold(leveled_so, Store, {segments, SegList}, FoldObjectsFun, InitAcc) ->
 do_fold(leveled_ko, Store, {segments, SegList}, FoldObjectsFun, InitAcc) ->
     FoldFun = 
         fun(B, K, V, Acc) ->
-            case lists:member(value_aaesegment(V), SegList) of 
+            SegTree_int = value(parallel, {aae_segment, null}, {B, K, V}),
+            case lists:member(SegTree_int, SegList) of 
                 true ->
                     FoldObjectsFun(B, K, V, Acc);
                 false ->
@@ -644,6 +703,25 @@ do_fold(leveled_ko, Store, {segments, SegList}, FoldObjectsFun, InitAcc) ->
     Query =
         {foldheads_allkeys, 
             ?HEAD_TAG,
+            {FoldFun, InitAcc},
+            false, true, SegList},
+    leveled_bookie:book_returnfolder(Store, Query);
+do_fold(leveled_nko, Store, {segments, SegList}, FoldObjectsFun, InitAcc) ->
+    FoldFun = 
+        fun(B, K, V, Acc) ->
+            BinaryKey = aae_util:make_binarykey(B, K),
+            SegmentID = leveled_tictac:keyto_segment48(BinaryKey),
+            SegTree_int = aae_keystore:generate_treesegment(SegmentID),
+            case lists:member(SegTree_int, SegList) of 
+                true ->
+                    FoldObjectsFun(B, K, V, Acc);
+                false ->
+                    Acc 
+            end
+        end,
+    Query =
+        {foldheads_allkeys, 
+            ?RIAK_TAG,
             {FoldFun, InitAcc},
             false, true, SegList},
     leveled_bookie:book_returnfolder(Store, Query);
@@ -669,6 +747,14 @@ do_fold(leveled_ko, Store, {buckets, BucketList}, FoldObjectsFun, InitAcc) ->
             {FoldObjectsFun, InitAcc},
             false, true, false},
     leveled_bookie:book_returnfolder(Store, Query);
+do_fold(leveled_nko, Store, {buckets, BucketList}, FoldObjectsFun, InitAcc) ->
+    Query = 
+        {foldheads_bybucket,
+            ?RIAK_TAG, 
+            BucketList, bucket_list,
+            {FoldObjectsFun, InitAcc},
+            false, true, false},
+    leveled_bookie:book_returnfolder(Store, Query);
 do_fold(leveled_so, Store, all, FoldObjectsFun, InitAcc) ->
     Query = 
         populate_so_query(all,
@@ -682,6 +768,13 @@ do_fold(leveled_ko, Store, all, FoldObjectsFun, InitAcc) ->
     Query =
         {foldheads_allkeys, 
             ?HEAD_TAG,
+            {FoldObjectsFun, InitAcc},
+            false, true, false},
+    leveled_bookie:book_returnfolder(Store, Query);
+do_fold(leveled_nko, Store, all, FoldObjectsFun, InitAcc) ->
+    Query = 
+        {foldheads_allkeys, 
+            ?RIAK_TAG,
             {FoldObjectsFun, InitAcc},
             false, true, false},
     leveled_bookie:book_returnfolder(Store, Query).
@@ -894,11 +987,12 @@ load_tester(StoreType) ->
     ok = store_mput(Store0, L3),
 
     FoldObjectsFun =
-        fun(B, K, V, Acc) ->
-            [{B, K, value_clock(V)}|Acc]
+        fun(B, K, {V}, Acc) ->
+            [{B, K, V}|Acc]
         end,
     
-    {async, Folder0} = store_fold(Store0, all, FoldObjectsFun, []),
+    {async, Folder0} = 
+        store_fold(Store0, all, FoldObjectsFun, [], [{clock, null}]),
     Res0 = lists:usort(Folder0()),
     ?assertMatch(96, length(Res0)),
     
@@ -909,14 +1003,16 @@ load_tester(StoreType) ->
     FirstClock = element(1, FirstValue),
     ?assertMatch(FirstClock, store_fetchclock(Store0, <<"B1">>, FirstKey)),
 
-    {async, Folder1} = store_fold(Store0, all, FoldObjectsFun, []),
+    {async, Folder1} = 
+        store_fold(Store0, all, FoldObjectsFun, [], [{clock, null}]),
     Res1 = lists:usort(Folder1()),
     ?assertMatch(Res0, Res1),
 
     ok = store_mput(Store0, L4),
 
     % 4 adds, 20 alterations, 8 removes -> 92 entries
-    {async, Folder2} = store_fold(Store0, all, FoldObjectsFun, []),
+    {async, Folder2} = 
+        store_fold(Store0, all, FoldObjectsFun, [], [{clock, null}]),
     Res2 = lists:usort(Folder2()),
     ?assertMatch(92, length(Res2)),
 
@@ -924,20 +1020,23 @@ load_tester(StoreType) ->
     ok = store_mload(Store0, L2),
     ok = store_mload(Store0, L3),
 
-    {async, Folder3} = store_fold(Store0, all, FoldObjectsFun, []),
+    {async, Folder3} = 
+        store_fold(Store0, all, FoldObjectsFun, [], [{clock, null}]),
     Res3 = lists:usort(Folder3()),
     ?assertMatch(Res2, Res3),
 
     ok = store_prompt(Store0, rebuild_complete),
 
-    {async, Folder4} = store_fold(Store0, all, FoldObjectsFun, []),
+    {async, Folder4} = 
+        store_fold(Store0, all, FoldObjectsFun, [], [{clock, null}]),
     Res4 = lists:usort(Folder4()),
     ?assertMatch(Res2, Res4),
 
     ok = store_mput(Store0, L5),
 
     % Removes now complete so only 80 entries
-    {async, Folder5} = store_fold(Store0, all, FoldObjectsFun, []),
+    {async, Folder5} = 
+        store_fold(Store0, all, FoldObjectsFun, [], [{clock, null}]),
     Res5 = lists:usort(Folder5()),
     ?assertMatch(FinalState, Res5),
 
@@ -946,17 +1045,24 @@ load_tester(StoreType) ->
     {ok, {never, none, false}, Store1} 
         = store_parallelstart(RootPath, StoreType),
    
-    {async, Folder6} = store_fold(Store1, all, FoldObjectsFun, []),
+    {async, Folder6} = 
+        store_fold(Store1, all, FoldObjectsFun, [], [{clock, null}]),
     Res6 = lists:usort(Folder6()),
     ?assertMatch(Res5, Res6),
 
     {async, Folder7} = 
-        store_fold(Store1, {buckets, [<<"B1">>]}, FoldObjectsFun, []),
+        store_fold(Store1, 
+                    {buckets, [<<"B1">>]},
+                    FoldObjectsFun, [], 
+                    [{clock, null}]),
     Res7 = lists:usort(Folder7()),
     ?assertMatch(Res5, Res7),
 
     {async, Folder8} = 
-        store_fold(Store1, {buckets, [<<"B2">>]}, FoldObjectsFun, []),
+        store_fold(Store1, 
+                    {buckets, [<<"B2">>]}, 
+                    FoldObjectsFun, [], 
+                    [{clock, null}]),
     Res8 = lists:usort(Folder8()),
     ?assertMatch([], Res8),
 
@@ -977,7 +1083,10 @@ load_tester(StoreType) ->
     io:format("FinalStateSL: ~w~n", [FinalStateSL]),
 
     {async, Folder9} = 
-        store_fold(Store1, {segments, SegList}, FoldObjectsFun, []),
+        store_fold(Store1, 
+                    {segments, SegList}, 
+                    FoldObjectsFun, [], 
+                    [{clock, null}]),
     Res9 = lists:usort(Folder9()),
     ?assertMatch(FinalStateSL, Res9),
 
@@ -1077,7 +1186,7 @@ big_load_tester(StoreType) ->
 
     ok = store_prompt(Store0, rebuild_complete),
 
-    {async, Folder2} = store_fold(Store0, all, FoldObjectsFun, 0),
+    {async, Folder2} = store_fold(Store0, all, FoldObjectsFun, 0, []),
     ?assertMatch(KeyCount, Folder2() - KeyCount),
 
     ok = store_close(Store0, ShutdownGUID0 = leveled_codec:generate_uuid()),
@@ -1120,7 +1229,7 @@ big_load_tester(StoreType) ->
 
 timed_fold(Store, KeyCount, FoldObjectsFun, StoreType, DoubleCount) ->
     SW = os:timestamp(),
-    {async, Folder} = store_fold(Store, all, FoldObjectsFun, 0),
+    {async, Folder} = store_fold(Store, all, FoldObjectsFun, 0, []),
     case DoubleCount of 
         true ->
             ?assertMatch(KeyCount, Folder() - KeyCount);
@@ -1151,11 +1260,11 @@ coverage_cheat_test() ->
     {ok, native, _State} = code_change(null, native, State, null).
 
 dumb_value_test() ->
-    V = generate_value({0, 3}, 0, {a, 1}, erlang:phash2(<<>>), 
+    V = generate_value({0, 3}, 0, [{a, 1}], erlang:phash2(<<>>), 
                         {100, 1, 0, null}),
-    ?assertMatch(100, value_size(V)),
-    ?assertMatch(1, value_sibcount(V)),
-    ?assertMatch(0, value_indexhash(V)).
+    ?assertMatch(100, value(parallel, {size, null}, {null, null, V})),
+    ?assertMatch(1, value(parallel, {sibcount, null}, {null, null, V})),
+    ?assertMatch(0, value(parallel, {indexhash, null}, {null, null, V})).
 
 generate_objectspecs(Op, B, KeyList) ->
     FoldFun = 

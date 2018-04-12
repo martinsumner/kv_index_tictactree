@@ -245,28 +245,86 @@ mock_vnode_tester(InitialKeyCount) ->
     MockPathP = filename:join(RootPath, "mock_parallel/"),
 
     IndexNs = [{1, 3}, {2, 3}, {3, 3}],
-    {ok, VNN} = mock_kv_vnode:open(MockPathN, native, IndexNs),
-    {ok, VNP} = mock_kv_vnode:open(MockPathP, native, IndexNs),
-    
+    PreflistFun = 
+        fun(_B, K) ->
+            Idx = erlang:phash2(K) rem length(IndexNs),
+            lists:nth(Idx + 1, IndexNs)
+        end,
+
+    {ok, VNN} = mock_kv_vnode:open(MockPathN, native, IndexNs, PreflistFun),
+    {ok, VNP} = mock_kv_vnode:open(MockPathP, parallel, IndexNs, null),
+
+    RPid = self(),
+    RepairFun = fun(_KL) -> null end,  
+    ReturnFun = fun(R) -> RPid ! {result, R} end,
+
+    % Exchange between empty vnodes
+    {ok, _P0, GUID0} = 
+        aae_exchange:start([{exchange_vnodesendfun(VNN), IndexNs}],
+                                [{exchange_vnodesendfun(VNP), IndexNs}],
+                                RepairFun,
+                                ReturnFun),
+    io:format("Exchange id ~s~n", [GUID0]),
+    {ExchangeState0, 0} = start_receiver(),
+    true = ExchangeState0 == root_compare,
+
     ObjList = gen_riakobjects(InitialKeyCount, []),
-    
+
     PutFun = 
         fun(Store1, Store2) ->
             fun(Object) ->
-                Idx = erlang:phash2(Object#r_object.key) rem length(IndexNs),
-                mock_kv_vnode:put(Store1, 
-                                    Object, 
-                                    lists:nth(Idx + 1, IndexNs), 
-                                    [Store2])
+                PL = PreflistFun(null, Object#r_object.key),
+                mock_kv_vnode:put(Store1, Object, PL, [Store2])
             end
         end,
     
     PutFun1 = PutFun(VNN, VNP),
     PutFun2 = PutFun(VNP, VNN),
-    {OL1, OL2} = lists:split(InitialKeyCount div 2, ObjList),
-    lists:foreach(PutFun1, OL1),
-    lists:foreach(PutFun2, OL2),
+    {OL1, OL2A} = lists:split(InitialKeyCount div 2, ObjList),
+    {[RogueObj1, RogueObj2], OL2} = lists:split(2, OL2A),
+        % Keep some rogue objects to cause failures, by not putting them
+        % correctly into both vnodes
+    ok = lists:foreach(PutFun1, OL1),
+    ok = lists:foreach(PutFun2, OL2),
     
+    % Exchange between equivalent vnodes
+    {ok, _P1, GUID1} = 
+        aae_exchange:start([{exchange_vnodesendfun(VNN), IndexNs}],
+                                [{exchange_vnodesendfun(VNP), IndexNs}],
+                                RepairFun,
+                                ReturnFun),
+    io:format("Exchange id ~s~n", [GUID1]),
+    {ExchangeState1, 0} = start_receiver(),
+    true = ExchangeState1 == root_compare,
+
+    % Make change to one vnode only (the parallel one)
+    Idx1 = erlang:phash2(RogueObj1#r_object.key) rem length(IndexNs),
+    mock_kv_vnode:put(VNP, RogueObj1, lists:nth(Idx1 + 1, IndexNs), []),
+
+    % Exchange between nodes to expose difference
+    {ok, _P2, GUID2} = 
+        aae_exchange:start([{exchange_vnodesendfun(VNN), IndexNs}],
+                                [{exchange_vnodesendfun(VNP), IndexNs}],
+                                RepairFun,
+                                ReturnFun),
+    io:format("Exchange id ~s~n", [GUID2]),
+    {ExchangeState2, 1} = start_receiver(),
+    true = ExchangeState2 == clock_compare,
+
+    % Make change to one vnode only (the native one)
+    Idx2 = erlang:phash2(RogueObj2#r_object.key) rem length(IndexNs),
+    mock_kv_vnode:put(VNN, RogueObj2, lists:nth(Idx2 + 1, IndexNs), []),
+
+    % Exchange between nodes to expose differences (one in VNN, one in VNP)
+    {ok, _P3, GUID3} = 
+        aae_exchange:start([{exchange_vnodesendfun(VNN), IndexNs}],
+                                [{exchange_vnodesendfun(VNP), IndexNs}],
+                                RepairFun,
+                                ReturnFun),
+    io:format("Exchange id ~s~n", [GUID3]),
+    {ExchangeState3, 2} = start_receiver(),
+    true = ExchangeState3 == clock_compare,
+
     ok = mock_kv_vnode:close(VNN),
     ok = mock_kv_vnode:close(VNP),
     RootPath = reset_filestructure().
@@ -406,10 +464,24 @@ exchange_sendfun(Cntrl) ->
                     aae_controller:aae_fetchclocks(Cntrl,
                                                         Preflists,
                                                         SegmentIDs,
-                                                        ReturnFun)
+                                                        ReturnFun,
+                                                        null)
             end
         end,
     SendFun.
+
+exchange_vnodesendfun(VN) ->
+    fun(Msg, Preflists, Colour) ->
+        RPid = self(),
+        ReturnFun = 
+            fun(R) -> 
+                io:format("Preparing reply to ~w for msg ~w colour ~w~n", 
+                            [RPid, Msg, Colour]),
+                aae_exchange:reply(RPid, R, Colour)
+            end,
+        mock_kv_vnode:exchange_message(VN, Msg, Preflists, ReturnFun)
+    end.
+
 
 repair_fun(SourceList, Cntrl, NVal) ->
     Lookup = lists:map(fun({B, K, V}) -> {{B, K}, V} end, SourceList),

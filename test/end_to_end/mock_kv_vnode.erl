@@ -14,10 +14,10 @@
             terminate/2,
             code_change/3]).
 
--export([open/3,
+-export([open/4,
             put/4,
             push/6,
-            exchange_message/3,
+            exchange_message/4,
             rebuild/2,
             close/1]).
 
@@ -39,7 +39,8 @@
 
 -record(options, {aae :: parallel|native,
                     index_ns :: list(tuple()),
-                    root_path :: list()}).
+                    root_path :: list(),
+                    preflist_fun = null :: preflist_fun()}).
 
 
 -record(state, {root_path :: list(),
@@ -47,7 +48,8 @@
                 aae_controller :: pid(),
                 vnode_store :: pid(),
                 vnode_id :: binary(),
-                vnode_sqn = 1 :: integer()}).
+                vnode_sqn = 1 :: integer(),
+                preflist_fun = null :: preflist_fun()}).
 
 -include_lib("eunit/include/eunit.hrl").
 
@@ -63,19 +65,21 @@
 
 
 -type r_object() :: #r_object{}.
+-type preflist_fun() :: fun()|null.
 
 %%%============================================================================
 %%% API
 %%%============================================================================
 
--spec open(list(), atom(), list(tuple())) -> {ok, pid()}.
+-spec open(list(), atom(), list(tuple()), fun()|null) -> {ok, pid()}.
 %% @doc
 %% Open a mock vnode
-open(Path, AAEType, IndexNs) ->
+open(Path, AAEType, IndexNs, PreflistFun) ->
     gen_server:start(?MODULE, 
                         [#options{aae = AAEType, 
                                     index_ns = IndexNs, 
-                                    root_path = Path}], 
+                                    root_path = Path,
+                                    preflist_fun = PreflistFun}], 
                         []).
 
 -spec put(pid(), r_object(), tuple(), list(pid())) -> ok.
@@ -98,11 +102,11 @@ rebuild(Vnode, ForceRebuild) ->
     gen_server:call(Vnode, {rebuild, ForceRebuild}).
 
 
--spec exchange_message(pid(), tuple()|atom(), list(tuple())) -> ok.
+-spec exchange_message(pid(), tuple()|atom(), list(tuple()), atom()) -> ok.
 %% @doc
 %% Handle a message from an AAE exchange
-exchange_message(Vnode, Msg, IndexNs) ->
-    gen_server:call(Vnode, {aae, Msg, IndexNs}).
+exchange_message(Vnode, Msg, IndexNs, ReturnFun) ->
+    gen_server:call(Vnode, {aae, Msg, IndexNs, ReturnFun}).
 
 
 -spec close(pid()) -> ok.
@@ -141,7 +145,7 @@ init([Opts]) ->
     KeyStoreType = 
         case Opts#options.aae of 
             native ->
-                {native, leveled_ko, VnSt};
+                {native, leveled_nko, VnSt};
             parallel ->
                 {parallel, leveled_so}
         end,
@@ -156,7 +160,8 @@ init([Opts]) ->
                 vnode_store = VnSt,
                 index_ns = Opts#options.index_ns,
                 aae_controller = AAECntrl,
-                vnode_id = list_to_binary(leveled_codec:generate_uuid())}}.
+                vnode_id = list_to_binary(leveled_codec:generate_uuid()),
+                preflist_fun = Opts#options.preflist_fun}}.
 
 handle_call({put, Object, IndexN, OtherVnodes}, _From, State) ->
     % Get Bucket and Key from object
@@ -209,11 +214,7 @@ handle_call({rebuild, _ForceRebuild}, _From, State) ->
     % Reply with next rebuild TS
     % If force rebuild, then trigger rebuild
     {reply, ok, State};
-handle_call({aae, Msg, IndexNs}, From, State) ->
-    ReturnFun = 
-        fun(Reply) ->
-            gen_server:reply(From, Reply)
-        end,
+handle_call({aae, Msg, IndexNs, ReturnFun}, _From, State) ->
     case Msg of 
         fetch_root ->
             aae_controller:aae_mergeroot(State#state.aae_controller, 
@@ -228,7 +229,8 @@ handle_call({aae, Msg, IndexNs}, From, State) ->
             aae_controller:aae_fetchclocks(State#state.aae_controller,
                                                 IndexNs,
                                                 SegmentIDs,
-                                                ReturnFun)
+                                                ReturnFun,
+                                                State#state.preflist_fun)
     end,
     {reply, ok, State};
 handle_call(close, _From, State) ->
@@ -290,7 +292,7 @@ riak_extract_metadata(ObjBin) ->
         IndexHash:32/integer, 
         HeadLen:32/integer,
         Head:HeadLen/binary>> = ObjBin,
-    {ObjSize, SibCount, IndexHash, binary_to_term(Head)}.
+    {ObjSize, SibCount, IndexHash, Head}.
 
 
 %% V1 Riak Object Binary Encoding
