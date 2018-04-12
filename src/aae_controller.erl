@@ -32,7 +32,8 @@
             aae_fetchbranches/4,
             aae_mergebranches/4,
             aae_fetchclocks/4,
-            aae_rebuildcaches/4]).
+            aae_rebuildcaches/4,
+            aae_fold/4]).
 
 -export([foldobjects_buildtrees/3]).
 
@@ -122,6 +123,8 @@
                 fun()) -> {ok, pid()}.
 %% @doc
 %% Start an AAE controller 
+%% The ObjectsplitFun must take a vnode object in a binary form and output 
+%% {Size, SibCount, IndexHash, _Head}
 aae_start(KeyStoreT, StartupD, RebuildSch, Preflists, RootPath, ObjSplitFun) ->
     AAEopts =
         #options{keystore_type = KeyStoreT,
@@ -227,6 +230,14 @@ aae_mergebranches(Pid, IndexNs, BranchIDs, ReturnFun) ->
 %% list of IndexNs
 aae_fetchclocks(Pid, IndexNs, SegmentIDs, ReturnFun) ->
     gen_server:cast(Pid, {fetch_clocks, IndexNs, SegmentIDs, ReturnFun}).
+
+
+-spec aae_fold(pid(), tuple(), fun(), any()) -> {async, fun()}.
+%% @doc
+%% Return a folder to fold over the keys in the aae_keystore (or native 
+%% keystore if in native mode)
+aae_fold(Pid, Limiter, FoldObjectsFun, InitAcc) ->
+    gen_server:call(Pid, {fold, Limiter, FoldObjectsFun, InitAcc}).
 
 -spec aae_close(pid(), list()) -> ok.
 %% @doc
@@ -406,7 +417,13 @@ handle_call({rebuild_treecaches, IndexNs, parallel_keystore, WorkerFun},
     % updated to match the lasted provided list of responsible preflists
     {reply, 
         ok, 
-        State#state{tree_caches = TreeCaches, index_ns = IndexNs}}.
+        State#state{tree_caches = TreeCaches, index_ns = IndexNs}};
+handle_call({fold, Limiter, FoldObjectsFun, InitAcc}, _From, State) ->
+    R = aae_keystore:store_fold(State#state.key_store, 
+                                Limiter, 
+                                FoldObjectsFun, 
+                                InitAcc),
+    {reply, R, State}.
 
 handle_cast({put, IndexN, Bucket, Key, Clock, PrevClock, BinaryObj}, State) ->
     % Setup

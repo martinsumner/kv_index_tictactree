@@ -4,15 +4,30 @@
 -export([dual_store_compare_medium_so/1,
             dual_store_compare_medium_ko/1,
             dual_store_compare_large_so/1,
-            dual_store_compare_large_ko/1]).
+            dual_store_compare_large_ko/1,
+            mock_vnode_medium/1]).
 
 all() -> [dual_store_compare_medium_so,
             dual_store_compare_medium_ko,
             dual_store_compare_large_so,
-            dual_store_compare_large_ko].
-
+            dual_store_compare_large_ko,
+            mock_vnode_medium].
 
 -define(ROOT_PATH, "test/").
+
+-record(r_content, {
+                    metadata,
+                    value :: term()
+                    }).
+
+-record(r_object, {
+                    bucket,
+                    key,
+                    contents :: [#r_content{}],
+                    vclock = [],
+                    updatemetadata=dict:store(clean, true, dict:new()),
+                    updatevalue :: term()}).
+
 
 dual_store_compare_medium_so(_Config) ->
     dual_store_compare_tester(10000, leveled_so).
@@ -219,6 +234,44 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
     RootPath = reset_filestructure().
 
 
+
+mock_vnode_medium(_Config) ->
+    mock_vnode_tester(10000).
+
+
+mock_vnode_tester(InitialKeyCount) ->
+    RootPath = reset_filestructure(),
+    MockPathN = filename:join(RootPath, "mock_native/"),
+    MockPathP = filename:join(RootPath, "mock_parallel/"),
+
+    IndexNs = [{1, 3}, {2, 3}, {3, 3}],
+    {ok, VNN} = mock_kv_vnode:open(MockPathN, native, IndexNs),
+    {ok, VNP} = mock_kv_vnode:open(MockPathP, native, IndexNs),
+    
+    ObjList = gen_riakobjects(InitialKeyCount, []),
+    
+    PutFun = 
+        fun(Store1, Store2) ->
+            fun(Object) ->
+                Idx = erlang:phash2(Object#r_object.key) rem length(IndexNs),
+                mock_kv_vnode:put(Store1, 
+                                    Object, 
+                                    lists:nth(Idx + 1, IndexNs), 
+                                    [Store2])
+            end
+        end,
+    
+    PutFun1 = PutFun(VNN, VNP),
+    PutFun2 = PutFun(VNP, VNN),
+    {OL1, OL2} = lists:split(InitialKeyCount div 2, ObjList),
+    lists:foreach(PutFun1, OL1),
+    lists:foreach(PutFun2, OL2),
+    
+    ok = mock_kv_vnode:close(VNN),
+    ok = mock_kv_vnode:close(VNP),
+    RootPath = reset_filestructure().
+
+
 reset_filestructure() ->
     reset_filestructure(0, ?ROOT_PATH).
     
@@ -277,6 +330,20 @@ put_keys(Cntrl, Nval, [{Bucket, Key, VersionVector}|Tail], PrevVV) ->
                                 PrevVV, 
                                 <<>>),
     put_keys(Cntrl, Nval, Tail).
+
+
+gen_riakobjects(0, ObjectList) ->
+    ObjectList;
+gen_riakobjects(Count, ObjectList) ->
+    Bucket = integer_to_binary(Count rem 5),  
+    Key = list_to_binary(string:right(integer_to_list(Count), 6, $0)),
+    Value = leveled_rand:rand_bytes(512),
+    Obj = #r_object{bucket = Bucket,
+                    key = Key,
+                    contents = [#r_content{value = Value}]},
+    gen_riakobjects(Count - 1, [Obj|ObjectList]).
+
+
 
 add_randomincrement(Clock) ->
     RandIncr = leveled_rand:uniform(100),

@@ -302,7 +302,12 @@ parallel(startup_metadata, _From, State) ->
 native({fold, Limiter, FoldObjectsFun, InitAcc}, _From, State) ->
     Result = do_fold(State#state.store_type, State#state.store,
                         Limiter, FoldObjectsFun, InitAcc),
-    {reply, Result, native, State}.
+    {reply, Result, native, State};
+native(startup_metadata, _From, State) ->
+    {reply, 
+        {State#state.last_rebuild, none, false}, 
+        parallel, 
+        State#state{shutdown_guid = none}}.
 
 
 loading({mput, ObjectSpecs}, State) ->
