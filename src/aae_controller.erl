@@ -32,7 +32,7 @@
             aae_fetchbranches/4,
             aae_mergebranches/4,
             aae_fetchclocks/5,
-            aae_rebuildcaches/4,
+            aae_rebuildtrees/3,
             aae_fold/5]).
 
 -export([foldobjects_buildtrees/1,
@@ -234,7 +234,7 @@ aae_fetchclocks(Pid, IndexNs, SegmentIDs, ReturnFun, PrefLFun) ->
     gen_server:cast(Pid, 
                     {fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PrefLFun}).
 
--spec aae_fold(pid(), tuple(), fun(), any(), 
+-spec aae_fold(pid(), aae_keystore:fold_limiter(), fun(), any(), 
                         list(aae_keystore:value_element())) -> {async, fun()}.
 %% @doc
 %% Return a folder to fold over the keys in the aae_keystore (or native 
@@ -251,27 +251,24 @@ aae_close(Pid, ShutdownGUID) ->
     gen_server:call(Pid, {close, ShutdownGUID}, 30000).
 
 
--spec aae_rebuildcaches(pid(), list(responsible_preflist()), 
-                        fun()|parallel_keystore, fun()) -> ok.
+-spec aae_rebuildtrees(pid(), list(responsible_preflist()), fun()) -> ok. 
 %% @doc
-%% Rebuild the tree caches.  
-%% 
-%% This should occur if and only if a rebuild of the cache is pending.  The 
-%% IndexNs supported should be passed in (it is not assumed that the rebuild
-%% will be on the same list of responsible_preflists as the original start).
+%% Rebuild the tree caches for a store.  Note that this rebuilds the caches
+%% but not the actual key_store itself (required in the case of parallel 
+%% stores).  For parallel store, first call aae_rebuildstore before rebuilding
+%% the treecaches.
 %%
-%% If the keystore is in native mode this will use a passed in folder function 
-%% as well as worker function.  The folder function will be on a snapshot 
-%% taken by the vnode manager as part of the atomic unit of work which has 
-%% made this call.  The worker function will trigger a worker from a pool to
-%% perfom the fold which should also take a finish function that will be used
-%% to call cache_completeload for each IndexN when the fold is finished.
-%%
-%% If parallel_keystore is passed, the rebuild will be run against the 
-%% parallel store so te controller should take the snapshot and prepare the
-%% fold function.
-aae_rebuildcaches(Pid, IndexNs, FoldFun, WorkerFun) ->
-    gen_server:call(Pid, {rebuild_treecaches, IndexNs, FoldFun, WorkerFun}).
+%% This rebuild requires as inputs:
+%% - the Preflists to be rebuilt (we do not assume that preflists stay 
+%% constant within a controller)
+%% - a 2-arity WorkerFun which can be passed a Fold and a FinishFun e.g. 
+%% WorkerFun(Folder, FinishFun), with the FinishFun to be called once the 
+%% Fold is complete (being passed the result of the Folder()).
+aae_rebuildtrees(Pid, IndexNs, WorkerFun) ->
+    gen_server:call(Pid, {rebuild_trees, IndexNs, WorkerFun}).
+
+
+
 
 
 %%%============================================================================
@@ -369,14 +366,13 @@ handle_call({close, ShutdownGUID}, _From, State) ->
     lists:foreach(CloseTCFun, State#state.tree_caches),
     ok = aae_runner:runner_stop(State#state.runner),
     {stop, normal, ok, State};
-handle_call({rebuild_treecaches, IndexNs, parallel_keystore, WorkerFun}, 
-                                                            _From, State) ->
+handle_call({rebuild_trees, IndexNs, WorkerFun}, _From, State) ->
     % Before the fold flush all the PUTs 
     aae_util:log("AAE06", [IndexNs], logs()),
     ok = flush_puts(State#state.key_store, State#state.objectspecs_queue),
     
     % Setup a fold over the store
-    {FoldFun, InitAcc} =  foldobjects_buildtrees(IndexNs),
+    {FoldFun, InitAcc} = foldobjects_buildtrees(IndexNs),
     {async, Folder} = 
         aae_keystore:store_fold(State#state.key_store, 
                                 all, 
@@ -886,9 +882,8 @@ basic_cache_rebuild_tester(StoreType) ->
     ok = aae_fetchroot(Cntrl0, [{200, 3}], ReturnFun),
     [{{200,3}, Root2}] = start_receiver(),
 
-    ok = aae_rebuildcaches(Cntrl0, 
+    ok = aae_rebuildtrees(Cntrl0, 
                             Preflists, 
-                            parallel_keystore, 
                             workerfun(ReturnFun)),
     ok = start_receiver(),
 
@@ -951,9 +946,8 @@ varyindexn_cache_rebuild_tester(StoreType) ->
     [{{300,3}, Root3}] = start_receiver(),
     ?assertMatch(false, Root3),
 
-    ok = aae_rebuildcaches(Cntrl0, 
+    ok = aae_rebuildtrees(Cntrl0, 
                             UpdPreflists, 
-                            parallel_keystore, 
                             workerfun(ReturnFun)),
     ok = start_receiver(),
 
@@ -976,9 +970,8 @@ varyindexn_cache_rebuild_tester(StoreType) ->
     ?assertMatch(Root1, RB1_Root1),
     ?assertMatch(Root2, RB1_Root2),
 
-    ok = aae_rebuildcaches(Cntrl0, 
+    ok = aae_rebuildtrees(Cntrl0, 
                             Preflists, 
-                            parallel_keystore, 
                             workerfun(ReturnFun)),
     ok = start_receiver(),
 

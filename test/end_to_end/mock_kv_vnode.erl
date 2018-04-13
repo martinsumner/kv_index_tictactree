@@ -19,6 +19,7 @@
             push/6,
             exchange_message/4,
             rebuild/2,
+            fold_aae/5,
             close/1]).
 
 -export([riak_extract_metadata/1,
@@ -101,6 +102,14 @@ push(Vnode, Bucket, Key, UpdClock, ObjectBin, IndexN) ->
 rebuild(Vnode, ForceRebuild) ->
     gen_server:call(Vnode, {rebuild, ForceRebuild}).
 
+-spec fold_aae(pid(), tuple(), fun(), any(), 
+                        list(aae_keystore:value_element())) -> {async, fun()}.
+%% @doc
+%% Fold over the heads in the aae store (which may be the key store when 
+%% running in native mode)
+fold_aae(Vnode, Limiter, FoldObjectsFun, InitAcc, Elements) ->
+    gen_server:call(Vnode, 
+                    {fold_aae, Limiter, FoldObjectsFun, InitAcc, Elements}).
 
 -spec exchange_message(pid(), tuple()|atom(), list(tuple()), atom()) -> ok.
 %% @doc
@@ -209,11 +218,20 @@ handle_call({put, Object, IndexN, OtherVnodes}, _From, State) ->
                     OtherVnodes),
 
     {reply, ok, State#state{vnode_sqn = State#state.vnode_sqn + 1}};
-handle_call({rebuild, _ForceRebuild}, _From, State) ->
+handle_call({rebuild, true}, _From, State) ->
     % Check next rebuild
     % Reply with next rebuild TS
     % If force rebuild, then trigger rebuild
-    {reply, ok, State};
+    NRT = aae_controller:aae_nextrebuild(State#state.aae_controller),
+    % TODO - add actual rebuild
+
+    {reply, NRT, State};
+handle_call({rebuild, false}, _From, State) ->
+    % Check next rebuild
+    % Reply with next rebuild TS
+    % If force rebuild, then trigger rebuild
+    NRT = aae_controller:aae_nextrebuild(State#state.aae_controller),
+    {reply, NRT, State};
 handle_call({aae, Msg, IndexNs, ReturnFun}, _From, State) ->
     case Msg of 
         fetch_root ->
@@ -233,7 +251,20 @@ handle_call({aae, Msg, IndexNs, ReturnFun}, _From, State) ->
                                                 State#state.preflist_fun)
     end,
     {reply, ok, State};
+handle_call({fold_aae, Limiter, FoldFun, InitAcc, Elements}, _From, State) ->
+    R = aae_controller:aae_fold(State#state.aae_controller, 
+                                Limiter, 
+                                FoldFun, InitAcc, 
+                                Elements),
+    {reply, R, State};
 handle_call(close, _From, State) ->
+    ShutdownGUID = leveled_codec:generate_uuid(),
+    ok = leveled_bookie:book_put(State#state.vnode_store, 
+                                    ?BUCKET_SDG, ?KEY_SDG, 
+                                    ShutdownGUID, [], 
+                                    ?TAG_SDG),
+    ok = leveled_bookie:book_close(State#state.vnode_store),
+    ok = aae_controller:aae_close(State#state.aae_controller, ShutdownGUID),
     {stop, normal, ok, State}.
 
 handle_cast({push, Bucket, Key, UpdClock, ObjectBin, IndexN}, State) ->

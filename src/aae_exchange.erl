@@ -459,7 +459,6 @@ compare_branches(BlueBranches, PinkBranches) ->
 %% Find the differences between the lists - and return Bucket/Key pairs
 %% TODO: allow for proper clock comparison e.g. which is more up to date
 compare_clocks(BlueList0, PinkList0) ->
-    io:format("BlueList ~w PinkList ~w~n", [BlueList0, PinkList0]),
     BlueList = lists:usort(BlueList0),
     PinkList = lists:usort(PinkList0),
     MapToKeyFun =  fun({B, K, _V}) -> {B, K} end,

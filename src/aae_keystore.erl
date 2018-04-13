@@ -101,6 +101,10 @@
     % A request for a value element to be returned from a value, and the
     % function to apply to the f(Bucket, Key) for elements where the item
     % needs to be calculated (like IndexN in native stores)
+-type fold_limiter()
+    :: all|{segments, list(integer())}|{buckets, list(binary())}.
+    % Limit the scope of the fold, to specific segments or to specific 
+    % buckets (and otherwise state all).
 
 
 %%%============================================================================
@@ -196,7 +200,7 @@ store_prompt(Pid, Prompt) ->
     gen_fsm:send_event(Pid, {prompt, Prompt}).
 
 
--spec store_fold(pid(), tuple()|all, fun(), any(), list(value_element())) 
+-spec store_fold(pid(), fold_limiter(), fun(), any(), list(value_element())) 
                                                     -> any()|{async, fun()}.
 %% @doc
 %% Return a fold function to asynchronously run a fold over a snapshot of the
@@ -309,7 +313,9 @@ native(startup_metadata, _From, State) ->
     {reply, 
         {State#state.last_rebuild, none, false}, 
         native, 
-        State#state{shutdown_guid = none}}.
+        State#state{shutdown_guid = none}};
+native({close, ShutdownGUID}, _From, State) ->
+    {stop, normal, ok, State#state{shutdown_guid = ShutdownGUID}}.
 
 
 loading({mput, ObjectSpecs}, State) ->
@@ -647,7 +653,7 @@ do_fetchclock(leveled_ko, Store, Bucket, Key) ->
             value(parallel, {clock, null}, {Bucket, Key, V})
     end.
 
--spec do_fetchclock(leveled_so,pid(), binary(), binary(), integer())
+-spec do_fetchclock(leveled_so, pid(), binary(), binary(), integer())
                                             -> aae_controller:version_vector().
 %% @doc
 %% Specific function to allow fetch_clock from leveled segment_ordered backend.
@@ -668,7 +674,7 @@ do_fetchclock(leveled_so, Store, Bucket, Key, Seg) ->
         do_fold(leveled_so, Store, {segments, [Seg]}, FoldObjFun, InitAcc),
     Folder().
 
--spec do_fold(parallel_stores(), pid(), tuple()|all, fun(), any()) 
+-spec do_fold(parallel_stores(), pid(), fold_limiter(), fun(), any()) 
                                                             -> {async, fun()}.
 %% @doc
 %% Fold over the store applying FoldObjectsFun to each object and the 

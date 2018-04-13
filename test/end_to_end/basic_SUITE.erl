@@ -5,13 +5,19 @@
             dual_store_compare_medium_ko/1,
             dual_store_compare_large_so/1,
             dual_store_compare_large_ko/1,
-            mock_vnode_medium/1]).
+            mock_vnode_loadandexchange/1,
+            mock_vnode_coveragefold_nativemedium/1,
+            mock_vnode_coveragefold_nativesmall/1,
+            mock_vnode_coveragefold_parallelmedium/1]).
 
 all() -> [dual_store_compare_medium_so,
             dual_store_compare_medium_ko,
             dual_store_compare_large_so,
             dual_store_compare_large_ko,
-            mock_vnode_medium].
+            mock_vnode_loadandexchange,
+            mock_vnode_coveragefold_nativemedium,
+            mock_vnode_coveragefold_nativesmall,
+            mock_vnode_coveragefold_parallelmedium].
 
 -define(ROOT_PATH, "test/").
 
@@ -235,11 +241,13 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
 
 
 
-mock_vnode_medium(_Config) ->
-    mock_vnode_tester(10000).
-
-
-mock_vnode_tester(InitialKeyCount) ->
+mock_vnode_loadandexchange(_Config) ->
+    % Load up two vnodes with same data, with the data in each node split 
+    % across 3 partitions (n=1).
+    %
+    % The purpose if to perform exchanges to first highlight no differences, 
+    % and then once a difference is created, discover any difference 
+    InitialKeyCount = 50000,
     RootPath = reset_filestructure(),
     MockPathN = filename:join(RootPath, "mock_native/"),
     MockPathP = filename:join(RootPath, "mock_parallel/"),
@@ -325,9 +333,201 @@ mock_vnode_tester(InitialKeyCount) ->
     {ExchangeState3, 2} = start_receiver(),
     true = ExchangeState3 == clock_compare,
 
+    RebuildN = mock_kv_vnode:rebuild(VNN, false),
+    RebuildP = mock_kv_vnode:rebuild(VNP, false),
+    % Discover Next rebuild times - should be in the future as both stores w
+    % were started empty, and hence without the need to rebuild
+    io:format("Next rebuild vnn ~w vnp ~w~n", [RebuildN, RebuildP]),
+    true = RebuildN > os:timestamp(),
+    true = RebuildP > os:timestamp(),
+
     ok = mock_kv_vnode:close(VNN),
     ok = mock_kv_vnode:close(VNP),
+
+    % Restart the vnodes, confirm next rebuilds are still in the future 
+    % between startup and shutdown the next_rebuild will be rescheduled to
+    % a different time, as the look at the last rebuild time and schedule 
+    % forward from there.
+    {ok, VNNa} = mock_kv_vnode:open(MockPathN, native, IndexNs, PreflistFun),
+    {ok, VNPa} = mock_kv_vnode:open(MockPathP, parallel, IndexNs, null),
+    RebuildNa = mock_kv_vnode:rebuild(VNNa, false),
+    RebuildPa = mock_kv_vnode:rebuild(VNPa, false),
+    io:format("Next rebuild vnn ~w vnp ~w~n", [RebuildNa, RebuildPa]),
+    true = RebuildNa > os:timestamp(),
+    true = RebuildPa > os:timestamp(),
+
+    % Exchange between nodes to expose differences (one in VNN, one in VNP)
+    % Should still discover the same difference as when they were closed.
+    {ok, _P3a, GUID3a} = 
+        aae_exchange:start([{exchange_vnodesendfun(VNNa), IndexNs}],
+                                [{exchange_vnodesendfun(VNPa), IndexNs}],
+                                RepairFun,
+                                ReturnFun),
+    io:format("Exchange id ~s~n", [GUID3a]),
+    {ExchangeState3a, 2} = start_receiver(),
+    true = ExchangeState3a == clock_compare,
+
+    ok = mock_kv_vnode:close(VNNa),
+    ok = mock_kv_vnode:close(VNPa),
     RootPath = reset_filestructure().
+
+
+mock_vnode_coveragefold_nativemedium(_Config) ->
+    mock_vnode_coveragefolder(native, 50000).
+
+mock_vnode_coveragefold_nativesmall(_Config) ->
+    mock_vnode_coveragefolder(native, 1000).
+
+mock_vnode_coveragefold_parallelmedium(_Config) ->
+    mock_vnode_coveragefolder(parallel, 50000).
+
+
+
+mock_vnode_coveragefolder(Type, InitialKeyCount) ->
+    % This should load a set of 4 vnodes, with the data partitioned across the
+    % vnodes n=2 to provide for 2 different coverage plans.
+    %
+    % After the load, an exchange cna confirm consistency between the coverage 
+    % plans.  Then run some folds to make sure that the folds produce the 
+    % expected results 
+    RootPath = reset_filestructure(),
+    MockPathN1 = filename:join(RootPath, "mock_native1/"),
+    MockPathN2 = filename:join(RootPath, "mock_native2/"),
+    MockPathN3 = filename:join(RootPath, "mock_native3/"),
+    MockPathN4 = filename:join(RootPath, "mock_native4/"),
+    
+    IndexNs = 
+        [{1, 2}, {2, 2}, {3, 2}, {0, 2}],
+    PreflistFun = 
+        fun(_B, K) ->
+            Idx = erlang:phash2(K) rem length(IndexNs),
+            lists:nth(Idx + 1, IndexNs)
+        end,
+
+    % Open four vnodes to take two of the rpeflists each
+    % - this isintended to replicate a ring-size=4, n-val=2 ring 
+    {ok, VNN1} = 
+        mock_kv_vnode:open(MockPathN1, Type, [{1, 2}, {0, 2}], PreflistFun),
+    {ok, VNN2} = 
+        mock_kv_vnode:open(MockPathN2, Type, [{2, 2}, {1, 2}], PreflistFun),
+    {ok, VNN3} = 
+        mock_kv_vnode:open(MockPathN3, Type, [{3, 2}, {2, 2}], PreflistFun),
+    {ok, VNN4} = 
+        mock_kv_vnode:open(MockPathN4, Type, [{0, 2}, {3, 2}], PreflistFun),
+
+    % Mapping of preflists to [Primary, Secondary] vnodes
+    RingN =
+        [{{1, 2}, [VNN1, VNN2]}, {{2, 2}, [VNN2, VNN3]}, 
+            {{3, 2}, [VNN3, VNN4]}, {{0, 2}, [VNN4, VNN1]}],
+
+    % Add each key to the vnode at the head of the preflist, and then push the
+    % change to the one at the tail.  
+    PutFun = 
+        fun(Ring) ->
+            fun(Object) ->
+                PL = PreflistFun(null, Object#r_object.key),
+                {PL, [Primary, Secondary]} = lists:keyfind(PL, 1, Ring),
+                mock_kv_vnode:put(Primary, Object, PL, [Secondary])
+            end
+        end,
+
+    ObjList = gen_riakobjects(InitialKeyCount, []),
+    ok = lists:foreach(PutFun(RingN), ObjList),
+
+    % Provide two coverage plans, equivalent to normal ring coverage plans
+    % with offset=0 and offset=1
+    AllPrimariesMap =
+        fun({IndexN, [Pri, _FB]}) ->
+            {exchange_vnodesendfun(Pri), [IndexN]}
+        end,
+    AllSecondariesMap =
+        fun({IndexN, [_Pri, FB]}) ->
+            {exchange_vnodesendfun(FB), [IndexN]}
+        end,
+    AllPrimaries = lists:map(AllPrimariesMap, RingN),
+    AllSecondaries = lists:map(AllSecondariesMap, RingN),
+
+    RPid = self(),
+    RepairFun = fun(_KL) -> null end,  
+    ReturnFun = fun(R) -> RPid ! {result, R} end,
+
+    {ok, _P1, GUID1} = 
+        aae_exchange:start(AllPrimaries, AllSecondaries, RepairFun, ReturnFun),
+    io:format("Exchange id ~s~n", [GUID1]),
+    {ExchangeState1, 0} = start_receiver(),
+    true = ExchangeState1 == root_compare,
+
+
+    % Fold over a valid coverage plan to find siblings (there are none) 
+    SibCountFoldFun =
+        fun(B, K, {SC}, {NoSibAcc, SibAcc}) ->
+            case SC of 
+                1 -> {NoSibAcc + 1, SibAcc};
+                _ -> {NoSibAcc, [{B, K}|SibAcc]}
+            end
+        end,
+    
+    SWF1 = os:timestamp(),
+    {async, Folder1} = 
+        mock_kv_vnode:fold_aae(VNN1, all, SibCountFoldFun, 
+                                {0, []}, [{sibcount, null}]),
+    {async, Folder3} = 
+        mock_kv_vnode:fold_aae(VNN3, all, SibCountFoldFun, 
+                                Folder1(), [{sibcount, null}]),
+    {SC1, SibL1} = Folder3(),
+    io:format("Coverage fold took ~w with output ~w for store ~w~n", 
+                [timer:now_diff(os:timestamp(), SWF1),SC1, Type]),
+    true = SC1 == InitialKeyCount,
+    true = [] == SibL1,
+
+    SWF2 = os:timestamp(),
+    BucketListA = [integer_to_binary(0), integer_to_binary(1)],
+    {async, Folder2} = 
+        mock_kv_vnode:fold_aae(VNN2, {buckets, BucketListA}, SibCountFoldFun, 
+                                {0, []}, [{sibcount, null}]),
+    {async, Folder4} = 
+        mock_kv_vnode:fold_aae(VNN4, {buckets, BucketListA}, SibCountFoldFun, 
+                                Folder2(), [{sibcount, null}]),
+    {SC2, SibL2} = Folder4(),
+    io:format("Coverage fold took ~w with output ~w for store ~w~n", 
+                [timer:now_diff(os:timestamp(), SWF2),SC2, Type]),
+    true = SC2 == 2 * (InitialKeyCount div 5),
+    true = [] == SibL2,
+
+    % A fold over two coverage plans to compare the list of {B, K, H, Sz} 
+    % tuples found within the coverage plans
+    HashSizeFoldFun =
+        fun(B, K, {H, Sz}, Acc) ->
+            [{B, K, H, Sz}|Acc]
+        end,
+
+    {async, Folder1HS} = 
+        mock_kv_vnode:fold_aae(VNN1, all, HashSizeFoldFun, 
+                                [], [{hash, null}, {size, null}]),
+    {async, Folder3HS} = 
+        mock_kv_vnode:fold_aae(VNN3, all, HashSizeFoldFun, 
+                                Folder1HS(), [{hash, null}, {size, null}]),
+    BKHSzL1 = Folder3HS(),
+    true = length(BKHSzL1) == InitialKeyCount,
+
+    {async, Folder2HS} = 
+        mock_kv_vnode:fold_aae(VNN2, all, HashSizeFoldFun, 
+                                [], [{hash, null}, {size, null}]),
+    {async, Folder4HS} = 
+        mock_kv_vnode:fold_aae(VNN4, all, HashSizeFoldFun, 
+                                Folder2HS(), [{hash, null}, {size, null}]),
+    BKHSzL2 = Folder4HS(),
+    true = length(BKHSzL2) == InitialKeyCount,
+
+    true = lists:usort(BKHSzL2) == lists:usort(BKHSzL1),
+
+    ok = mock_kv_vnode:close(VNN1),
+    ok = mock_kv_vnode:close(VNN2),
+    ok = mock_kv_vnode:close(VNN3),
+    ok = mock_kv_vnode:close(VNN4),
+    RootPath = reset_filestructure().
+
+
 
 
 reset_filestructure() ->
@@ -345,16 +545,16 @@ clear_all(RootPath) ->
     {ok, FNs} = file:list_dir(RootPath),
     FoldFun =
         fun(FN) ->
-            case filelib:is_file(FN) of 
+            FFP = filename:join(RootPath, FN),
+            case filelib:is_dir(FFP) of 
                 true ->
-                    file:delete(filename:join(RootPath, FN));
+                    clear_all(FFP ++ "/");
                 false ->
-                    case filelib:is_dir(FN) of 
+                    case filelib:is_file(FFP) of 
                         true ->
-                            clear_all(filename:join(RootPath, FN));
+                            file:delete(FFP);
                         false ->
-                            % Root Path
-                            ok
+                            ok 
                     end
             end
         end,
