@@ -54,6 +54,13 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
     % preflists will be mapped as follows:
     % {2, 0} <-> {3, 0}
     % {2, 1} <-> {3, 1} & {3, 2}
+    %
+    % Think of these preflists in terms of needless partitions for test 
+    % purposes.  Alhtough this is a comparison between 2 'nodes', it is 
+    % more like a comparison between 2 clusters where n=1, there is 1 
+    % vnode, but data is still partitioned into either 2 or 3 partitions.
+    % Don't rtry and make sense of this in term of a ring - the 
+    % mock_vnode_coverage_fold tests have a more Riak ring-like setup.
 
     RootPath = reset_filestructure(),
     VnodePath1 = filename:join(RootPath, "vnode1/"),
@@ -121,8 +128,6 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
     Root2C = start_receiver(),
     true = Root1C == Root2C,
     
-
-
     % Confirm no dependencies when using different matching AAE exchanges
     RepairFun = fun(_KL) -> null end,  
 
@@ -333,9 +338,9 @@ mock_vnode_loadandexchange(_Config) ->
     {ExchangeState3, 2} = start_receiver(),
     true = ExchangeState3 == clock_compare,
 
-    RebuildN = mock_kv_vnode:rebuild(VNN, false),
-    RebuildP = mock_kv_vnode:rebuild(VNP, false),
-    % Discover Next rebuild times - should be in the future as both stores w
+    {RebuildN, null} = mock_kv_vnode:rebuild(VNN, false),
+    {RebuildP, null} = mock_kv_vnode:rebuild(VNP, false),
+    % Discover Next rebuild times - should be in the future as both stores
     % were started empty, and hence without the need to rebuild
     io:format("Next rebuild vnn ~w vnp ~w~n", [RebuildN, RebuildP]),
     true = RebuildN > os:timestamp(),
@@ -350,8 +355,8 @@ mock_vnode_loadandexchange(_Config) ->
     % forward from there.
     {ok, VNNa} = mock_kv_vnode:open(MockPathN, native, IndexNs, PreflistFun),
     {ok, VNPa} = mock_kv_vnode:open(MockPathP, parallel, IndexNs, null),
-    RebuildNa = mock_kv_vnode:rebuild(VNNa, false),
-    RebuildPa = mock_kv_vnode:rebuild(VNPa, false),
+    {RebuildNa, null} = mock_kv_vnode:rebuild(VNNa, false),
+    {RebuildPa, null} = mock_kv_vnode:rebuild(VNPa, false),
     io:format("Next rebuild vnn ~w vnp ~w~n", [RebuildNa, RebuildPa]),
     true = RebuildNa > os:timestamp(),
     true = RebuildPa > os:timestamp(),

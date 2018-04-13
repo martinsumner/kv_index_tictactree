@@ -19,11 +19,14 @@
             push/6,
             exchange_message/4,
             rebuild/2,
+            rebuild_status/2,
             fold_aae/5,
             close/1]).
 
 -export([riak_extract_metadata/1,
-            new_v1/2]).
+            new_v1/2,
+            workerfun/1,
+            rebuild_worker/1]).
 
 -record(r_content, {
                     metadata,
@@ -50,7 +53,8 @@
                 vnode_store :: pid(),
                 vnode_id :: binary(),
                 vnode_sqn = 1 :: integer(),
-                preflist_fun = null :: preflist_fun()}).
+                preflist_fun = null :: preflist_fun(),
+                aae_rebuild = null :: rebuild_status()}).
 
 -include_lib("eunit/include/eunit.hrl").
 
@@ -67,6 +71,7 @@
 
 -type r_object() :: #r_object{}.
 -type preflist_fun() :: fun()|null.
+-type rebuild_status() :: tree_rebuilt|store_rebuilt|null.
 
 %%%============================================================================
 %%% API
@@ -95,12 +100,18 @@ put(Vnode, Object, IndexN, OtherVnodes) ->
 push(Vnode, Bucket, Key, UpdClock, ObjectBin, IndexN) ->
     gen_server:cast(Vnode, {push, Bucket, Key, UpdClock, ObjectBin, IndexN}).
 
--spec rebuild(pid(), boolean()) -> erlang:timestamp().
+-spec rebuild(pid(), boolean()) -> {erlang:timestamp(), rebuild_status()}.
 %% @doc
 %% Prompt for the next rebuild time, using ForceRebuild=true to oevrride that
 %% time
 rebuild(Vnode, ForceRebuild) ->
     gen_server:call(Vnode, {rebuild, ForceRebuild}).
+
+-spec rebuild_status(pid(), rebuild_status()) -> ok.
+%% @doc
+%% Inform the vnode that an aae controller rebuilt is complete
+rebuild_status(Vnode, Status) ->
+    gen_server:cast(Vnode, {rebuild_status, Status}).
 
 -spec fold_aae(pid(), tuple(), fun(), any(), 
                         list(aae_keystore:value_element())) -> {async, fun()}.
@@ -219,19 +230,28 @@ handle_call({put, Object, IndexN, OtherVnodes}, _From, State) ->
 
     {reply, ok, State#state{vnode_sqn = State#state.vnode_sqn + 1}};
 handle_call({rebuild, true}, _From, State) ->
-    % Check next rebuild
-    % Reply with next rebuild TS
     % If force rebuild, then trigger rebuild
-    NRT = aae_controller:aae_nextrebuild(State#state.aae_controller),
     % TODO - add actual rebuild
+    % Just rebuild caches for now
+    Vnode = self(),
+    ReturnFun = 
+        fun(ok) ->
+            ok = rebuild_status(Vnode, rebuilt_tree)
+        end,
+    
+    Worker = workerfun(ReturnFun),
 
-    {reply, NRT, State};
+    ok = aae_controller:aae_rebuildtrees(State#state.aae_controller, 
+                                            State#state.index_ns,
+                                            Worker),
+
+    {reply, {os:timestamp(), null}, State#state{aae_rebuild = null}};
 handle_call({rebuild, false}, _From, State) ->
     % Check next rebuild
     % Reply with next rebuild TS
     % If force rebuild, then trigger rebuild
     NRT = aae_controller:aae_nextrebuild(State#state.aae_controller),
-    {reply, NRT, State};
+    {reply, {NRT, State#state.aae_rebuild}, State};
 handle_call({aae, Msg, IndexNs, ReturnFun}, _From, State) ->
     case Msg of 
         fetch_root ->
@@ -292,7 +312,9 @@ handle_cast({push, Bucket, Key, UpdClock, ObjectBin, IndexN}, State) ->
                                 UpdClock, PrevClock, 
                                 to_aae_binary(ObjectBin)),
 
-    {noreply, State}.
+    {noreply, State};
+handle_cast({rebuild_status, Status}, State) ->
+    {noreply, State#state{aae_rebuild = Status}}.
 
 
 handle_info(_Info, State) ->
@@ -373,6 +395,19 @@ meta_bin(MetaData) ->
     <<LastModBin/binary, VTagLen:8/integer, VTagBin:VTagLen/binary,
       Deleted:1/binary-unit:8, RestBin/binary>>.
 
+
+workerfun(ReturnFun) ->
+    WorkerPid = spawn(?MODULE, rebuild_worker, [ReturnFun]),
+    fun(FoldFun, FinishFun) ->
+        WorkerPid! {fold, FoldFun, FinishFun}
+    end.
+
+rebuild_worker(ReturnFun) ->
+    receive
+        {fold, FoldFun, FinishFun} ->
+            FinishFun(FoldFun()),
+            ReturnFun(ok)
+    end.
 
 %%%============================================================================
 %%% Internal functions
