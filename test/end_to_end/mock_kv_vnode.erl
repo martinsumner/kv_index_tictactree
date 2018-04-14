@@ -243,6 +243,7 @@ handle_call({rebuild, true}, _From, State) ->
 
     ok = aae_controller:aae_rebuildtrees(State#state.aae_controller, 
                                             State#state.index_ns,
+                                            State#state.preflist_fun,
                                             Worker),
 
     {reply, {os:timestamp(), null}, State#state{aae_rebuild = null}};

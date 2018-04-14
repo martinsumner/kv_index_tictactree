@@ -5,7 +5,7 @@
             dual_store_compare_medium_ko/1,
             dual_store_compare_large_so/1,
             dual_store_compare_large_ko/1,
-            mock_vnode_loadandexchange/1,
+            mock_vnode_loadexchangeandrebuild/1,
             mock_vnode_coveragefold_nativemedium/1,
             mock_vnode_coveragefold_nativesmall/1,
             mock_vnode_coveragefold_parallelmedium/1]).
@@ -14,7 +14,7 @@ all() -> [dual_store_compare_medium_so,
             dual_store_compare_medium_ko,
             dual_store_compare_large_so,
             dual_store_compare_large_ko,
-            mock_vnode_loadandexchange,
+            mock_vnode_loadexchangeandrebuild,
             mock_vnode_coveragefold_nativemedium,
             mock_vnode_coveragefold_nativesmall,
             mock_vnode_coveragefold_parallelmedium].
@@ -245,8 +245,7 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
     RootPath = reset_filestructure().
 
 
-
-mock_vnode_loadandexchange(_Config) ->
+mock_vnode_loadexchangeandrebuild(_Config) ->
     % Load up two vnodes with same data, with the data in each node split 
     % across 3 partitions (n=1).
     %
@@ -371,6 +370,39 @@ mock_vnode_loadandexchange(_Config) ->
     io:format("Exchange id ~s~n", [GUID3a]),
     {ExchangeState3a, 2} = start_receiver(),
     true = ExchangeState3a == clock_compare,
+
+    {RebuildNb, null} = mock_kv_vnode:rebuild(VNNa, true),
+    {RebuildPb, null} = mock_kv_vnode:rebuild(VNPa, true),
+    true = RebuildNb < os:timestamp(),
+    true = RebuildPb < os:timestamp(),
+
+    {ok, _P3b, GUID3b} = 
+        aae_exchange:start([{exchange_vnodesendfun(VNNa), IndexNs}],
+                                [{exchange_vnodesendfun(VNPa), IndexNs}],
+                                RepairFun,
+                                ReturnFun),
+    io:format("Exchange id ~s~n", [GUID3b]),
+    {ExchangeState3b, 2} = start_receiver(),
+    true = ExchangeState3b == clock_compare,
+
+    RebuildComplete = 
+        lists:foldl(fun(Wait, Complete) ->
+                            case Complete of 
+                                true ->
+                                    true;
+                                false ->
+                                    timer:sleep(Wait),
+                                    {_TSN, RSN} = 
+                                        mock_kv_vnode:rebuild(VNNa, false),
+                                    {_TSP, RSP} = 
+                                        mock_kv_vnode:rebuild(VNPa, false),
+                                    (RSN == rebuilt_tree) 
+                                        and (RSP == rebuilt_tree)
+                            end
+                        end,
+                        false,
+                        [1000, 2000, 3000, 5000, 8000, 13000]),
+    true = RebuildComplete == true,
 
     ok = mock_kv_vnode:close(VNNa),
     ok = mock_kv_vnode:close(VNPa),
