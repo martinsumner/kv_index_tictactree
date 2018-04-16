@@ -2,7 +2,7 @@
 
 An Active Anti-Entropy library for Key-Value stores in Erlang.
 
-This is currently a working prototype with basic testing.  The target for the library is to be fuly integrated with [Riak KV](https://github.com/basho/riak_kv) for Release 3.0 (Autumn 2018). 
+This is currently a working prototype with basic testing.  The target for the library is to be fuly integrated with [Riak KV](https://github.com/basho/riak_kv) for Release 3.0 (Autumn 2018).
 
 ## Overview
 
@@ -46,3 +46,9 @@ The AAE exchange should work the same way if two partitions are bing compared, o
 The library is currently tested for use as a proof of concept, running OTP versions 16 to 19.  If further testing is successful it may go on to be maintained as part of the Riak KV store (targeting release 3.0).
 
 Following the [current tests](https://github.com/martinsumner/kv_index_tictactree/blob/master/test/end_to_end/basic_SUITE.erl) presently provides the simplest guide to using the library.  There is also a [`mock_kv_vnode`](https://github.com/martinsumner/kv_index_tictactree/blob/master/test/end_to_end/mock_kv_vnode.erl) process used in these tests, and provides a sample view of how an `aae_controller` could be integrated.
+
+### Riak KV
+
+[This overview](docs/RIAK_2_AAE.md) details how the current (Riak KV 2.2.5) AAE implementation works.
+
+[This overview]() details how the target (Riak KV 3.0) AAE implementation is expected to work utilising KV Tictac Trees.
