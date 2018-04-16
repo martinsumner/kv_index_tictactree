@@ -43,10 +43,11 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
--define(STORE_PATH, "_keystore/").
+-define(STORE_PATH, "keystore/").
 -define(TREE_PATH, "aaetree/").
 -define(MEGA, 1000000).
 -define(BATCH_LENGTH, 32).
+-define(DEFAULT_REBUILD_SCHEDULE, {1, 300}).
 
 
 -record(state, {key_store :: pid()|undefined,
@@ -56,6 +57,8 @@
                 object_splitfun,
                 reliable = false :: boolean(),
                 next_rebuild = os:timestamp() :: erlang:timestamp(),
+                rebuild_schedule = ?DEFAULT_REBUILD_SCHEDULE 
+                    :: rebuild_schedule(),
                 prompt_cacherebuild = false :: boolean(),
                 parallel_keystore = true :: boolean(),
                 objectspecs_queue = [] :: list(),
@@ -263,7 +266,7 @@ aae_close(Pid, ShutdownGUID) ->
 %% This rebuild requires as inputs:
 %% - the Preflists to be rebuilt (we do not assume that preflists stay 
 %% constant within a controller)
-%% - a Preflist Fun for antive stores (to calculate the IndexN as the preflist
+%% - a Preflist Fun for native stores (to calculate the IndexN as the preflist
 %% is not stored)
 %% - a 2-arity WorkerFun which can be passed a Fold and a FinishFun e.g. 
 %% WorkerFun(Folder, FinishFun), with the FinishFun to be called once the 
@@ -292,6 +295,7 @@ aae_rebuildstore(Pid, SplitObjectFun) ->
 
 init([Opts]) ->
     RootPath = Opts#options.root_path,
+    RebuildSchedule = Opts#options.rebuild_schedule,
     % Start the KeyStore
     % Need to update the state to reflect the potential need to rebuild the 
     % key store if the shutdown was not clean as expected
@@ -304,8 +308,7 @@ init([Opts]) ->
                 case Opts#options.startup_storestate of 
                     {IsEmpty, ShutdownGUID} ->
                         RebuildTS = 
-                            schedule_rebuild(LastRebuild, 
-                                                Opts#options.rebuild_schedule),
+                            schedule_rebuild(LastRebuild, RebuildSchedule),
                         {ok, #state{key_store = Pid, 
                                         next_rebuild = RebuildTS, 
                                         reliable = true,
@@ -316,6 +319,7 @@ init([Opts]) ->
                                         logs()),
                         {ok, #state{key_store = Pid, 
                                         next_rebuild = os:timestamp(), 
+                                        rebuild_schedule = RebuildSchedule,
                                         reliable = false,
                                         parallel_keystore = true}}
                 end;
@@ -327,10 +331,10 @@ init([Opts]) ->
                                                     StoreType, 
                                                     BackendPid),
                 RebuildTS = 
-                    schedule_rebuild(LastRebuild, 
-                                        Opts#options.rebuild_schedule),
+                    schedule_rebuild(LastRebuild, RebuildSchedule),
                 {ok, #state{key_store = KeyStorePid, 
                                 next_rebuild = RebuildTS, 
+                                rebuild_schedule = RebuildSchedule,
                                 reliable = true,
                                 parallel_keystore = false}}
         end,
@@ -384,14 +388,9 @@ handle_call({close, ShutdownGUID}, _From, State) ->
 handle_call({rebuild_trees, IndexNs, PreflistFun, WorkerFun}, _From, State) ->
     aae_util:log("AAE06", [IndexNs], logs()),
     % Before the fold flush all the PUTs (if a parallel store)
-    ok = 
-        case State#state.parallel_keystore of 
-            true ->
-                flush_puts(State#state.key_store, 
-                            State#state.objectspecs_queue);
-            false ->
-                ok
-        end,
+    ok = maybe_flush_puts(State#state.key_store, 
+                            State#state.objectspecs_queue,
+                            State#state.parallel_keystore),
     
     % Setup a fold over the store
     {FoldFun, InitAcc} = foldobjects_buildtrees(IndexNs),
@@ -436,18 +435,28 @@ handle_call({rebuild_trees, IndexNs, PreflistFun, WorkerFun}, _From, State) ->
 
     % The IndexNs and TreeCaches supported by the controller must now be 
     % updated to match the lasted provided list of responsible preflists
+    %
+    % Also should schedule the next rebuild time to the future based on 
+    % now as the last rebuild time (we assume the rebuild of the trees 
+    % will be successful, and a rebuild of the store has just been completed)
+    RebuildTS = schedule_rebuild(os:timestamp(), State#state.rebuild_schedule),
+    aae_util:log("AAE11", [RebuildTS], logs()),
     {reply, 
         ok, 
-        State#state{tree_caches = TreeCaches, index_ns = IndexNs}};
+        State#state{tree_caches = TreeCaches, 
+                        index_ns = IndexNs, 
+                        next_rebuild = RebuildTS}};
 handle_call({rebuild_store, SplitObjFun}, _From, State)->
-    ok = aae_keystore:store_prompt(State#state.key_store, 
-                                    rebuild_start, 
-                                    no_notify),
+    aae_util:log("AAE12", [State#state.parallel_keystore], logs()),
+    ok = maybe_flush_puts(State#state.key_store, 
+                            State#state.objectspecs_queue,
+                            State#state.parallel_keystore),
+    ok = aae_keystore:store_prompt(State#state.key_store, rebuild_start),
     case State#state.parallel_keystore of 
         true ->
             FoldObjectsFun = 
                 fun(B, K, V, Acc) ->
-                    {VC, IdxN} = SplitObjFun(B, K, V),
+                    {IdxN, VC} = SplitObjFun(B, K, V),
                     BinaryKey = aae_util:make_binarykey(B, K),
                     SegmentID = 
                         leveled_tictac:keyto_segment48(BinaryKey),
@@ -469,25 +478,18 @@ handle_call({rebuild_store, SplitObjFun}, _From, State)->
                 fun(Acc) ->
                     flush_load(State#state.key_store, Acc),
                     ok = aae_keystore:store_prompt(State#state.key_store,
-                                                    rebuild_complete,
-                                                    no_notify)
+                                                    rebuild_complete)
                 end,
-            {reply, {ok, FoldObjectsFun, FinishFun}};
+            {reply, {ok, FoldObjectsFun, FinishFun}, State};
         false ->
             ok = aae_keystore:store_prompt(State#state.key_store,
-                                            rebuild_complete,
-                                            no_notify),
+                                            rebuild_complete),
             {reply, ok, State}
     end;
 handle_call({fold, Limiter, FoldObjectsFun, InitAcc, Elements}, _From, State) ->
-    ok = 
-        case State#state.parallel_keystore of 
-            true ->
-                flush_puts(State#state.key_store, 
-                            State#state.objectspecs_queue);
-            false ->
-                ok
-        end,
+    ok = maybe_flush_puts(State#state.key_store, 
+                            State#state.objectspecs_queue,
+                            State#state.parallel_keystore),
     R = aae_keystore:store_fold(State#state.key_store, 
                                 Limiter, 
                                 FoldObjectsFun, 
@@ -544,7 +546,7 @@ handle_cast({put, IndexN, Bucket, Key, Clock, PrevClock, BinaryObj}, State) ->
             case length(UpdSpecL) >= ?BATCH_LENGTH of 
                 true ->
                     % Push to the KeyStore as batch is now at least full
-                    flush_puts(State#state.key_store, UpdSpecL),
+                    maybe_flush_puts(State#state.key_store, UpdSpecL, true),
                     {noreply, State#state{objectspecs_queue = []}};
                 false ->
                     {noreply, State#state{objectspecs_queue = UpdSpecL}}
@@ -594,14 +596,9 @@ handle_cast({fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PreflFun}, State) ->
                     Acc 
             end 
         end,
-    ok = 
-        case State#state.parallel_keystore of 
-            true ->
-                flush_puts(State#state.key_store, 
-                            State#state.objectspecs_queue);
-            false ->
-                ok
-        end,
+    ok = maybe_flush_puts(State#state.key_store, 
+                            State#state.objectspecs_queue,
+                            State#state.parallel_keystore),
     {async, Folder} = 
         aae_keystore:store_fold(State#state.key_store, 
                                 {segments, SegmentIDs}, 
@@ -668,12 +665,14 @@ resolve_clock(Bucket, Key, Store) ->
     aae_keystore:store_fetchclock(Store, Bucket, Key).
 
 
--spec flush_puts(pid(), list()) -> ok.
+-spec maybe_flush_puts(pid(), list(), boolean()) -> ok.
 %% @doc
 %% Flush all the puts into the store.  The Puts have been queued with the most
 %% recent PUT at the head.  
-flush_puts(Store, ObjSpecL) ->
-    aae_keystore:store_mput(Store, ObjSpecL).
+maybe_flush_puts(Store, ObjSpecL, true) ->
+    aae_keystore:store_mput(Store, ObjSpecL);
+maybe_flush_puts(_Store, _ObjSpecL, false) ->
+    ok.
 
 
 -spec flush_load(pid(), list()) -> ok.
@@ -778,7 +777,7 @@ logs() ->
         
 
         {"AAE06",
-            {info, "Received rebuild request for IndexNs ~w"}},
+            {info, "Received rebuild trees request for IndexNs ~w"}},
         {"AAE07",
             {info, "Dispatching test fold"}},
         {"AAE08",
@@ -786,7 +785,11 @@ logs() ->
         {"AAE09",
             {info, "Change in IndexNs detected at rebuild - new IndexN ~w"}},
         {"AAE10",
-            {info, "AAE controller started with IndexNs ~w and StoreType ~w"}}
+            {info, "AAE controller started with IndexNs ~w and StoreType ~w"}},
+        {"AAE11",
+            {info, "Next rebuild scheduled for ~w"}},
+        {"AAE12",
+            {info, "Received rebuild store for parallel store ~w"}}
     
     ].
 

@@ -263,11 +263,22 @@ mock_vnode_loadexchangeandrebuild(_Config) ->
             lists:nth(Idx + 1, IndexNs)
         end,
 
+    % Start up to two mock vnodes
+    % - VNN is a native vnode (where the AAE process will not keep a parallel
+    % key store)
+    % - VNP is a parallel vnode (where a separate AAE key store is required 
+    % to be kept in parallel)
     {ok, VNN} = mock_kv_vnode:open(MockPathN, native, IndexNs, PreflistFun),
-    {ok, VNP} = mock_kv_vnode:open(MockPathP, parallel, IndexNs, null),
+    {ok, VNP} = mock_kv_vnode:open(MockPathP, parallel, IndexNs, PreflistFun),
 
     RPid = self(),
-    RepairFun = fun(_KL) -> null end,  
+    RepairFun = 
+        fun(KL) -> 
+            lists:foreach(fun({B, K}) -> 
+                                io:format("Delta found in ~w ~w~n", [B, K])
+                            end,
+                            KL) 
+        end,  
     ReturnFun = fun(R) -> RPid ! {result, R} end,
 
     % Exchange between empty vnodes
@@ -290,12 +301,13 @@ mock_vnode_loadexchangeandrebuild(_Config) ->
             end
         end,
     
+    % Load objects into both stores
     PutFun1 = PutFun(VNN, VNP),
     PutFun2 = PutFun(VNP, VNN),
     {OL1, OL2A} = lists:split(InitialKeyCount div 2, ObjList),
     {[RogueObj1, RogueObj2], OL2} = lists:split(2, OL2A),
         % Keep some rogue objects to cause failures, by not putting them
-        % correctly into both vnodes
+        % correctly into both vnodes.  These aren't loaded yet
     ok = lists:foreach(PutFun1, OL1),
     ok = lists:foreach(PutFun2, OL2),
     
@@ -337,8 +349,8 @@ mock_vnode_loadexchangeandrebuild(_Config) ->
     {ExchangeState3, 2} = start_receiver(),
     true = ExchangeState3 == clock_compare,
 
-    {RebuildN, null} = mock_kv_vnode:rebuild(VNN, false),
-    {RebuildP, null} = mock_kv_vnode:rebuild(VNP, false),
+    {RebuildN, false} = mock_kv_vnode:rebuild(VNN, false),
+    {RebuildP, false} = mock_kv_vnode:rebuild(VNP, false),
     % Discover Next rebuild times - should be in the future as both stores
     % were started empty, and hence without the need to rebuild
     io:format("Next rebuild vnn ~w vnp ~w~n", [RebuildN, RebuildP]),
@@ -353,9 +365,9 @@ mock_vnode_loadexchangeandrebuild(_Config) ->
     % a different time, as the look at the last rebuild time and schedule 
     % forward from there.
     {ok, VNNa} = mock_kv_vnode:open(MockPathN, native, IndexNs, PreflistFun),
-    {ok, VNPa} = mock_kv_vnode:open(MockPathP, parallel, IndexNs, null),
-    {RebuildNa, null} = mock_kv_vnode:rebuild(VNNa, false),
-    {RebuildPa, null} = mock_kv_vnode:rebuild(VNPa, false),
+    {ok, VNPa} = mock_kv_vnode:open(MockPathP, parallel, IndexNs, PreflistFun),
+    {RebuildNa, false} = mock_kv_vnode:rebuild(VNNa, false),
+    {RebuildPa, false} = mock_kv_vnode:rebuild(VNPa, false),
     io:format("Next rebuild vnn ~w vnp ~w~n", [RebuildNa, RebuildPa]),
     true = RebuildNa > os:timestamp(),
     true = RebuildPa > os:timestamp(),
@@ -371,11 +383,26 @@ mock_vnode_loadexchangeandrebuild(_Config) ->
     {ExchangeState3a, 2} = start_receiver(),
     true = ExchangeState3a == clock_compare,
 
-    {RebuildNb, null} = mock_kv_vnode:rebuild(VNNa, true),
-    {RebuildPb, null} = mock_kv_vnode:rebuild(VNPa, true),
-    true = RebuildNb < os:timestamp(),
-    true = RebuildPb < os:timestamp(),
+    % Prompts for a rebuild of both stores.  The rebuild is a rebuild of both
+    % the store and the tree in the case of the parallel vnode, and just the
+    % tree in the case of the native rebuild
+    {RebuildNb, true} = mock_kv_vnode:rebuild(VNNa, true),
+    
+    true = RebuildNb > os:timestamp(), 
+        % next rebuild was in the future, and is still scheduled as such
+        % key thing that the ongoing rebuild status is now true (the second 
+        % element of the rebuild response)
 
+    % Now poll to check to see when the rebuild is complete
+    wait_for_rebuild(VNNa),
+
+    % Next rebuild times should now still be in the future
+    {RebuildNc, false} = mock_kv_vnode:rebuild(VNNa, false),
+    {RebuildPc, false} = mock_kv_vnode:rebuild(VNPa, false),
+    true = RebuildPc == RebuildPa, % Should not have changed
+
+    % Following a completed rebuild - the exchange should still work as 
+    % before, spotting two differences
     {ok, _P3b, GUID3b} = 
         aae_exchange:start([{exchange_vnodesendfun(VNNa), IndexNs}],
                                 [{exchange_vnodesendfun(VNPa), IndexNs}],
@@ -385,6 +412,44 @@ mock_vnode_loadexchangeandrebuild(_Config) ->
     {ExchangeState3b, 2} = start_receiver(),
     true = ExchangeState3b == clock_compare,
 
+    {RebuildPb, true} = mock_kv_vnode:rebuild(VNPa, true),
+    true = RebuildPb > os:timestamp(),
+
+    % There should now be a rebuild in progress - but immediately check that 
+    % an exchange will still work (spotting the same two differences as before
+    % following a clock_compare)
+    {ok, _P3c, GUID3c} = 
+        aae_exchange:start([{exchange_vnodesendfun(VNNa), IndexNs}],
+                                [{exchange_vnodesendfun(VNPa), IndexNs}],
+                                RepairFun,
+                                ReturnFun),
+    io:format("Exchange id ~s~n", [GUID3c]),
+    {ExchangeState3c, 2} = start_receiver(),
+    true = ExchangeState3c == clock_compare,
+
+    wait_for_rebuild(VNPa),
+    {RebuildNd, false} = mock_kv_vnode:rebuild(VNNa, false),
+    {RebuildPd, false} = mock_kv_vnode:rebuild(VNPa, false),
+    true = RebuildNd == RebuildNc,
+    true = RebuildPd > os:timestamp(),
+    
+    % Rebuild now complete - should get the same result fro an exchange
+    {ok, _P3d, GUID3d} = 
+        aae_exchange:start([{exchange_vnodesendfun(VNNa), IndexNs}],
+                                [{exchange_vnodesendfun(VNPa), IndexNs}],
+                                RepairFun,
+                                ReturnFun),
+    io:format("Exchange id ~s~n", [GUID3d]),
+    {ExchangeState3d, 2} = start_receiver(),
+    true = ExchangeState3d == clock_compare,
+
+    % Shutdown and clear down files
+    ok = mock_kv_vnode:close(VNNa),
+    ok = mock_kv_vnode:close(VNPa),
+    RootPath = reset_filestructure().
+
+
+wait_for_rebuild(Vnode) ->
     RebuildComplete = 
         lists:foldl(fun(Wait, Complete) ->
                             case Complete of 
@@ -393,20 +458,18 @@ mock_vnode_loadexchangeandrebuild(_Config) ->
                                 false ->
                                     timer:sleep(Wait),
                                     {_TSN, RSN} = 
-                                        mock_kv_vnode:rebuild(VNNa, false),
-                                    {_TSP, RSP} = 
-                                        mock_kv_vnode:rebuild(VNPa, false),
-                                    (RSN == rebuilt_tree) 
-                                        and (RSP == rebuilt_tree)
+                                        mock_kv_vnode:rebuild(Vnode, false),
+                                    % Waiting for rebuild status to be false 
+                                    % on both vnodes, which would indicate
+                                    % that both rebuilds have completed
+                                    (not RSN)
                             end
                         end,
                         false,
-                        [1000, 2000, 3000, 5000, 8000, 13000]),
-    true = RebuildComplete == true,
-
-    ok = mock_kv_vnode:close(VNNa),
-    ok = mock_kv_vnode:close(VNPa),
-    RootPath = reset_filestructure().
+                        [1000, 2000, 3000, 5000, 8000, 13000, 21000]),
+    
+    % Both rebuilds have completed
+    true = RebuildComplete == true.
 
 
 mock_vnode_coveragefold_nativemedium(_Config) ->

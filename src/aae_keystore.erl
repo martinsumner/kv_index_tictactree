@@ -38,7 +38,7 @@
             store_close/2,
             store_mput/2,
             store_mload/2,
-            store_prompt/3,
+            store_prompt/2,
             store_fold/5,
             store_fetchclock/3]).
 
@@ -193,7 +193,7 @@ store_mput(Pid, ObjectSpecs) ->
 store_mload(Pid, ObjectSpecs) ->
     gen_fsm:send_event(Pid, {mload, ObjectSpecs}).
 
--spec store_prompt(pid(), rebuild_prompts(), fun()|no_notify)  -> ok.
+-spec store_prompt(pid(), rebuild_prompts())  -> ok.
 %% @doc
 %% Prompt the store to either commence a rebuild, or complete a rebuild.
 %% Commencing a rebuild should happen between a snapshot for a fold being 
@@ -203,8 +203,8 @@ store_mload(Pid, ObjectSpecs) ->
 %%
 %% Once the prompt has been processed - the prompt will be forwarded by 
 %% calling NotifyFun(Prompt) -> ok.
-store_prompt(Pid, Prompt, NotifyFun) ->
-    gen_fsm:send_event(Pid, {prompt, Prompt, NotifyFun}).
+store_prompt(Pid, Prompt) ->
+    gen_fsm:send_event(Pid, {prompt, Prompt}).
 
 
 -spec store_fold(pid(), fold_limiter(), fun(), any(), list(value_element())) 
@@ -353,7 +353,7 @@ loading({mload, ObjectSpecs}, State) ->
             ok
     end,
     {next_state, loading, State#state{load_counter = LoadCount1}};
-loading({prompt, rebuild_complete, NotifyFun}, State) ->
+loading({prompt, rebuild_complete}, State) ->
     StoreType = State#state.store_type,
     LoadStore = State#state.load_store,
     GUID = State#state.load_guid,
@@ -365,13 +365,6 @@ loading({prompt, rebuild_complete, NotifyFun}, State) ->
                         #manifest{current_guid = GUID,
                                     last_rebuild = LastRebuild}),
     ok = delete_store(StoreType, State#state.store),
-    ok = 
-        case NotifyFun of 
-            no_notify ->
-                ok;
-            _ ->
-                NotifyFun(rebuild_complete)
-        end,
     {next_state, 
         parallel, 
         State#state{change_queue = [], 
@@ -384,7 +377,7 @@ loading({prompt, rebuild_complete, NotifyFun}, State) ->
 parallel({mput, ObjectSpecs}, State) ->
     ok = do_load(State#state.store_type, State#state.store, ObjectSpecs),
     {next_state, parallel, State};
-parallel({prompt, rebuild_start, NotifyFun}, State) ->
+parallel({prompt, rebuild_start}, State) ->
     GUID = leveled_codec:generate_uuid(),
     aae_util:log("KS007", [rebuild_start, GUID], logs()),
     {ok, Store} =  open_store(State#state.store_type, 
@@ -394,40 +387,20 @@ parallel({prompt, rebuild_start, NotifyFun}, State) ->
     ok = store_manifest(State#state.root_path, 
                         #manifest{current_guid = State#state.current_guid,
                                     pending_guid = GUID}),
-    ok = 
-        case NotifyFun of 
-            no_notify ->
-                ok;
-            _ ->
-                NotifyFun(rebuild_start)
-        end,
     {next_state, loading, State#state{load_store = Store, load_guid = GUID}}.
 
-native({prompt, rebuild_start, NotifyFun}, State) ->
+native({prompt, rebuild_start}, State) ->
     GUID = leveled_codec:generate_uuid(),
     aae_util:log("KS007", [rebuild_start, GUID], logs()),
-    ok = 
-        case NotifyFun of 
-            no_notify ->
-                ok;
-            _ ->
-                NotifyFun(rebuild_start)
-        end,
+    
     {next_state, native, State#state{current_guid = GUID}};
-native({prompt, rebuild_complete, NotifyFun}, State) ->
+native({prompt, rebuild_complete}, State) ->
     GUID = State#state.current_guid,
     aae_util:log("KS007", [rebuild_complete, GUID], logs()),
     LastRebuild = os:timestamp(),
     ok = store_manifest(State#state.root_path, 
                         #manifest{current_guid = GUID,
                                     last_rebuild = LastRebuild}),
-    ok = 
-        case NotifyFun of 
-            no_notify ->
-                ok;
-            _ ->
-                NotifyFun(rebuild_complete)
-        end,
     {next_state, native, State#state{last_rebuild = LastRebuild}}.
 
 
@@ -877,6 +850,7 @@ store_manifest(RootPath, Manifest) ->
     CRC32 = erlang:crc32(ManBin),
     PFN = filename:join(RootPath, ?MANIFEST_FN ++ ?PENDING_EXT),
     CFN = filename:join(RootPath, ?MANIFEST_FN ++ ?COMLPETE_EXT),
+    ok = filelib:ensure_dir(PFN),
     ok = file:write_file(PFN, <<CRC32:32/integer, ManBin/binary>>, [raw]),
     ok = file:rename(PFN, CFN),
     {ok, <<CRC32:32/integer, ManBin/binary>>} = file:read_file(CFN),
@@ -1037,7 +1011,7 @@ load_tester(StoreType) ->
     Res0 = lists:usort(Folder0()),
     ?assertMatch(96, length(Res0)),
     
-    ok = store_prompt(Store0, rebuild_start, no_notify),
+    ok = store_prompt(Store0, rebuild_start),
 
     % Need to prove fetch_clock in loading state, otherwise not covered
     [{FirstKey, FirstValue}|_RestIK] = InitialKeys,
@@ -1066,7 +1040,7 @@ load_tester(StoreType) ->
     Res3 = lists:usort(Folder3()),
     ?assertMatch(Res2, Res3),
 
-    ok = store_prompt(Store0, rebuild_complete, no_notify),
+    ok = store_prompt(Store0, rebuild_complete),
 
     {async, Folder4} = 
         store_fold(Store0, all, FoldObjectsFun, [], [{clock, null}]),
@@ -1214,7 +1188,7 @@ big_load_tester(StoreType) ->
         end,
     timed_fold(Store0, KeyCount, FoldObjectsFun, StoreType, false),
 
-    ok = store_prompt(Store0, rebuild_start, no_notify),
+    ok = store_prompt(Store0, rebuild_start),
     ok = lists:foreach(fun(L) -> store_mload(Store0, L) end, SubLists),
 
     AdditionalKeys = 
@@ -1225,7 +1199,7 @@ big_load_tester(StoreType) ->
 
     timed_fold(Store0, KeyCount, FoldObjectsFun, StoreType, true),
 
-    ok = store_prompt(Store0, rebuild_complete, no_notify),
+    ok = store_prompt(Store0, rebuild_complete),
 
     {async, Folder2} = store_fold(Store0, all, FoldObjectsFun, 0, []),
     ?assertMatch(KeyCount, Folder2() - KeyCount),
@@ -1238,7 +1212,7 @@ big_load_tester(StoreType) ->
     
     timed_fold(Store1, KeyCount, FoldObjectsFun, StoreType, true),
 
-    ok = store_prompt(Store1, rebuild_start, no_notify),
+    ok = store_prompt(Store1, rebuild_start),
     OpenWhenPendingSavedFun = 
         fun(_X, {Complete, M}) ->
             case Complete of 

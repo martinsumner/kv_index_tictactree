@@ -19,11 +19,12 @@
             push/6,
             exchange_message/4,
             rebuild/2,
-            rebuild_status/2,
+            rebuild_complete/2,
             fold_aae/5,
             close/1]).
 
--export([riak_extract_metadata/1,
+-export([extractclock_from_riakhead/1,
+            from_aae_binary/1,
             new_v1/2,
             workerfun/1,
             rebuild_worker/1]).
@@ -54,7 +55,7 @@
                 vnode_id :: binary(),
                 vnode_sqn = 1 :: integer(),
                 preflist_fun = null :: preflist_fun(),
-                aae_rebuild = null :: rebuild_status()}).
+                aae_rebuild = false :: boolean()}).
 
 -include_lib("eunit/include/eunit.hrl").
 
@@ -70,8 +71,7 @@
 
 
 -type r_object() :: #r_object{}.
--type preflist_fun() :: fun()|null.
--type rebuild_status() :: tree_rebuilt|store_rebuilt|null.
+-type preflist_fun() :: null|fun().
 
 %%%============================================================================
 %%% API
@@ -100,18 +100,19 @@ put(Vnode, Object, IndexN, OtherVnodes) ->
 push(Vnode, Bucket, Key, UpdClock, ObjectBin, IndexN) ->
     gen_server:cast(Vnode, {push, Bucket, Key, UpdClock, ObjectBin, IndexN}).
 
--spec rebuild(pid(), boolean()) -> {erlang:timestamp(), rebuild_status()}.
+-spec rebuild(pid(), boolean()) -> {erlang:timestamp(), boolean()}.
 %% @doc
-%% Prompt for the next rebuild time, using ForceRebuild=true to oevrride that
-%% time
+%% Prompt for the next rebuild time, using ForceRebuild=true to override that
+%% time and trigger a rebuild.  As well as the next rebuild time the response
+%$ includes if a rebuild is currently in progress
 rebuild(Vnode, ForceRebuild) ->
     gen_server:call(Vnode, {rebuild, ForceRebuild}).
 
--spec rebuild_status(pid(), rebuild_status()) -> ok.
+-spec rebuild_complete(pid(), store|tree) -> ok.
 %% @doc
-%% Inform the vnode that an aae controller rebuilt is complete
-rebuild_status(Vnode, Status) ->
-    gen_server:cast(Vnode, {rebuild_status, Status}).
+%% Prompt for the rebuild of the tree
+rebuild_complete(Vnode, Stage) ->
+    gen_server:cast(Vnode, {rebuild_complete, Stage}).
 
 -spec fold_aae(pid(), tuple(), fun(), any(), 
                         list(aae_keystore:value_element())) -> {async, fun()}.
@@ -175,7 +176,7 @@ init([Opts]) ->
                                     ?REBUILD_SCHEDULE, 
                                     Opts#options.index_ns, 
                                     RP, 
-                                    fun riak_extract_metadata/1),
+                                    fun from_aae_binary/1),
     {ok, #state{root_path = RP,
                 vnode_store = VnSt,
                 index_ns = Opts#options.index_ns,
@@ -200,10 +201,8 @@ handle_call({put, Object, IndexN, OtherVnodes}, _From, State) ->
                 {[{State#state.vnode_id, State#state.vnode_sqn}],
                     none};
             {ok, Head} ->
-                {VclockBin, _SMB, _LMs} 
-                    = leveled_codec:riak_metadata_frombinary(Head),
                 Clock0 = 
-                    term_to_binary(VclockBin),
+                    extractclock_from_riakhead(Head),
                 Clock1 = 
                     [{State#state.vnode_id, State#state.vnode_sqn}|Clock0],
                 {lists:ukeysort(Clock1, 1), Clock0}
@@ -230,27 +229,61 @@ handle_call({put, Object, IndexN, OtherVnodes}, _From, State) ->
 
     {reply, ok, State#state{vnode_sqn = State#state.vnode_sqn + 1}};
 handle_call({rebuild, true}, _From, State) ->
-    % If force rebuild, then trigger rebuild
-    % TODO - add actual rebuild
-    % Just rebuild caches for now
+    % To rebuild the store an Object SplitFun will be required if is is a 
+    % parallel store, which will depend on the preflist_fun.
+    NRT = aae_controller:aae_nextrebuild(State#state.aae_controller),
+
+    SplitFun = 
+        fun(B, K, V) ->
+            PreflistFun = State#state.preflist_fun,
+            IndexN = PreflistFun(B, K),
+            Clock = extractclock_from_riakhead(V),
+            {IndexN, Clock}
+        end,
     Vnode = self(),
     ReturnFun = 
         fun(ok) ->
-            ok = rebuild_status(Vnode, rebuilt_tree)
+            ok = rebuild_complete(Vnode, store)
         end,
-    
-    Worker = workerfun(ReturnFun),
 
-    ok = aae_controller:aae_rebuildtrees(State#state.aae_controller, 
-                                            State#state.index_ns,
-                                            State#state.preflist_fun,
-                                            Worker),
-
-    {reply, {os:timestamp(), null}, State#state{aae_rebuild = null}};
+    case aae_controller:aae_rebuildstore(State#state.aae_controller, 
+                                            SplitFun) of
+        ok ->
+            % This store is rebuilt already (i.e. it is native), so nothing to
+            % do here other than prompt the status change
+            ReturnFun(ok);
+        {ok, FoldFun, FinishFun} ->
+            Worker = workerfun(ReturnFun),
+            % Now need to get a fold query to run over the vnode store to 
+            % rebuild the parallel store.  The aae_controller has provided 
+            % the object fold fun which should load the parallel store, and
+            % the finish fun which should tell the controller the fold is 
+            % complete and prompt the finishing of the rebuild activity
+            Q = {foldheads_allkeys, 
+                    % In this case the backend has the vector clock held
+                    % separately in the head so we can accelerate this by
+                    % folding over heads not objects
+                    ?RIAK_TAG, 
+                    FoldFun, 
+                    true, 
+                        % JournalCheck - this will cause a random sample 
+                        % to be checked for presence in the Journal - to 
+                        % detect object loss form the value store 
+                    true, 
+                        % SnapPreFold - don't want this to change before
+                        % the worker starts 
+                    false 
+                        % SegmentList - all segments required
+                    },
+            {async, Runner} = 
+                leveled_bookie:book_returnfolder(State#state.vnode_store, Q),
+            Worker(Runner, FinishFun) % dispatch the work to the worker
+    end,
+    {reply, {NRT, true}, State#state{aae_rebuild = true}};
 handle_call({rebuild, false}, _From, State) ->
     % Check next rebuild
-    % Reply with next rebuild TS
-    % If force rebuild, then trigger rebuild
+    % Reply with next rebuild TS - and the status to indicate an ongoing 
+    % rebuild
     NRT = aae_controller:aae_nextrebuild(State#state.aae_controller),
     {reply, {NRT, State#state.aae_rebuild}, State};
 handle_call({aae, Msg, IndexNs, ReturnFun}, _From, State) ->
@@ -314,8 +347,26 @@ handle_cast({push, Bucket, Key, UpdClock, ObjectBin, IndexN}, State) ->
                                 to_aae_binary(ObjectBin)),
 
     {noreply, State};
-handle_cast({rebuild_status, Status}, State) ->
-    {noreply, State#state{aae_rebuild = Status}}.
+handle_cast({rebuild_complete, store}, State) ->
+    % Trigger a rebuild of the tree.  Will require a non-null preflist_fun 
+    % if the store is native (as the native store will not store the IndexN, 
+    % and so a recalculation will be required)
+    Vnode = self(),
+    ReturnFun = 
+        fun(ok) ->
+            ok = rebuild_complete(Vnode, tree)
+        end,
+    
+    Worker = workerfun(ReturnFun),
+
+    ok = aae_controller:aae_rebuildtrees(State#state.aae_controller, 
+                                            State#state.index_ns,
+                                            State#state.preflist_fun,
+                                            Worker),
+
+    {noreply, State#state{aae_rebuild = true}};
+handle_cast({rebuild_complete, tree}, State) ->
+    {noreply, State#state{aae_rebuild = false}}.
 
 
 handle_info(_Info, State) ->
@@ -332,21 +383,16 @@ code_change(_OldVsn, State, _Extra) ->
 %%% External functions
 %%%============================================================================
 
--spec riak_extract_metadata(binary()) 
-                                -> {integer(), integer(), integer(), any()}.
+-spec extractclock_from_riakhead(binary()) -> list(tuple()).
 %% @doc
-%% The vnode should produce a special version of the object binary which with 
-%% this function cna be quickly unpacked.
-%%
-%% If the backend supports can rely on a special PUT that spits back the 
-%% metadata - so this doesn't have to be unpacked spearately by the backend.
-riak_extract_metadata(ObjBin) ->
-    <<ObjSize:32/integer, 
-        SibCount:32/integer,
-        IndexHash:32/integer, 
-        HeadLen:32/integer,
-        Head:HeadLen/binary>> = ObjBin,
-    {ObjSize, SibCount, IndexHash, Head}.
+%% Extract the vector clock from a riak binary object (without doing a full
+%% binary to objetc conversion)
+extractclock_from_riakhead(RiakHead) ->
+    {proxy_object, HeadBin, _Size, _F} = binary_to_term(RiakHead),
+    <<?MAGIC:8/integer, ?V1_VERS:8/integer, 
+        VclockLen:32/integer, VclockBin:VclockLen/binary, 
+        _Rest/binary>> = HeadBin, 
+    lists:usort(binary_to_term(VclockBin)).
 
 
 %% V1 Riak Object Binary Encoding
@@ -365,8 +411,8 @@ new_v1(Vclock, Siblings) ->
     SibCount = length(Siblings),
     SibsBin = bin_contents(Siblings),
     <<?MAGIC:8/integer, ?V1_VERS:8/integer, 
-        VclockLen:32/integer, VclockBin/binary, 
-        SibCount:32/integer, SibsBin/binary>>.
+                VclockLen:32/integer, VclockBin/binary, 
+                SibCount:32/integer, SibsBin/binary>>.
 
 bin_content(#r_content{metadata=Meta0, value=Val}) ->
     TypeTag = 1,
@@ -410,6 +456,12 @@ rebuild_worker(ReturnFun) ->
             ReturnFun(ok)
     end.
 
+from_aae_binary(AAEBin) ->
+    <<ObjectSize:32/integer, SibCount:32/integer, IndexHash:32/integer, 
+        HeadOnly/binary>> = AAEBin,
+    {ObjectSize, SibCount, IndexHash, HeadOnly}.
+
+
 %%%============================================================================
 %%% Internal functions
 %%%============================================================================
@@ -423,9 +475,8 @@ to_aae_binary(ObjectBin) ->
     IndexHash = erlang:phash2([]), % faking here
 
     HeadOnly = strip_metabinary(SibCount, SibsBin, <<>>),
-    HeadSize = byte_size(HeadOnly),
     <<ObjectSize:32/integer, SibCount:32/integer, IndexHash:32/integer, 
-        HeadSize:32/integer, HeadOnly/binary>>.
+        HeadOnly/binary>>.
 
 
 strip_metabinary(0, <<>>, MetaBinAcc) ->
