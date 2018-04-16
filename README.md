@@ -12,9 +12,9 @@ Library to provide an Active-Anti-Entropy (AAE) capability in a KV store.  The A
 
 The purpose of these changes, and other small improvements to standard Merkle tree anti-entropy, are to allow for:
 
-- Supporting Active Anti-Entropy without the need for additional `parallel` key stores added to provide a tree-ordered view of the store: but where a `parallel` store may still be used when support for AAE within the `native` store is not present.
+- Supporting Active Anti-Entropy without the need to maintain and synchronise additional `parallel` key stores to provide a tree-ordered view of the store.  this depends on the primary store having `native` AAE support, and a `parallel` store may still be used where this support is not available.
 
-- Cached views of TicTac Merkle trees to be maintained in memory by applying deltas to the trees, so as to avoid the scanning of dirty segments at the point of exchange and allow for immediate exchanges.
+- Cached views of TicTac Merkle trees to be maintained in memory by applying deltas to the trees, so as to avoid the scanning of dirty segments at the point of exchange and allow for immediate exchanges.  Also the cache will be maintained and kept up-to-date during rebuild activity, to prevent loss of anti-entropy validation during any background rebuild processes.
 
 - False positive avoidance by double-checking each stage of the exchange (separated by a pause), utilising the low cost of querying the tree, and avoiding the false-negative exchanges associated with timing differences between changes reaching different vnodes.
 
@@ -27,9 +27,9 @@ The purpose of these changes, and other small improvements to standard Merkle tr
 - Allow for AAE exchanges to compare Keys and Clocks for mismatched segments, not just Keys and Hashes, so repair functions can be targeted at the side of the exchange which is behind - avoiding needlessly duplicated 2-way repairs.
 
 
-## Actors
+## Primary Actors
 
-The primary actor in the library is the controller (`aae_controller`) - which provides the API to startup and shutdown a server for which will manage TicTac tree caches (`aae_treecache`) and a parallel Key Store (`aae_keystore`).  The `aae_controller` can be updated by the actual vnode (partition) manager, and accessed by AAE Exchanges.
+The primary actor in the library is the controller (`aae_controller`) - which provides the API to startup and shutdown a server for which will manage TicTac tree caches (`aae_treecache`) and a parallel Key Store (`aae_keystore` - which may be empty when run in `native` mode).  The `aae_controller` can be updated by the actual vnode (partition) manager, and accessed by AAE Exchanges (either directly or also via the vnode manager).
 
 The AAE exchanges (`aae_exchange`) are finite-state machines which are initialised with a Blue List and a Pink List to compare.  In the simplest form the two lists can be a single vnode and partition identifier each - or they could be different coverage plans consisting of multiple vnodes and multiple partition identifiers by vnode.  The exchanges pass through two root comparison stages (to compare the root of the trees, taking the intersection of branch mismatches from both comparisons), two branch comparison stages, and then a Key and logical identifier exchange based on the leaf segment ID differences found, and finally a repair.
 
