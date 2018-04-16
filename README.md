@@ -2,6 +2,8 @@
 
 An Active Anti-Entropy library for Key-Value stores in Erlang.
 
+This is currently a working prototype with basic testing.  The target for the library is to be fuly integrated with [Riak KV](https://github.com/basho/riak_kv) for Release 3.0 (Autumn 2018). 
+
 ## Overview
 
 Library to provide an Active-Anti-Entropy (AAE) capability in a KV store.  The AAE functionality is based on that normally provided through [Merkle Trees](https://github.com/basho/riak_core/blob/2.1.9/src/hashtree.erl), but with two changes from standard practice:
