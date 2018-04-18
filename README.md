@@ -51,4 +51,4 @@ Following the [current tests](https://github.com/martinsumner/kv_index_tictactre
 
 [This overview](docs/RIAK_2_AAE.md) details how the current (Riak KV 2.2.5) AAE implementation works.
 
-[This overview]() details how the target (Riak KV 3.0) AAE implementation is expected to work utilising KV Tictac Trees.
+[This overview](docs/Riak_3_AAE.md) details how the target (Riak KV 3.0) AAE implementation is expected to work utilising KV Tictac Trees.
