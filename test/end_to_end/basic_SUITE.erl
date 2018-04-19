@@ -274,7 +274,7 @@ mock_vnode_loadexchangeandrebuild(_Config) ->
     RPid = self(),
     RepairFun = 
         fun(KL) -> 
-            lists:foreach(fun({B, K}) -> 
+            lists:foreach(fun({{B, K}, _VCCompare}) -> 
                                 io:format("Delta found in ~w ~w~n", [B, K])
                             end,
                             KL) 
@@ -292,6 +292,8 @@ mock_vnode_loadexchangeandrebuild(_Config) ->
     true = ExchangeState0 == root_compare,
 
     ObjList = gen_riakobjects(InitialKeyCount, []),
+    ReplaceList = gen_riakobjects(100, []), 
+        % some objects to replace the first 100 objects
 
     PutFun = 
         fun(Store1, Store2) ->
@@ -310,6 +312,7 @@ mock_vnode_loadexchangeandrebuild(_Config) ->
         % correctly into both vnodes.  These aren't loaded yet
     ok = lists:foreach(PutFun1, OL1),
     ok = lists:foreach(PutFun2, OL2),
+    ok = lists:foreach(PutFun1, ReplaceList),
     
     % Exchange between equivalent vnodes
     {ok, _P1, GUID1} = 

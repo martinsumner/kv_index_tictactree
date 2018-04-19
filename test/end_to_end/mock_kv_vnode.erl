@@ -205,7 +205,7 @@ handle_call({put, Object, IndexN, OtherVnodes}, _From, State) ->
                     extractclock_from_riakhead(Head),
                 Clock1 = 
                     [{State#state.vnode_id, State#state.vnode_sqn}|Clock0],
-                {lists:ukeysort(Clock1, 1), Clock0}
+                {lists:ukeysort(1, Clock1), Clock0}
         end,
     ObjectBin = new_v1(UpdClock, Object#r_object.contents),
     VVEBin = to_aae_binary(ObjectBin),
@@ -329,9 +329,7 @@ handle_cast({push, Bucket, Key, UpdClock, ObjectBin, IndexN}, State) ->
             not_found ->
                 none;
             {ok, Head} ->
-                {VclockBin, _SMB, _LMs} 
-                    = leveled_codec:riak_metadata_frombinary(Head),
-                term_to_binary(VclockBin)
+                extractclock_from_riakhead(Head)
         end,
     leveled_bookie:book_put(State#state.vnode_store, 
                                 Bucket, 
@@ -387,12 +385,13 @@ code_change(_OldVsn, State, _Extra) ->
 %% @doc
 %% Extract the vector clock from a riak binary object (without doing a full
 %% binary to objetc conversion)
+extractclock_from_riakhead(<<?MAGIC:8/integer, ?V1_VERS:8/integer, 
+                            VclockLen:32/integer, VclockBin:VclockLen/binary,
+                            _Rest/binary>>) ->
+    lists:usort(binary_to_term(VclockBin));
 extractclock_from_riakhead(RiakHead) ->
     {proxy_object, HeadBin, _Size, _F} = binary_to_term(RiakHead),
-    <<?MAGIC:8/integer, ?V1_VERS:8/integer, 
-        VclockLen:32/integer, VclockBin:VclockLen/binary, 
-        _Rest/binary>> = HeadBin, 
-    lists:usort(binary_to_term(VclockBin)).
+    extractclock_from_riakhead(HeadBin).
 
 
 %% V1 Riak Object Binary Encoding
