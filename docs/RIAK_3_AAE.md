@@ -26,7 +26,15 @@
 
     - Based on the IndexN, the `aae_controller` should cast the delta to the appropriate `aae_treecache`.  This should update the Merkle tree by removing the old version from the tree (by XORing the hash of the {Key, PreviousClock} again), and adding the new version (by XORing the segment by the hash of the {Key, CurrentClock}).
 
-    - The exception to this is when the PreviousClock is undefined - meaning there was no read before write.  In this case, the PreviousClock needs to be filled in with a read against the `aae_keystore` before processing.  This removes some of the efficiency advantages of Last Write Wins writes, though doesn't eliminate the latency improvement (as the AAE read does not block the update from proceeding).
+    - The exception to this is when the PreviousClock is undefined - meaning there was no read before write.  In this case, the PreviousClock needs to be filled in with a read against the `aae_keystore` before processing.  
+
+        - One scenario where the previous clock is `undefined` is when Last Write Wins is used with a non-indexing backend.  This removes some of the efficiency advantages of Last Write Wins writes, though doesn't eliminate the latency improvement (as the AAE read does not block the update from proceeding).
+
+        - The other scenario is on a `rehash` request (when a read_repair GET request has not discovered an expected anomaly between the vnode values).
+
+        - The `aae_keystore` may fill-in this information two ways.  It could simple read the previous object in the keystore, or it could fold over all objects in that segment and IndexN to calculate an entirely new hash value for that segment.  Perhaps the latter should be a fallback for `rehash` requests (i.e. on a dice roll on a rehash request, so rehash eventually causes this)
+
+- Before any fold operation on the `aae_keystore` the batch of changes waiting to be written are flushed.
 
 ## On Exchange
 
@@ -40,19 +48,19 @@
 
 - An exchange is done by starting an `aae_exchange` process.  The `aae_exchange` is a FSM and should be initiated by the calling service via sidejob.  The `aae_exchange` process takes as input:
 
-    - A BlueList and a PinkList - lists of {SendFun, [IndexN]} tuples, where the SendFun isa function that can send a message to a given controller, and the list of IndexNs are the preflist/n_val pairs releative to this exchange at that destination.  The SendFun thin this case should use the riak_core message passing to reach the riak_kv_vnode - and the riak_kv_vnode will be extended to detect AAE commands and forward them to the `aae_controller`.
+    - A BlueList and a PinkList - lists of {SendFun, [IndexN]} tuples, where the SendFun is a function that can send a message to a given controller, and the list of IndexNs are the preflist/n_val pairs relative to this exchange at that destination.  The SendFun in this case should use the riak_core message passing to reach the riak_kv_vnode - and the riak_kv_vnode will be extended to detect AAE commands and forward them to the `aae_controller`.
 
     -  A RepairFun - that will be passed any deltas, and in the case of intra-cluster anti-entropy the RepairFun should just send a throttled stream of GET requests to invoke read_repair
 
-    - A ReplyFun - to send a response back tot he client (giving the state at which the FSM exited, and the number of KeyDeltas discovered.
+    - A ReplyFun - to send a response back to the client (giving the state at which the FSM exited, and the number of KeyDeltas discovered.
 
-- The exchange will request all the tree roots to be fetched from the Blue List and the Pink List - merging to give a Blue Root and a Pink root, and comparing those roots.  This will provide a list of branch IDs that may potentially have deltas.  If the list is empty, the process will reply and exit.
+- The exchange will request all the tree roots to be fetched from the Blue List and the Pink List - merging to give a Blue root and a Pink root, and comparing those roots.  This will provide a list of branch IDs that may potentially have deltas.  If the list is empty, the process will reply and exit.
 
 - The exchange will then pause, and then re-request all the tree roots.  This will produce a new list of BranchID deltas from the comparison of the merged roots, and this will be intersected with the first list.  If the list is empty, the process will reply and exit.
 
-- The exchange will then pause, and then request all the branches from the Blue and Pink lists.  This will again be a repeated request, with the intersection of the SegmentIDs that differ being taken forward to the next stage, and the process will reply and exit if the list is empty.
+- The exchange will then pause, and then request all the branches that were in the intersected list of BranchIDs from the Blue and Pink lists.  This will again be a repeated request, with the intersection of the SegmentIDs that differ being taken forward to the next stage, and the process will reply and exit if the list is empty.
 
-- The number of SegmentIDs that are taken forward for the clock comparison is bounded, and the code will attempt to chose the set of SegmentIDs that are closest together as the subset to be used.  Those SegmentIDs will then be forwarded in a request to `fetch_clocks`.  These requests will be passed by the `aae_controller` to the `aae_keystore`, and this will fold over the store (and this will be the vnode store if the `aae_keystore` is running in native mode), looking for all Keys and Version Vectors within those segments.  If the keystore is segment-ordered, this will be a series of range folds on the snapshot.  If the keystore is key-ordered, then there will be a single fold across the whole store, but before a slot of keys is passed into the fold process it will be checked to see if it contains any key in the segment - and skipped if not.
+- The number of SegmentIDs that are taken forward for the clock comparison is bounded, and the code will attempt to chose the set of SegmentIDs that are closest together as the subset to be used.  Those SegmentIDs will then be forwarded in a request to `fetch_clocks`.  These requests will be passed by the `aae_controller` to the `aae_keystore`, and this will fold over the store (and this will be the vnode store if the `aae_keystore` is running in native mode), looking for all Keys and Version Vectors within those segments and IndexNs.  If the keystore is segment-ordered, this will be a series of range folds on the snapshot.  If the keystore is key-ordered, then there will be a single fold across the whole store, but before a slot of keys is passed into the fold process it will be checked to see if it contains any key in the segment - and skipped if not.
 
 - When the Keys and Clocks are returned they are compared, and then deltas are passed to the RepairFun for read repair.
 
@@ -63,7 +71,7 @@
 
 - When the `aae_controller` is started it is passed the IsEmpty status of the vnode backend as well as the shutdown GUID.  The `aae_keystore` should likewise have the Shutdown GUID on shutdown (and erased it on startup), and on startup an confirm that the IsEmpty status and Shutdown GUIDs match between the vnode and the `parallel` keystore.
 
-- If there is no match on startup, then it cannot be consumed that the two stores are consistent, and the next rebuild time should be set into the past.  this should then prompt a rebuild.  Until the rebuild is complete, the `aae_controller` should continue on a best endeavours basis, assuming that the data in the `aae_treecache` and `aae_keystore` is good enough until the rebuild completes.
+- If there is no match on startup, then it cannot be assumed that the two stores are consistent, and the next rebuild time should be set into the past.  this should then prompt a rebuild.  Until the rebuild is complete, the `aae_controller` should continue on a best endeavours basis, assuming that the data in the `aae_treecache` and `aae_keystore` is good enough until the rebuild completes.
 
 
 ## On rebuild
@@ -72,13 +80,13 @@
 
 - The `aae_controller` trackes the next rebuild time, the time when it should be next rebuild.  This is based on adding a rebuild schedule (a fixed time between rebuilds and a random variable time to reduce the chances of rebuild synchronisation across vnodes) to the last rebuild time.  The last rebuild time is persisted to be preserved across restarts.
 
-- The next rebuild time is reset to the past on startup if a failure to shutdown cleanly either the vnode or the aae service is detected through the Shutdown GUID.
+- The next rebuild time is reset to the past on startup, if a failure to shutdown cleanly and consistently either the vnode or the aae service is detected through a mismatch on the Shutdown GUID.
 
 - The vnode should check the next rebuild time after startup of the `aae_controller`, and schedule a callback to prompt the rebuild at that time.
 
 - When the rebuild time is reached, the vnode should prompt the rebuild of the store via the `aae_controller`
 
-    - the prompt should pass in a SplitObjFun which can extract/calculate the IndexN and version vector for a Riak object in the store.
+    - the prompt should pass in a SplitObjFun which can extract/calculate the IndexN and version vector for a Riak object in the store (this is required only in `parallel` mode).
 
     - the prompt should first flush all batched updates to the `aae_keystore`, and trigger the `aae_keystore` to enter the `loading` state.
 
@@ -86,7 +94,7 @@
 
     - a fold objects function and a finish function is returned in response to the prompt request.
 
-        - the fold fun will load all passed objects in batches as object_specs (by extracting out the vector clock etc) into the new load store of the `aae_keystore`.
+        - the fold fun will load all passed objects in batches as object_specs (by extracting out the vector clock etc) directly into the new load store of the `aae_keystore`.
 
         - the finish fun will prompt the worker running the fold to prompt the keystore to complete the load.  This will involve, loading all the queued object specs (of updates received since the fold was started) into the store, deleting the old key store, and making the newly rebuilt key store the master.
 
@@ -110,7 +118,7 @@
 
 - If there is a shutdown during a rebuild process, all the partially built elements are discarded, and the rebuild will be due again at startup.
 
-- Scheduling of rebuilds is not ventrally managed (so the locks required to reduce concurrency in the existing AAe process are discarded).  There is instead a combination of some random factor added to the schedule time, plus the use of the core_node_worker_pool - which prevents more than one M folds being on a node concurrently (where M is the size of the pool, normally 1).
+- Scheduling of rebuilds is not ventrally managed (so the locks required to reduce concurrency in the existing AAE process are discarded).  There is instead a combination of some random factor added to the schedule time, plus the use of the core_node_worker_pool - which prevents more than one M folds being on a node concurrently (where M is the size of the pool, normally 1).
 
 ## Secondary Uses
 
