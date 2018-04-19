@@ -788,8 +788,8 @@ repair_fun(SourceList, Cntrl, NVal) ->
     RepairFun = 
         fun(BucketKeyL) ->
             FoldFun =
-                fun(BucketKeyT, Acc) -> 
-                    {{B0, K0}, V0} = lists:keyfind(BucketKeyT, 1, Lookup),
+                fun({{B0, K0}, _VCDelta}, Acc) -> 
+                    {{B0, K0}, V0} = lists:keyfind({B0, K0}, 1, Lookup),
                     [{B0, K0, V0}|Acc]
                 end,
             KVL = lists:foldl(FoldFun, [], BucketKeyL),
