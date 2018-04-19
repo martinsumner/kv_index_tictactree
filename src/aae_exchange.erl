@@ -456,15 +456,61 @@ compare_branches(BlueBranches, PinkBranches) ->
 
 -spec compare_clocks(list(tuple()), list(tuple())) -> list(tuple()).
 %% @doc
-%% Find the differences between the lists - and return Bucket/Key pairs
-%% TODO: allow for proper clock comparison e.g. which is more up to date
-compare_clocks(BlueList0, PinkList0) ->
-    BlueList = lists:usort(BlueList0),
-    PinkList = lists:usort(PinkList0),
-    MapToKeyFun =  fun({B, K, _V}) -> {B, K} end,
-    BlueExcess = lists:map(MapToKeyFun, lists:subtract(BlueList, PinkList)),
-    PinkExcess = lists:map(MapToKeyFun, lists:subtract(PinkList, BlueList)),
-    lists:umerge(BlueExcess, PinkExcess).
+%% Find the differences between the lists - and return a list of
+%% {B, K, blue-side VC, pink-side VC}
+%% If theblue-side or pink-seide does not contain the key, then none is used
+%% in place of the clock
+compare_clocks(BlueList, PinkList) ->
+    % Two lists of {B, K, VC} want to remove everything where {B, K, VC} is
+    % the same in both lists
+    BlueSet = ordsets:from_list(BlueList),
+    PinkSet = ordsets:from_list(PinkList),
+
+    BlueDelta = ordsets:subtract(BlueSet, PinkSet),
+    PinkDelta = ordsets:subtract(PinkSet, BlueSet),
+        % Want to subtract out from the Pink and Blue Sets any example where 
+        % both pink and blue are the same
+        %
+        % This should spped up the foling and key finding to provide the 
+        % joined list
+
+    BlueDeltaList = 
+        lists:reverse(
+            ordsets:fold(fun({B, K, VCB}, Acc) -> 
+                                % Assume for now that element may be only
+                                % blue
+                                [{{B, K}, {VCB, none}}|Acc] 
+                            end, 
+                            [], 
+                            BlueDelta)),
+        % BlueDeltaList is the output of compare clocks, assuming the item
+        % is only on the Blue side (so it compares the blue vector clock with 
+        % none)
+    
+    PinkEnrichFun =
+        fun({B, K, VCP}, Acc) ->
+            case lists:keyfind({B, K}, 1, Acc) of
+                {{B, K}, {VCB, none}} ->
+                    ElementWithClockDiff = 
+                        {{B, K}, {VCB, VCP}},
+                    lists:keyreplace({B, K}, 1, Acc, ElementWithClockDiff);
+                false ->
+                    ElementOnlyPink = 
+                        {{B, K}, {none, VCP}},
+                    lists:keysort(1, [ElementOnlyPink|Acc])
+            end
+        end,
+        % The Foldfun to be used on the PinkDelta, will now fill in the Pink 
+        % vector clock if the element also exists in Pink
+    
+    AllDeltaList = 
+        ordsets:fold(PinkEnrichFun, BlueDeltaList, PinkDelta),
+        % The accumulator starts with the Blue side only perspective, and 
+        % either adds to it or enriches it by folding over the Pink side 
+        % view 
+    
+    AllDeltaList.
+
 
 -spec intersect_ids(list(integer()), list(integer())) -> list(integer()).
 %% @doc
@@ -581,12 +627,18 @@ compare_clocks_test() ->
     PL1 = [KV1, KV2, KV3],
     ?assertMatch([], compare_clocks(BL1, PL1)),
     BL2 = [KV2, KV3, KV4],
-    ?assertMatch([{<<"B1">>, <<"K1">>}], compare_clocks(BL2, PL1)),
-    ?assertMatch([{<<"B1">>, <<"K1">>}], compare_clocks(PL1, BL2)),
+    ?assertMatch([{{<<"B1">>, <<"K1">>}, {[{a, 1}, {b, 2}], [{a, 1}]}}], 
+                        compare_clocks(BL2, PL1)),
+    ?assertMatch([{{<<"B1">>, <<"K1">>}, {[{a, 1}], [{a, 1}, {b, 2}]}}],
+                        compare_clocks(PL1, BL2)),
     PL2 = [KV4, KV5],
-    ?assertMatch([{<<"B1">>, <<"K1">>}, 
-                    {<<"B1">>, <<"K2">>}, 
-                    {<<"B1">>, <<"K3">>}], compare_clocks(BL1, PL2)).
+    ?assertMatch([{{<<"B1">>, <<"K1">>}, 
+                            {[{a, 1}], [{a, 1}, {b, 2}]}},
+                        {{<<"B1">>, <<"K2">>}, 
+                            {[{b, 1}], [{b, 1}, {c, 1}]}},
+                        {{<<"B1">>, <<"K3">>}, 
+                            {[{a, 2}], none}}], 
+                    compare_clocks(BL1, PL2)).
 
 clean_exit_ontimeout_test() ->
     State0 = #state{pink_returns={4, 5}, blue_returns={8, 8}},
