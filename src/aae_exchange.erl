@@ -149,7 +149,7 @@
 %%
 %% The ReplyFun should be a 1 arity function t
 start(BlueList, PinkList, RepairFun, ReplyFun) ->
-    ExchangeID = leveled_codec:generate_uuid(),
+    ExchangeID = leveled_util:generate_uuid(),
     {ok, ExPID} = gen_fsm:start(?MODULE, 
                                 [BlueList, PinkList, RepairFun, ReplyFun, 
                                     ExchangeID], 

@@ -115,6 +115,12 @@
         % replaced.  In this case, it is the responsiblity of the controller 
         % to best determine what the previous version was. 
 
+-export_type([responsible_preflist/0,
+                keystore_type/0,
+                rebuild_schedule/0,
+                version_vector/0]).
+
+
 
 %%%============================================================================
 %%% API

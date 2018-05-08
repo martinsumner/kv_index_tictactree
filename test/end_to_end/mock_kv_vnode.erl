@@ -181,7 +181,7 @@ init([Opts]) ->
                 vnode_store = VnSt,
                 index_ns = Opts#options.index_ns,
                 aae_controller = AAECntrl,
-                vnode_id = list_to_binary(leveled_codec:generate_uuid()),
+                vnode_id = list_to_binary(leveled_util:generate_uuid()),
                 preflist_fun = Opts#options.preflist_fun}}.
 
 handle_call({put, Object, IndexN, OtherVnodes}, _From, State) ->
@@ -312,7 +312,7 @@ handle_call({fold_aae, Limiter, FoldFun, InitAcc, Elements}, _From, State) ->
                                 Elements),
     {reply, R, State};
 handle_call(close, _From, State) ->
-    ShutdownGUID = leveled_codec:generate_uuid(),
+    ShutdownGUID = leveled_util:generate_uuid(),
     ok = leveled_bookie:book_put(State#state.vnode_store, 
                                     ?BUCKET_SDG, ?KEY_SDG, 
                                     ShutdownGUID, [], 

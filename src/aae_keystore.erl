@@ -107,8 +107,16 @@
     % buckets (and otherwise state all).
 -type rebuild_prompts()
     :: rebuild_start|rebuild_complete.
-    % Prompts to be sued when rebuilding the key store (note this is rebuild
+    % Prompts to be used when rebuilding the key store (note this is rebuild
     % of the key store not just the aae trees)
+
+-export_type([parallel_stores/0,
+                native_stores/0,
+                manifest/0,
+                objectspec/0,
+                value_element/0,
+                fold_limiter/0,
+                rebuild_prompts/0]).
 
 
 %%%============================================================================
@@ -233,7 +241,7 @@ init([Opts]) ->
     Manifest0 =
         case open_manifest(RootPath) of 
             false ->
-                GUID = leveled_codec:generate_uuid(),
+                GUID = leveled_util:generate_uuid(),
                 #manifest{current_guid = GUID};
             {ok, M} ->
                 M 
@@ -378,7 +386,7 @@ parallel({mput, ObjectSpecs}, State) ->
     ok = do_load(State#state.store_type, State#state.store, ObjectSpecs),
     {next_state, parallel, State};
 parallel({prompt, rebuild_start}, State) ->
-    GUID = leveled_codec:generate_uuid(),
+    GUID = leveled_util:generate_uuid(),
     aae_util:log("KS007", [rebuild_start, GUID], logs()),
     {ok, Store} =  open_store(State#state.store_type, 
                                 State#state.backend_opts, 
@@ -390,7 +398,7 @@ parallel({prompt, rebuild_start}, State) ->
     {next_state, loading, State#state{load_store = Store, load_guid = GUID}}.
 
 native({prompt, rebuild_start}, State) ->
-    GUID = leveled_codec:generate_uuid(),
+    GUID = leveled_util:generate_uuid(),
     aae_util:log("KS007", [rebuild_start, GUID], logs()),
     
     {next_state, native, State#state{current_guid = GUID}};
@@ -931,7 +939,7 @@ empty_buildandclose_tester(StoreType) ->
     ?assertMatch(CurrentGUID, Manifest0#manifest.current_guid),
     ?assertMatch(none, Manifest0#manifest.shutdown_guid),
     
-    ok = store_close(Store0, ShutdownGUID = leveled_codec:generate_uuid()),
+    ok = store_close(Store0, ShutdownGUID = leveled_util:generate_uuid()),
     {ok, Manifest1} = open_manifest(RootPath),
     ?assertMatch(CurrentGUID, Manifest1#manifest.current_guid),
     ?assertMatch(ShutdownGUID, Manifest1#manifest.shutdown_guid),
@@ -1135,7 +1143,7 @@ fetch_clock_test() ->
     {ok, Store0} = open_store(leveled_so, 
                                 ?LEVELED_BACKEND_OPTS, 
                                 RootPath,
-                                leveled_codec:generate_uuid()),
+                                leveled_util:generate_uuid()),
 
     do_load(leveled_so, Store0, [Spc1, Spc2, Spc3, Spc4]),
 
@@ -1204,7 +1212,7 @@ big_load_tester(StoreType) ->
     {async, Folder2} = store_fold(Store0, all, FoldObjectsFun, 0, []),
     ?assertMatch(KeyCount, Folder2() - KeyCount),
 
-    ok = store_close(Store0, ShutdownGUID0 = leveled_codec:generate_uuid()),
+    ok = store_close(Store0, ShutdownGUID0 = leveled_util:generate_uuid()),
 
     {ok, {RebuildTS, ShutdownGUID0, false}, Store1} 
         = store_parallelstart(RootPath, StoreType),
@@ -1227,7 +1235,7 @@ big_load_tester(StoreType) ->
     {true, PendingManifest} = 
         lists:foldl(OpenWhenPendingSavedFun, {false, null}, lists:seq(1,10)),
 
-    ok = store_close(Store1, ShutdownGUID1 = leveled_codec:generate_uuid()),
+    ok = store_close(Store1, ShutdownGUID1 = leveled_util:generate_uuid()),
     ?assertMatch(false, undefined == PendingManifest#manifest.pending_guid),
     M0 = clear_pendingpath(PendingManifest, RootPath),
     ?assertMatch(undefined, M0#manifest.pending_guid),
