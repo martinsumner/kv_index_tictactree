@@ -16,6 +16,16 @@
 
 -behaviour(gen_fsm).
 
+-ifdef(fsm_deprecated).
+-compile({nowarn_deprecated_function, 
+            [{gen_fsm, start, 3},
+                {gen_fsm, send_event, 2},
+                {gen_fsm, sync_send_event, 2},
+                {gen_fsm, sync_send_event, 3},
+                {gen_fsm, sync_send_all_state_event, 2}
+                ]}).
+-endif.
+
 -include("include/aae.hrl").
 
 -export([init/1,

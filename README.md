@@ -2,7 +2,9 @@
 
 An Active Anti-Entropy library for Key-Value stores in Erlang.
 
-This is currently a working prototype with basic testing.  The target for the library is to be fuly integrated with [Riak KV](https://github.com/basho/riak_kv) for Release 3.0 (Autumn 2018).
+This is currently a working prototype with basic testing.  The target for the library is to be fully integrated with [Riak KV](https://github.com/basho/riak_kv) for Release 3.0 (Autumn 2018).
+
+The library could in theory be used by any Erlang application wanting to use Merkle trees to compare different data stores, it is designed for Riak but not coupled to Riak.  It is not though a general substitute for Merkle trees when the cryptographic strength of Merkle trees is of importance (e.g. a blockchain implementation).
 
 ## Overview
 
