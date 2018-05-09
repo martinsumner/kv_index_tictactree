@@ -84,6 +84,8 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
                                     VnodePath2, 
                                     SplitF),
     
+    SW0 = os:timestamp(),
+
     BKVList = gen_keys([], InitialKeyCount),
     ok = put_keys(Cntrl1, 2, BKVList, none),
     ok = put_keys(Cntrl2, 3, BKVList, none),
@@ -95,6 +97,10 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
     ok = put_keys(Cntrl1, 2, BKVListR, undefined),
     ok = put_keys(Cntrl2, 3, BKVListR, undefined),
     
+    io:format("Initial put complete in ~w ms~n", 
+                [timer:now_diff(os:timestamp(), SW0)/1000]),
+    SW1 = os:timestamp(),
+
     % Confirm all partitions are aligned as expected using direct access to 
     % the controller
 
@@ -128,6 +134,10 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
     Root2C = start_receiver(),
     true = Root1C == Root2C,
     
+    io:format("Direct partition compare complete in ~w ms~n", 
+                [timer:now_diff(os:timestamp(), SW1)/1000]),
+    SW2 = os:timestamp(),
+
     % Confirm no dependencies when using different matching AAE exchanges
     RepairFun = fun(_KL) -> null end,  
 
@@ -237,7 +247,8 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
     {ExchangeState8, 0} = start_receiver(),
     true = ExchangeState8 == root_compare,
 
-
+    io:format("Comparison through exchange complete in ~w ms~n", 
+                [timer:now_diff(os:timestamp(), SW2)/1000]),
 
     % Shutdown and tidy up
     ok = aae_controller:aae_close(Cntrl1, none),
