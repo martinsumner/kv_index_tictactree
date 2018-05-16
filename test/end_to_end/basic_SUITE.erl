@@ -256,6 +256,7 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
     RootPath = reset_filestructure().
 
 
+
 mock_vnode_loadexchangeandrebuild(_Config) ->
     % Load up two vnodes with same data, with the data in each node split 
     % across 3 partitions (n=1).
@@ -286,7 +287,9 @@ mock_vnode_loadexchangeandrebuild(_Config) ->
     RepairFun = 
         fun(KL) -> 
             lists:foreach(fun({{B, K}, _VCCompare}) -> 
-                                io:format("Delta found in ~w ~w~n", [B, K])
+                                io:format("Delta found in ~s ~s~n", 
+                                            [binary_to_list(B), 
+                                                binary_to_list(K)])
                             end,
                             KL) 
         end,  
@@ -305,12 +308,31 @@ mock_vnode_loadexchangeandrebuild(_Config) ->
     ObjList = gen_riakobjects(InitialKeyCount, []),
     ReplaceList = gen_riakobjects(100, []), 
         % some objects to replace the first 100 objects
+    DeleteList1 = lists:sublist(ObjList, 200, 100),
+    DeleteList2 = 
+        lists:sublist(ObjList, 400, 10) ++ 
+        lists:sublist(ObjList, 500, 10) ++ 
+        lists:sublist(ObjList, 600, 10),
 
     PutFun = 
         fun(Store1, Store2) ->
             fun(Object) ->
                 PL = PreflistFun(null, Object#r_object.key),
                 mock_kv_vnode:put(Store1, Object, PL, [Store2])
+            end
+        end,
+    DeleteFun =
+        fun(Stores) ->
+            fun(Object) ->
+                PL = PreflistFun(null, Object#r_object.key),
+                lists:foreach(
+                    fun(Store) -> 
+                        mock_kv_vnode:backend_delete(Store, 
+                                                        Object#r_object.bucket,
+                                                        Object#r_object.key,
+                                                        PL)
+                    end,
+                    Stores)
             end
         end,
     
@@ -324,6 +346,7 @@ mock_vnode_loadexchangeandrebuild(_Config) ->
     ok = lists:foreach(PutFun1, OL1),
     ok = lists:foreach(PutFun2, OL2),
     ok = lists:foreach(PutFun1, ReplaceList),
+    ok = lists:foreach(DeleteFun([VNN, VNP]), DeleteList1),
     
     % Exchange between equivalent vnodes
     {ok, _P1, GUID1} = 
@@ -447,7 +470,7 @@ mock_vnode_loadexchangeandrebuild(_Config) ->
     true = RebuildNd == RebuildNc,
     true = RebuildPd > os:timestamp(),
     
-    % Rebuild now complete - should get the same result fro an exchange
+    % Rebuild now complete - should get the same result for an exchange
     {ok, _P3d, GUID3d} = 
         aae_exchange:start([{exchange_vnodesendfun(VNNa), IndexNs}],
                                 [{exchange_vnodesendfun(VNPa), IndexNs}],
@@ -456,6 +479,27 @@ mock_vnode_loadexchangeandrebuild(_Config) ->
     io:format("Exchange id ~s~n", [GUID3d]),
     {ExchangeState3d, 2} = start_receiver(),
     true = ExchangeState3d == clock_compare,
+
+    % Delete some keys - and see the size of the delta increase
+    ok = lists:foreach(DeleteFun([VNPa]), DeleteList2),
+    {ok, _P4a, GUID4a} = 
+        aae_exchange:start([{exchange_vnodesendfun(VNNa), IndexNs}],
+                                [{exchange_vnodesendfun(VNPa), IndexNs}],
+                                RepairFun,
+                                ReturnFun),
+    io:format("Exchange id ~s~n", [GUID4a]),
+    {ExchangeState4a, 32} = start_receiver(),
+    true = ExchangeState4a == clock_compare,
+    % Balance the deletions
+    ok = lists:foreach(DeleteFun([VNNa]), DeleteList2),
+    {ok, _P4b, GUID4b} = 
+        aae_exchange:start([{exchange_vnodesendfun(VNNa), IndexNs}],
+                                [{exchange_vnodesendfun(VNPa), IndexNs}],
+                                RepairFun,
+                                ReturnFun),
+    io:format("Exchange id ~s~n", [GUID4b]),
+    {ExchangeState4b, 2} = start_receiver(),
+    true = ExchangeState4b == clock_compare,
 
     % Shutdown and clear down files
     ok = mock_kv_vnode:close(VNNa),
