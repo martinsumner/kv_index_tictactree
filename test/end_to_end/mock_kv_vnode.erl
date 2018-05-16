@@ -17,6 +17,7 @@
 -export([open/4,
             put/4,
             push/6,
+            backend_delete/4,
             exchange_message/4,
             rebuild/2,
             rebuild_complete/2,
@@ -99,6 +100,12 @@ put(Vnode, Object, IndexN, OtherVnodes) ->
 %% Push a new object in the store, updating AAE
 push(Vnode, Bucket, Key, UpdClock, ObjectBin, IndexN) ->
     gen_server:cast(Vnode, {push, Bucket, Key, UpdClock, ObjectBin, IndexN}).
+
+-spec backend_delete(pid(), binary(), binary(), tuple()) -> ok.
+%% @doc
+%% Delete an object from the backend
+backend_delete(Vnode, Bucket, Key, IndexN) ->
+    gen_server:call(Vnode, {delete, Bucket, Key, IndexN}).
 
 -spec rebuild(pid(), boolean()) -> {erlang:timestamp(), boolean()}.
 %% @doc
@@ -228,6 +235,23 @@ handle_call({put, Object, IndexN, OtherVnodes}, _From, State) ->
                     OtherVnodes),
 
     {reply, ok, State#state{vnode_sqn = State#state.vnode_sqn + 1}};
+handle_call({delete, Bucket, Key, IndexN}, _From, State) ->
+    PrevClock = 
+        case leveled_bookie:book_head(State#state.vnode_store, 
+                                        Bucket, Key, ?RIAK_TAG) of
+            not_found ->
+                none;
+            {ok, Head} ->
+                extractclock_from_riakhead(Head)
+        end,
+    leveled_bookie:book_put(State#state.vnode_store, 
+                            Bucket, Key, delete, [], ?RIAK_TAG),
+    ok = aae_controller:aae_put(State#state.aae_controller, 
+                                IndexN, 
+                                Bucket, Key, 
+                                none, PrevClock, 
+                                <<>>),
+    {reply, ok, State};
 handle_call({rebuild, true}, _From, State) ->
     % To rebuild the store an Object SplitFun will be required if is is a 
     % parallel store, which will depend on the preflist_fun.

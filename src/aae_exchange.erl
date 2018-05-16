@@ -469,6 +469,8 @@ compare_branches(BlueBranches, PinkBranches) ->
 compare_clocks(BlueList, PinkList) ->
     % Two lists of {B, K, VC} want to remove everything where {B, K, VC} is
     % the same in both lists
+    aae_util:log("EX008", [BlueList, PinkList], logs()),
+
     BlueSet = ordsets:from_list(BlueList),
     PinkSet = ordsets:from_list(PinkList),
 
@@ -598,7 +600,9 @@ logs() ->
         {"EX006", % TODO: should be debug in production
             {info, "State change to ~w for exchange id=~s"}},
         {"EX007", % TODO: should be changed to debug in production
-            {info, "Reply received for colour=~w in exchange id=~s"}}
+            {info, "Reply received for colour=~w in exchange id=~s"}},
+        {"EX008", % TODO: should be changed to debug in production
+            {info, "Comparison between BlueList ~w and PinkList ~w"}}
         ].
 
 
