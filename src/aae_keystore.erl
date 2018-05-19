@@ -462,7 +462,7 @@ define_objectspec(Op, SegTree_int, Bucket, Key, Value) ->
                 value = Value}.
 
 
--spec generate_treesegment({integer(), integer()}) -> integer().
+-spec generate_treesegment(leveled_tictac:segment48()) -> integer().
 %% @doc
 %% Get actual SegmentID for tree
 generate_treesegment(SegmentID) ->

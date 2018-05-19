@@ -648,7 +648,16 @@ foldobjects_buildtrees(IndexNs) ->
                     {BinK, {is_hash, Hash}} end,
             case lists:keyfind(IndexN, 1, Acc) of 
                 {IndexN, Tree} ->
-                    Tree0 = leveled_tictac:add_kv(Tree, null, null, BinExtractFun),
+                    Tree0 = 
+                        leveled_tictac:add_kv(Tree, 
+                                                {null}, {null},
+                                                    % BinExtractfun will ignore
+                                                    % this dummy key and value
+                                                    % and substitute its own 
+                                                    % pre-defined values to 
+                                                    % generate segment ID and 
+                                                    % hash
+                                                BinExtractFun),
                     lists:keyreplace(IndexN, 1, Acc, {IndexN, Tree0});
                 false ->
                     Acc 
@@ -704,7 +713,7 @@ cache(Startup, IndexN, RootPath) ->
     end.
 
 
--spec schedule_rebuild(erlang:timestamp()|never, {integer(), integer()}) 
+-spec schedule_rebuild(erlang:timestamp()|never, rebuild_schedule()) 
                                                         -> erlang:timestamp().
 %% @doc
 %% Set a rebuild time based on the last rebuild time and the rebuild schedule
@@ -718,7 +727,8 @@ schedule_rebuild({MegaSecs, Secs, MicroSecs}, {MinHours, JitterSeconds}) ->
     {NewSecs div ?MEGA, NewSecs rem ?MEGA, MicroSecs}.
 
 
--spec generate_objectspec(binary(), binary(), {integer(), integer()}, tuple(),
+-spec generate_objectspec(binary(), binary(), leveled_tictac:segment48(), 
+                            tuple(),
                             binary(), version_vector(), integer()|none, 
                             fun()) -> tuple().
 %% @doc                            

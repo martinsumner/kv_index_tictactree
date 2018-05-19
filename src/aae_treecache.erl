@@ -34,7 +34,7 @@
 
 -record(state, {save_sqn = 0 :: integer(),
                 is_restored = false :: boolean(),
-                tree :: leveled_tictac:tictactree(),
+                tree :: leveled_tictac:tictactree()|undefined,
                 root_path :: list()|undefined,
                 partition_id :: integer()|undefined,
                 loading = false :: boolean(),
@@ -336,11 +336,11 @@ logs() ->
 setup_savedcaches(RootPath) ->
     Tree0 = leveled_tictac:new_tree(test),
     Tree1 = leveled_tictac:add_kv(Tree0, 
-                                    <<"K1">>, <<"V1">>, 
-                                    fun(K, V) -> {K, V} end),
+                                    {<<"K1">>}, {<<"V1">>}, 
+                                    fun({K}, {V}) -> {K, V} end),
     Tree2 = leveled_tictac:add_kv(Tree1, 
-                                    <<"K2">>, <<"V2">>, 
-                                    fun(K, V) -> {K, V} end),
+                                    {<<"K2">>}, {<<"V2">>}, 
+                                    fun({K}, {V}) -> {K, V} end),
     ok = save_to_disk(RootPath, 1, Tree1),
     ok = save_to_disk(RootPath, 2, Tree2),
     Tree2.
