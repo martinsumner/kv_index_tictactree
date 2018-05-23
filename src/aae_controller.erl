@@ -784,7 +784,7 @@ logs() ->
                     ++ "queries to improve AAE operation until rebuild "
                     ++ "is complete"}},
         {"AAE02",
-            {error, "Unexpected KeyStore type information passed ~w"}},
+            {info, "Native KeyStore type ~w startup request"}},
         {"AAE03",
             {debug, "Unexpected Bucket ~w Key ~w passed with IndexN ~w "
                     "that does not match any of ~w"}},
