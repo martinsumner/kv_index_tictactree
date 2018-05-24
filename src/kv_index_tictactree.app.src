@@ -1,11 +1,12 @@
-{application, kv_index_hashtree,
+{application, kv_index_tictactree,
  [
   {description, "AAE helper service for KV vnode"},
   {vsn, "1"},
   {registered, []},
   {applications, [
                   kernel,
-                  stdlib
+                  stdlib,
+		  leveled
                  ]},
   {env, [{root_path, "test"}]}
  ]}.
