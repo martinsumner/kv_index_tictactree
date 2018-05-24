@@ -510,8 +510,13 @@ handle_cast({put, IndexN, Bucket, Key, Clock, PrevClock, BinaryObj}, State) ->
     PrevClock0 = 
         case PrevClock of 
             undefined ->
-                % Should never be native
-                resolve_clock(Bucket, Key, State#state.key_store);
+                case State#state.parallel_keystore of 
+                    true ->
+                        resolve_clock(Bucket, Key, State#state.key_store);
+                    false ->
+                        % An inert change will be generated
+                        Clock
+                end;
             _ ->
                 PrevClock
         end,
@@ -1087,6 +1092,7 @@ varyindexn_cache_rebuild_tester(StoreType) ->
 
     ok = aae_close(Cntrl0, "0000"),
     aae_util:clean_subdir(RootPath).
+
 
 coverage_cheat_test() ->
     {noreply, _State0} = handle_info(timeout, #state{}),

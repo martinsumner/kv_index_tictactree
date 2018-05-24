@@ -20,6 +20,7 @@
             backend_delete/4,
             exchange_message/4,
             rebuild/2,
+            rehash/4,
             rebuild_complete/2,
             fold_aae/5,
             close/1]).
@@ -120,6 +121,12 @@ rebuild(Vnode, ForceRebuild) ->
 %% Prompt for the rebuild of the tree
 rebuild_complete(Vnode, Stage) ->
     gen_server:cast(Vnode, {rebuild_complete, Stage}).
+
+-spec rehash(pid(), binary(), binary(), tuple()) -> ok.
+%% @doc
+%% Prompt a given key to be rehashed
+rehash(Vnode, Bucket, Key, IndexN) ->
+    gen_server:call(Vnode, {rehash, Bucket, Key, IndexN}).
 
 -spec fold_aae(pid(), tuple(), fun(), any(), 
                         list(aae_keystore:value_element())) -> {async, fun()}.
@@ -310,6 +317,24 @@ handle_call({rebuild, false}, _From, State) ->
     % rebuild
     NRT = aae_controller:aae_nextrebuild(State#state.aae_controller),
     {reply, {NRT, State#state.aae_rebuild}, State};
+handle_call({rehash, Bucket, Key, IndexN}, _From, State) ->
+    case leveled_bookie:book_head(State#state.vnode_store, 
+                                        Bucket, Key, ?RIAK_TAG) of
+        not_found ->
+            ok = aae_controller:aae_put(State#state.aae_controller, 
+                                        IndexN, 
+                                        Bucket, Key, 
+                                        none, undefined, 
+                                        <<>>);
+        {ok, Head} ->
+            C0 = extractclock_from_riakhead(Head),
+            ok = aae_controller:aae_put(State#state.aae_controller, 
+                                        IndexN, 
+                                        Bucket, Key, 
+                                        C0, undefined, 
+                                        to_aae_binary(Head))
+    end,
+    {reply, ok, State};
 handle_call({aae, Msg, IndexNs, ReturnFun}, _From, State) ->
     case Msg of 
         fetch_root ->
