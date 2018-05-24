@@ -240,8 +240,15 @@ aae_mergebranches(Pid, IndexNs, BranchIDs, ReturnFun) ->
 %% Fetch all the keys and clocks but use the passed in 2-arity function to 
 %% determine the IndexN of the object, by applying the function to the bucket
 %% and key
+%%
+%% This is a call, to allow for rehahsing of any trees as part of the fetch
+%% operation.  If no rebuild is running, then as well as fetching the clocks
+%% new segment values can be calculated, replacing the old segment values.
+%% By making this a call, the snapshot for the fold is made before any new 
+%% PUTs are received by the vnode - so we know any subseqent changes are not
+%% included in the fold result. 
 aae_fetchclocks(Pid, IndexNs, SegmentIDs, ReturnFun, PrefLFun) ->
-    gen_server:cast(Pid, 
+    gen_server:call(Pid, 
                     {fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PrefLFun}).
 
 -spec aae_fold(pid(), aae_keystore:fold_limiter(), fun(), any(), 
@@ -492,7 +499,8 @@ handle_call({rebuild_store, SplitObjFun}, _From, State)->
                                             rebuild_complete),
             {reply, ok, State}
     end;
-handle_call({fold, Limiter, FoldObjectsFun, InitAcc, Elements}, _From, State) ->
+handle_call({fold, Limiter, FoldObjectsFun, InitAcc, Elements}, 
+                                                            _From, State) ->
     ok = maybe_flush_puts(State#state.key_store, 
                             State#state.objectspecs_queue,
                             State#state.parallel_keystore),
@@ -501,7 +509,29 @@ handle_call({fold, Limiter, FoldObjectsFun, InitAcc, Elements}, _From, State) ->
                                 FoldObjectsFun, 
                                 InitAcc,
                                 Elements),
-    {reply, R, State}.
+    {reply, R, State};
+handle_call({fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PreflFun},
+                                                            _From, State) ->
+    FoldObjFun = 
+        fun(B, K, {PL, VC}, Acc) ->
+            case lists:member(PL, IndexNs) of   
+                true ->
+                    [{B, K, VC}|Acc];
+                false ->
+                    Acc 
+            end 
+        end,
+    ok = maybe_flush_puts(State#state.key_store, 
+                            State#state.objectspecs_queue,
+                            State#state.parallel_keystore),
+    {async, Folder} = 
+        aae_keystore:store_fold(State#state.key_store, 
+                                {segments, SegmentIDs}, 
+                                FoldObjFun, 
+                                [],
+                                [{preflist, PreflFun}, {clock, null}]),
+    aae_runner:runner_clockfold(State#state.runner, Folder, ReturnFun),
+    {reply, ok, State}.
 
 handle_cast({put, IndexN, Bucket, Key, Clock, PrevClock, BinaryObj}, State) ->
     % Setup
@@ -596,27 +626,6 @@ handle_cast({fetch_branches, IndexNs, BranchIDs, ReturnFun}, State) ->
         end,
     Result = lists:map(FetchBranchFun, IndexNs),
     ReturnFun(Result),
-    {noreply, State};
-handle_cast({fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PreflFun}, State) ->
-    FoldObjFun = 
-        fun(B, K, {PL, VC}, Acc) ->
-            case lists:member(PL, IndexNs) of   
-                true ->
-                    [{B, K, VC}|Acc];
-                false ->
-                    Acc 
-            end 
-        end,
-    ok = maybe_flush_puts(State#state.key_store, 
-                            State#state.objectspecs_queue,
-                            State#state.parallel_keystore),
-    {async, Folder} = 
-        aae_keystore:store_fold(State#state.key_store, 
-                                {segments, SegmentIDs}, 
-                                FoldObjFun, 
-                                [],
-                                [{preflist, PreflFun}, {clock, null}]),
-    aae_runner:runner_clockfold(State#state.runner, Folder, ReturnFun),
     {noreply, State}.
 
 
