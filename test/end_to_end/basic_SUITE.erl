@@ -646,7 +646,8 @@ mock_vnode_coveragefolder(Type, InitialKeyCount) ->
 
     % Fold over a valid coverage plan to find siblings (there are none) 
     SibCountFoldFun =
-        fun(B, K, {SC}, {NoSibAcc, SibAcc}) ->
+        fun(B, K, V, {NoSibAcc, SibAcc}) ->
+            {sibcount, SC} = lists:keyfind(sibcount, 1, V),
             case SC of 
                 1 -> {NoSibAcc + 1, SibAcc};
                 _ -> {NoSibAcc, [{B, K}|SibAcc]}
@@ -683,7 +684,9 @@ mock_vnode_coveragefolder(Type, InitialKeyCount) ->
     % A fold over two coverage plans to compare the list of {B, K, H, Sz} 
     % tuples found within the coverage plans
     HashSizeFoldFun =
-        fun(B, K, {H, Sz}, Acc) ->
+        fun(B, K, V, Acc) ->
+            {hash, H} = lists:keyfind(hash, 1, V),
+            {size, Sz} = lists:keyfind(size, 1, V),
             [{B, K, H, Sz}|Acc]
         end,
 

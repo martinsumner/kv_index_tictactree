@@ -21,6 +21,8 @@
             cache_alter/4,
             cache_root/1,
             cache_leaves/2,
+            cache_markdirtysegments/3,
+            cache_replacedirtysegments/3,
             cache_destroy/1,
             cache_startload/1,
             cache_completeload/2,
@@ -38,6 +40,8 @@
                 root_path :: list()|undefined,
                 partition_id :: integer()|undefined,
                 loading = false :: boolean(),
+                dirty_segments = [] :: list(),
+                active_fold :: string()|undefined,
                 change_queue = [] :: list()}).
 
 -type partition_id() :: integer()|{integer(), integer()}.
@@ -96,6 +100,30 @@ cache_root(Pid) ->
 %% Fetch the root of the cache tree to compare
 cache_leaves(Pid, BranchIDs) -> 
     gen_server:call(Pid, {fetch_leaves, BranchIDs}, infinity).
+
+-spec cache_markdirtysegments(pid(), list(integer()), string()) -> ok.
+%% @doc
+%% Mark dirty segments.  These segments are currently subject to a fetch_clocks
+%% fold.  If they aren't touched until the fold is complete, the segment can be
+%% safely replaced with the value in the fold.
+%%
+%% The FoldGUID is used to identify the request that prompted the marking.  
+%% This becomes the active_fold, replacing any previous marking.  Dirty 
+%% segments can only be replaced by the last active fold.  Need to avoid race
+%% conditions between multiple dirtysegment markings (as well as updates 
+%% clearing dirty segments)
+cache_markdirtysegments(Pid, SegmentIDs, FoldGUID) ->
+    gen_server:cast(Pid, {mark_dirtysegments, SegmentIDs, FoldGUID}).
+
+-spec cache_replacedirtysegments(pid(), 
+                                    list({integer(), integer()}), 
+                                    string()) -> ok.
+%% @doc
+%% When a fold_clocks is complete, replace any dirty_segments which remain 
+%% clean from other interventions
+cache_replacedirtysegments(Pid, ReplacementSegments, FoldGUID) ->
+    gen_server:cast(Pid, 
+                    {replace_dirtysegments, ReplacementSegments, FoldGUID}).
 
 -spec cache_startload(pid()) -> ok.
 %% @doc
@@ -162,11 +190,11 @@ handle_call(close, _From, State) ->
     {stop, normal, ok, State}.
 
 handle_cast({alter, Key, CurrentHash, OldHash}, State) ->
-    Tree0 = 
-        leveled_tictac:add_kv(State#state.tree, 
-                                Key, 
-                                {CurrentHash, OldHash}, 
-                                fun binary_extractfun/2),
+    {Tree0, Segment} = leveled_tictac:add_kv(State#state.tree, 
+                                                Key, 
+                                                {CurrentHash, OldHash}, 
+                                                fun binary_extractfun/2,
+                                                true),
     State0 = 
         case State#state.loading of 
             true ->
@@ -175,10 +203,17 @@ handle_cast({alter, Key, CurrentHash, OldHash}, State) ->
             false ->
                 State 
         end,
-    {noreply, State0#state{tree = Tree0}};
+    case State#state.dirty_segments of
+        [] ->
+            {noreply, State0#state{tree = Tree0}};
+        DirtyList ->
+            DirtyList0 = lists:delete(Segment, DirtyList),
+            {noreply, State0#state{tree = Tree0, dirty_segments = DirtyList0}}
+    end;
 handle_cast(start_load, State=#state{loading=Loading}) 
                                                     when Loading == false ->
-    {noreply, State#state{loading = true, change_queue = []}};
+    {noreply, 
+        State#state{loading = true, change_queue = [], dirty_segments = []}};
 handle_cast({complete_load, Tree}, State=#state{loading=Loading}) 
                                                     when Loading == true ->
     LoadFun = 
@@ -191,6 +226,38 @@ handle_cast({complete_load, Tree}, State=#state{loading=Loading})
     Tree0 = 
         lists:foldl(LoadFun, Tree, lists:reverse(State#state.change_queue)),
     {noreply, State#state{loading = false, change_queue = [], tree = Tree0}};
+handle_cast({mark_dirtysegments, SegmentList, FoldGUID}, State) ->
+    case State#state.loading of 
+        true ->
+            % don't mess about with dirty segments, loading anyway
+            {noreply, State};
+        false ->
+            {noreply, State#state{dirty_segments = SegmentList, 
+                                    active_fold = FoldGUID}}
+    end;
+handle_cast({replace_dirtysegments, SegmentMap, FoldGUID}, State) ->
+    ChangeSegmentFoldFun =
+        fun({SegID, NewHash}, TreeAcc) ->
+            case lists:member(SegID, State#state.dirty_segments) of 
+                true ->
+                    aae_util:log("C0006", 
+                                    [State#state.partition_id, SegID, NewHash],
+                                    logs()),
+                    leveled_tictac:alter_segment(SegID, NewHash, TreeAcc);
+                false ->
+                    TreeAcc
+            end
+        end,
+    case State#state.active_fold of 
+        FoldGUID ->
+            UpdTree = 
+                lists:foldl(ChangeSegmentFoldFun, 
+                            State#state.tree, 
+                            SegmentMap),
+            {noreply, State#state{tree = UpdTree}};
+        _ ->
+            {noreply, State}
+    end;
 handle_cast(destroy, State) ->
     aae_util:log("C0004", [State#state.partition_id], logs()),
     {stop, normal, State}.
@@ -325,7 +392,8 @@ logs() ->
         {"C0002", {warn, "CRC wonky in file ~w"}},
         {"C0003", {info, "Saving tree cache to path ~s and filename ~s"}},
         {"C0004", {info, "Destroying tree cache for partition ~w"}},
-        {"C0005", {info, "Starting cache with is_restored=~w and IndexN of ~w"}}].
+        {"C0005", {info, "Starting cache with is_restored=~w and IndexN of ~w"}},
+        {"C0006", {debug, "Altering segment for PartitionID=~w ID=~w Hash=~w"}}].
 
 %%%============================================================================
 %%% Test
@@ -492,6 +560,95 @@ replace_test() ->
 
 
     ok = cache_destroy(AAECache0).
+
+
+dirty_segment_test() ->
+    % Segments based on
+    GetSegFun = 
+        fun(BinaryKey) ->
+            SegmentID = leveled_tictac:keyto_segment48(BinaryKey),
+            aae_keystore:generate_treesegment(SegmentID)
+        end,
+    % Have clashes with keys of integer_to_binary/1 and integers - 
+    % [4241217,2576207,2363385]
+    RootPath = "test/dirtysegment/",
+    PartitionID = 99,
+    aae_util:clean_subdir(RootPath ++ "/" ++ integer_to_list(PartitionID)),
+
+    {ok, AAECache0} = cache_new(RootPath, PartitionID),
+    AddFun = 
+        fun(I) ->
+            K = integer_to_binary(I),
+            H = erlang:phash2(leveled_rand:uniform(100000)),
+            cache_alter(AAECache0, K, H, 0)
+        end,
+
+    lists:foreach(AddFun, lists:seq(2350000, 2380000)),
+
+    K0 = integer_to_binary(2363385),
+    K1 = integer_to_binary(2576207),
+    K2 = integer_to_binary(4241217),
+    S0 = GetSegFun(K0),
+    S1 = GetSegFun(K1),
+    S2 = GetSegFun(K2),
+    ?assertMatch(true, S0 == S1),
+    ?assertMatch(true, S0 == S2),
+    BranchID = S0 bsr 8,
+    LeafID = S0 band 255,
+    
+    Leaf0 = get_leaf(AAECache0, BranchID, LeafID),
+
+    ?assertMatch(false, Leaf0 == 0),
+
+    H1 = erlang:phash2(leveled_rand:uniform(100000)),
+    H2 = erlang:phash2(leveled_rand:uniform(100000)),
+    {_HK1, TTH1} = leveled_tictac:tictac_hash(K1, {is_hash, H1}),
+    {_HK2, TTH2} = leveled_tictac:tictac_hash(K2, {is_hash, H2}),
+
+    cache_alter(AAECache0, K1, H1, 0),
+
+    Leaf1 = get_leaf(AAECache0, BranchID, LeafID),
+    ?assertMatch(Leaf1, Leaf0 bxor TTH1),
+
+    GUID0 = leveled_util:generate_uuid(),
+    NOTGUID = "NOT GUID",
+    
+    cache_markdirtysegments(AAECache0, [S0], GUID0),
+    % Replace with wrong GUID ignored
+    cache_replacedirtysegments(AAECache0, [{S0, Leaf0}], NOTGUID),
+    ?assertMatch(Leaf1, get_leaf(AAECache0, BranchID, LeafID)),
+
+    % Replace with right GUID succeeds
+    cache_replacedirtysegments(AAECache0, [{S0, Leaf0}], GUID0),
+    ?assertMatch(Leaf0, get_leaf(AAECache0, BranchID, LeafID)),
+
+    GUID1 = leveled_util:generate_uuid(),
+    cache_markdirtysegments(AAECache0, [S0], GUID1),
+    cache_alter(AAECache0, K2, H2, 0),
+    Leaf2 = get_leaf(AAECache0, BranchID, LeafID),
+    ?assertMatch(Leaf2, Leaf0 bxor TTH2),
+    cache_replacedirtysegments(AAECache0, [{S0, Leaf0}], GUID1),
+    % Replace has been ignored due to update - so still Leaf2
+    ?assertMatch(Leaf2, get_leaf(AAECache0, BranchID, LeafID)),
+
+    GUID2 = leveled_util:generate_uuid(),
+    cache_markdirtysegments(AAECache0, [S0], GUID2),
+    cache_startload(AAECache0),
+    cache_replacedirtysegments(AAECache0, [{S0, Leaf0}], GUID2),
+    % Replace has been ignored due to load - so still Leaf2
+    ?assertMatch(Leaf2, get_leaf(AAECache0, BranchID, LeafID)),
+
+
+    ok = cache_destroy(AAECache0).
+
+
+
+get_leaf(AAECache0, BranchID, LeafID) ->
+    [{BranchID, LeafBin}] = cache_leaves(AAECache0, [BranchID]),
+    LeafStartPos = LeafID * 4,
+    <<_Pre:LeafStartPos/binary, Leaf:32/integer, _Rest/binary>> = LeafBin,
+    Leaf.
+
 
 
 coverage_cheat_test() ->
