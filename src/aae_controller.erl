@@ -837,12 +837,13 @@ handle_unexpected_key(Bucket, Key, IndexN, TreeCaches) ->
                                                     -> {integer(), integer()}.
 %% @doc
 %% Has the version vectors 
-hash_clocks(none, PrevVV) ->
-    {0, erlang:phash2(PrevVV)};
-hash_clocks(CurrentVV, none) ->
-    {erlang:phash2(CurrentVV), 0};
 hash_clocks(CurrentVV, PrevVV) ->
-    {erlang:phash2(CurrentVV), erlang:phash2(PrevVV)}.
+    {hash_clock(CurrentVV), hash_clock(PrevVV)}.
+
+hash_clock(none) ->
+    0;
+hash_clock(Clock) ->
+    erlang:phash2(Clock).
 
 %%%============================================================================
 %%% log definitions
