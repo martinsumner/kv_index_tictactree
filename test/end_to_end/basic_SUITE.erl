@@ -314,6 +314,8 @@ mock_vnode_loadexchangeandrebuild(_Config) ->
         lists:sublist(ObjList, 500, 10) ++ 
         lists:sublist(ObjList, 600, 10),
 
+    RehashList = lists:sublist(ObjList, 700, 10),
+
     PutFun = 
         fun(Store1, Store2) ->
             fun(Object) ->
@@ -331,6 +333,20 @@ mock_vnode_loadexchangeandrebuild(_Config) ->
                                                         Object#r_object.bucket,
                                                         Object#r_object.key,
                                                         PL)
+                    end,
+                    Stores)
+            end
+        end,
+    RehashFun =
+        fun(Stores) ->
+            fun(Object) ->
+                PL = PreflistFun(null, Object#r_object.key),
+                lists:foreach(
+                    fun(Store) -> 
+                        mock_kv_vnode:rehash(Store, 
+                                                Object#r_object.bucket,
+                                                Object#r_object.key,
+                                                PL)
                     end,
                     Stores)
             end
@@ -357,6 +373,18 @@ mock_vnode_loadexchangeandrebuild(_Config) ->
     io:format("Exchange id ~s~n", [GUID1]),
     {ExchangeState1, 0} = start_receiver(),
     true = ExchangeState1 == root_compare,
+
+    % Rehash some entries and confirm root_compare still matches, as 
+    % rehash doesn't do anything
+    ok = lists:foreach(RehashFun([VNN, VNP]), RehashList),
+    {ok, _P1a, GUID1a} = 
+        aae_exchange:start([{exchange_vnodesendfun(VNN), IndexNs}],
+                                [{exchange_vnodesendfun(VNP), IndexNs}],
+                                RepairFun,
+                                ReturnFun),
+    io:format("Exchange id ~s~n", [GUID1a]),
+    {ExchangeState1a, 0} = start_receiver(),
+    true = ExchangeState1a == root_compare,
 
     % Make change to one vnode only (the parallel one)
     Idx1 = erlang:phash2(RogueObj1#r_object.key) rem length(IndexNs),
@@ -618,7 +646,8 @@ mock_vnode_coveragefolder(Type, InitialKeyCount) ->
 
     % Fold over a valid coverage plan to find siblings (there are none) 
     SibCountFoldFun =
-        fun(B, K, {SC}, {NoSibAcc, SibAcc}) ->
+        fun(B, K, V, {NoSibAcc, SibAcc}) ->
+            {sibcount, SC} = lists:keyfind(sibcount, 1, V),
             case SC of 
                 1 -> {NoSibAcc + 1, SibAcc};
                 _ -> {NoSibAcc, [{B, K}|SibAcc]}
@@ -655,7 +684,9 @@ mock_vnode_coveragefolder(Type, InitialKeyCount) ->
     % A fold over two coverage plans to compare the list of {B, K, H, Sz} 
     % tuples found within the coverage plans
     HashSizeFoldFun =
-        fun(B, K, {H, Sz}, Acc) ->
+        fun(B, K, V, Acc) ->
+            {hash, H} = lists:keyfind(hash, 1, V),
+            {size, Sz} = lists:keyfind(size, 1, V),
             [{B, K, H, Sz}|Acc]
         end,
 

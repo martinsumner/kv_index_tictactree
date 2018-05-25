@@ -15,7 +15,7 @@
             code_change/3]).
 
 -export([runner_start/0, 
-            runner_clockfold/3,
+            runner_clockfold/4,
             runner_stop/1]).
 
 -include_lib("eunit/include/eunit.hrl").
@@ -38,8 +38,8 @@ runner_start() ->
 
 %% @doc
 %% Pass some work to a runner
-runner_clockfold(Runner, Folder, ReturnFun) ->
-    gen_server:cast(Runner, {work, Folder, ReturnFun}).
+runner_clockfold(Runner, Folder, ReturnFun, SizeFun) ->
+    gen_server:cast(Runner, {work, Folder, ReturnFun, SizeFun}).
 %% @doc
 %% Close the runner
 runner_stop(Runner) ->
@@ -55,11 +55,11 @@ init([]) ->
 handle_call(close, _From, State) ->
     {stop, normal, ok, State}.
 
-handle_cast({work, Folder, ReturnFun}, State) ->
+handle_cast({work, Folder, ReturnFun, SizeFun}, State) ->
     SW = os:timestamp(),
     Results = Folder(),
 
-    RS0 = State#state.result_size + length(Results),
+    RS0 = State#state.result_size + SizeFun(Results),
     QT0 = State#state.query_time + timer:now_diff(os:timestamp(), SW),
     QC0 = State#state.query_count + 1,
     {RS1, QT1, QC1} = maybe_log(RS0, QT0, QC0, ?LOG_FREQUENCY),

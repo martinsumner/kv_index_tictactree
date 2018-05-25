@@ -72,6 +72,8 @@
                     object_splitfun,
                     root_path :: list()}).
 
+-type controller_state() :: #state{}.
+
 -type responsible_preflist() :: {integer(), integer()}. 
         % The responsible preflist is a reference to the partition associated 
         % with an AAE requirement.  The preflist is a reference to the id of 
@@ -240,8 +242,15 @@ aae_mergebranches(Pid, IndexNs, BranchIDs, ReturnFun) ->
 %% Fetch all the keys and clocks but use the passed in 2-arity function to 
 %% determine the IndexN of the object, by applying the function to the bucket
 %% and key
+%%
+%% This is a call, to allow for rehahsing of any trees as part of the fetch
+%% operation.  If no rebuild is running, then as well as fetching the clocks
+%% new segment values can be calculated, replacing the old segment values.
+%% By making this a call, the snapshot for the fold is made before any new 
+%% PUTs are received by the vnode - so we know any subseqent changes are not
+%% included in the fold result. 
 aae_fetchclocks(Pid, IndexNs, SegmentIDs, ReturnFun, PrefLFun) ->
-    gen_server:cast(Pid, 
+    gen_server:call(Pid, 
                     {fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PrefLFun}).
 
 -spec aae_fold(pid(), aae_keystore:fold_limiter(), fun(), any(), 
@@ -410,15 +419,7 @@ handle_call({rebuild_trees, IndexNs, PreflistFun, WorkerFun}, _From, State) ->
     % having changed since the last call to start or rebuild the cache trees
     SetupCacheFun = 
         fun(IndexN, TreeCachesAcc) ->
-            TreeCache1 = 
-                case lists:keyfind(IndexN, 1, State#state.tree_caches) of 
-                    {IndexN, TreeCache0} ->
-                        TreeCache0;
-                    false ->
-                        aae_util:log("AAE09", [IndexN], logs()),
-                        {true, NC} = cache(new, IndexN, State#state.root_path),
-                        NC
-                end,
+            TreeCache1 = get_treecache(IndexN, State),
             ok = aae_treecache:cache_startload(TreeCache1),
             [{IndexN, TreeCache1}|TreeCachesAcc]
         end,
@@ -492,7 +493,8 @@ handle_call({rebuild_store, SplitObjFun}, _From, State)->
                                             rebuild_complete),
             {reply, ok, State}
     end;
-handle_call({fold, Limiter, FoldObjectsFun, InitAcc, Elements}, _From, State) ->
+handle_call({fold, Limiter, FoldObjectsFun, InitAcc, Elements}, 
+                                                            _From, State) ->
     ok = maybe_flush_puts(State#state.key_store, 
                             State#state.objectspecs_queue,
                             State#state.parallel_keystore),
@@ -501,7 +503,80 @@ handle_call({fold, Limiter, FoldObjectsFun, InitAcc, Elements}, _From, State) ->
                                 FoldObjectsFun, 
                                 InitAcc,
                                 Elements),
-    {reply, R, State}.
+    {reply, R, State};
+handle_call({fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PreflFun},
+                                                            _From, State) ->
+    
+    SegmentMap = lists:map(fun(S) -> {S, 0} end, SegmentIDs),
+    InitMap = 
+        lists:map(fun(IdxN) -> 
+                        {IdxN, get_treecache(IdxN, State), SegmentMap} 
+                    end, 
+                    IndexNs),
+
+    GUID = leveled_util:generate_uuid(),
+    lists:foreach(fun({_IndexN, Tree, _SegMap}) -> 
+                        ok = aae_treecache:cache_markdirtysegments(Tree, 
+                                                                    SegmentIDs,
+                                                                    GUID)
+                    end,
+                    InitMap),
+    
+    FoldObjFun = 
+        fun(B, K, V, {Acc, SubTreeAcc}) ->
+            {preflist, PL} = lists:keyfind(preflist, 1, V),
+            case lists:member(PL, IndexNs) of   
+                true ->
+                    {clock, VC} = lists:keyfind(clock, 1, V),
+                    {aae_segment, SegID} = lists:keyfind(aae_segment, 1, V),
+                    {hash, H} = lists:keyfind(hash, 1, V),
+                    {PL, T, SegMap} = lists:keyfind(PL, 1, SubTreeAcc),
+                    {SegID, HashAcc} = lists:keyfind(SegID, 1, SegMap),
+                    BinK = aae_util:make_binarykey(B, K),
+                    {_, HashToAdd} = 
+                        leveled_tictac:tictac_hash(BinK, {is_hash, H}),
+                    UpdHash = HashAcc bxor HashToAdd,
+                    SegMap0 = 
+                        lists:keyreplace(SegID, 1, SegMap, {SegID, UpdHash}),
+                    SubTreeAcc0 = lists:keyreplace(PL, 1, SubTreeAcc, 
+                                                    {PL, T, SegMap0}),
+                    {[{B, K, VC}|Acc], SubTreeAcc0};
+                false ->
+                    {Acc, SubTreeAcc} 
+            end 
+        end,
+    
+    ReturnFun0 = 
+        fun({KeyClockList, SubTree}) ->
+            ReturnFun(KeyClockList),
+            ReplaceFun = 
+                fun({_IdxN, T, SegM}) ->
+                    aae_treecache:cache_replacedirtysegments(T, SegM, GUID)
+                end,
+            lists:foreach(ReplaceFun, SubTree)
+        end,
+    SizeFun =
+        fun({KeyClockList, _SubTree}) ->
+            length(KeyClockList)
+        end,
+
+    ok = maybe_flush_puts(State#state.key_store, 
+                            State#state.objectspecs_queue,
+                            State#state.parallel_keystore),
+    {async, Folder} = 
+        aae_keystore:store_fold(State#state.key_store, 
+                                {segments, SegmentIDs}, 
+                                FoldObjFun, 
+                                {[], InitMap},
+                                [{preflist, PreflFun}, 
+                                    {clock, null},
+                                    {aae_segment, null},
+                                    {hash, null}]),
+    aae_runner:runner_clockfold(State#state.runner, 
+                                Folder, 
+                                ReturnFun0, 
+                                SizeFun),
+    {reply, ok, State}.
 
 handle_cast({put, IndexN, Bucket, Key, Clock, PrevClock, BinaryObj}, State) ->
     % Setup
@@ -510,8 +585,13 @@ handle_cast({put, IndexN, Bucket, Key, Clock, PrevClock, BinaryObj}, State) ->
     PrevClock0 = 
         case PrevClock of 
             undefined ->
-                % Should never be native
-                resolve_clock(Bucket, Key, State#state.key_store);
+                case State#state.parallel_keystore of 
+                    true ->
+                        resolve_clock(Bucket, Key, State#state.key_store);
+                    false ->
+                        % An inert change will be generated
+                        Clock
+                end;
             _ ->
                 PrevClock
         end,
@@ -591,27 +671,6 @@ handle_cast({fetch_branches, IndexNs, BranchIDs, ReturnFun}, State) ->
         end,
     Result = lists:map(FetchBranchFun, IndexNs),
     ReturnFun(Result),
-    {noreply, State};
-handle_cast({fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PreflFun}, State) ->
-    FoldObjFun = 
-        fun(B, K, {PL, VC}, Acc) ->
-            case lists:member(PL, IndexNs) of   
-                true ->
-                    [{B, K, VC}|Acc];
-                false ->
-                    Acc 
-            end 
-        end,
-    ok = maybe_flush_puts(State#state.key_store, 
-                            State#state.objectspecs_queue,
-                            State#state.parallel_keystore),
-    {async, Folder} = 
-        aae_keystore:store_fold(State#state.key_store, 
-                                {segments, SegmentIDs}, 
-                                FoldObjFun, 
-                                [],
-                                [{preflist, PreflFun}, {clock, null}]),
-    aae_runner:runner_clockfold(State#state.runner, Folder, ReturnFun),
     {noreply, State}.
 
 
@@ -641,7 +700,9 @@ foldobjects_buildtrees(IndexNs) ->
     InitAcc = lists:map(InitMapFun, IndexNs),
     
     FoldObjectsFun = 
-        fun(B, K, {IndexN, Hash}, Acc) ->
+        fun(B, K, V, Acc) ->
+            {preflist, IndexN} = lists:keyfind(preflist, 1, V),
+            {hash, Hash} = lists:keyfind(hash, 1, V),
             BinK = aae_util:make_binarykey(B, K),
             BinExtractFun = 
                 fun(_BK, _V) -> 
@@ -671,6 +732,21 @@ foldobjects_buildtrees(IndexNs) ->
 %%%============================================================================
 %%% Internal functions
 %%%============================================================================
+
+
+-spec get_treecache(responsible_preflist(), controller_state()) -> pid().
+%% @doc
+%% Fetch the tree cache from state, creating a new tree cache if it isn't 
+%% present
+get_treecache(IndexN, State)->
+    case lists:keyfind(IndexN, 1, State#state.tree_caches) of 
+        {IndexN, TreeCache0} ->
+            TreeCache0;
+        false ->
+            aae_util:log("AAE09", [IndexN], logs()),
+            {true, NC} = cache(new, IndexN, State#state.root_path),
+            NC
+    end.
 
 -spec resolve_clock(binary(), binary(), pid()) -> version_vector().
 %% @doc
@@ -1087,6 +1163,7 @@ varyindexn_cache_rebuild_tester(StoreType) ->
 
     ok = aae_close(Cntrl0, "0000"),
     aae_util:clean_subdir(RootPath).
+
 
 coverage_cheat_test() ->
     {noreply, _State0} = handle_info(timeout, #state{}),

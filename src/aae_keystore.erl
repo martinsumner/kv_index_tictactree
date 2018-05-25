@@ -330,7 +330,25 @@ parallel(startup_metadata, _From, State) ->
         State#state{shutdown_guid = none}}.
 
 native({fold, Limiter, FoldObjectsFun, InitAcc, Elements}, _From, State) ->
-    FoldElementsFun = fold_elements_fun(FoldObjectsFun, Elements, native),
+    FoldElementsFun = 
+        case Limiter of 
+            {segments, SegList} ->
+                Elements0 = lists:ukeysort(1, [{aae_segment, null}|Elements]),
+                FoldObjectsFun0 =
+                    fun(B, K, V, Acc) ->
+                        {aae_segment, SegID} = 
+                            lists:keyfind(aae_segment, 1, V),
+                        case lists:member(SegID, SegList) of
+                            true ->
+                                FoldObjectsFun(B, K, V, Acc);
+                            false ->
+                                Acc
+                        end
+                    end,
+                fold_elements_fun(FoldObjectsFun0, Elements0, native);
+            _ ->
+                fold_elements_fun(FoldObjectsFun, Elements, native)
+        end,
     Result = do_fold(State#state.store_type, State#state.store,
                         Limiter, FoldElementsFun, InitAcc),
     {reply, Result, native, State};
@@ -525,6 +543,10 @@ value(native, {size, _F}, {_B, _K, V}) ->
     element(2, summary_from_native(V));
 value(native, {sibcount, _F}, {_B, _K, V}) ->
     element(3, summary_from_native(V));
+value(native, {aae_segment, null}, {B, K, _V}) ->
+    BinaryKey = aae_util:make_binarykey(B, K),
+    SegmentID = leveled_tictac:keyto_segment48(BinaryKey),
+    aae_keystore:generate_treesegment(SegmentID);
 value(native, {_NotExposed, F}, {B, K, _V}) ->
     % preflist, aae_segment, index_hash
     F(B, K).
@@ -561,17 +583,17 @@ summary_from_native(ObjBin, ObjSize) ->
 -spec fold_elements_fun(fun(), list(value_element()), native|parallel) 
                                                                     -> fun().
 %% @doc
-%% Add a filter to the Fold Objects Fun so that the passe din fun sees a tuple
+%% Add a filter to the Fold Objects Fun so that the passed in fun sees a tuple
 %% whose elements are the requested elements passed in, rather than the actual
 %% value
 fold_elements_fun(FoldObjectsFun, Elements, StoreType) ->
     fun(B, K, V, Acc) ->
         ValueMapFun =
-            fun(E) ->
-                value(StoreType, E, {B, K, V})
+            fun({E, F}) ->
+                {E, value(StoreType, {E, F}, {B, K, V})}
             end,
         ElementValues = lists:map(ValueMapFun, Elements),
-        FoldObjectsFun(B, K, list_to_tuple(ElementValues), Acc)
+        FoldObjectsFun(B, K, ElementValues, Acc)
     end.
 
 -spec is_empty(parallel_stores(), pid()) -> boolean().
@@ -664,7 +686,7 @@ dedup_map(leveled_ko, ObjectSpecs) ->
 -spec do_fetchclock(parallel_stores(), pid(), binary(), binary()) 
                                             -> aae_controller:version_vector().
 %% @doc
-%% Fetch an indicvidual clokc for an individual key.  This will be done by 
+%% Fetch an indicvidual clock for an individual key.  This will be done by 
 %% direct fetch for key-ordered backends, and by fold for segment_ordered 
 %% backends
 do_fetchclock(leveled_so, Store, Bucket, Key) ->
@@ -739,22 +761,10 @@ do_fold(leveled_ko, Store, {segments, SegList}, FoldObjectsFun, InitAcc) ->
             false, true, SegList},
     leveled_bookie:book_returnfolder(Store, Query);
 do_fold(leveled_nko, Store, {segments, SegList}, FoldObjectsFun, InitAcc) ->
-    FoldFun = 
-        fun(B, K, V, Acc) ->
-            BinaryKey = aae_util:make_binarykey(B, K),
-            SegmentID = leveled_tictac:keyto_segment48(BinaryKey),
-            SegTree_int = aae_keystore:generate_treesegment(SegmentID),
-            case lists:member(SegTree_int, SegList) of 
-                true ->
-                    FoldObjectsFun(B, K, V, Acc);
-                false ->
-                    Acc 
-            end
-        end,
     Query =
         {foldheads_allkeys, 
             ?RIAK_TAG,
-            {FoldFun, InitAcc},
+            {FoldObjectsFun, InitAcc},
             false, true, SegList},
     leveled_bookie:book_returnfolder(Store, Query);
 do_fold(leveled_so, Store, {buckets, BucketList}, FoldObjectsFun, InitAcc) ->
@@ -1020,8 +1030,9 @@ load_tester(StoreType) ->
     ok = store_mput(Store0, L3),
 
     FoldObjectsFun =
-        fun(B, K, {V}, Acc) ->
-            [{B, K, V}|Acc]
+        fun(B, K, V, Acc) ->
+            {clock, VC} = lists:keyfind(clock, 1, V),
+            [{B, K, VC}|Acc]
         end,
     
     {async, Folder0} = 

@@ -16,9 +16,11 @@
 
     - If the change is a delete the CurrentClock should be none.  
 
-    - If the change is a fresh put, the PreviousClock should be none.
+    - If the change is a fresh put, the PreviousClock should be none (this includes any PUt on the write once path).
 
     - If the change is a LWW PUT in an non-index backend, the PreviousClock should be undefined.
+
+    - If the change is a rehash, then the PreviousClock should be undefined.
 
 - The `aae_controller` receives this update as a cast.  It has two tasks now:
 
