@@ -392,6 +392,9 @@ init([Opts]) ->
 handle_call(rebuild_time, _From, State) ->  
     {reply, State#state.next_rebuild, State};
 handle_call({close, ShutdownGUID}, _From, State) ->
+    ok = maybe_flush_puts(State#state.key_store, 
+                            State#state.objectspecs_queue,
+                            State#state.parallel_keystore),
     ok = aae_keystore:store_close(State#state.key_store, ShutdownGUID),
     CloseTCFun = 
         fun({_IndexN, TreeCache}) ->
@@ -938,6 +941,53 @@ rebuild_onempty_test() ->
     
     ok = aae_close(Cntrl2, "0000"),
     aae_util:clean_subdir(RootPath).
+
+
+shutdown_parallel_test() ->
+    RootPath = "test/shutdownpll/",
+    aae_util:clean_subdir(RootPath),
+    {ok, Cntrl0} = start_wrap({false, "1234"}, RootPath, leveled_so),
+    ok = aae_put(Cntrl0, {1, 3}, <<"B">>, <<"K">>, [{a, 1}], [], <<>>),
+    BinaryKey1 = aae_util:make_binarykey(<<"B">>, <<"K">>),
+    SegmentID1 = 
+        leveled_tictac:get_segment(leveled_tictac:keyto_segment32(BinaryKey1), 
+                                    ?TREE_SIZE),
+    
+    RPid = self(),
+    ReturnFun = fun(R) -> RPid ! {result, R} end,
+    ok = aae_fetchclocks(Cntrl0, [{1, 3}], [SegmentID1], ReturnFun, null),
+    Result0 = start_receiver(),
+    io:format("Result0 of ~w~n", [Result0]),
+    ?assertMatch([{<<"B">>,<<"K">>,[{a,1}]}], Result0),
+    
+    % at this close the PUT has been flushed because of the fold
+    ok = aae_close(Cntrl0, "TEST-1"),
+    {ok, Cntrl1} = start_wrap({true, "TEST-1"}, RootPath, leveled_so),
+    ok = aae_fetchclocks(Cntrl1, [{1, 3}], [SegmentID1], ReturnFun, null),
+    Result1 = start_receiver(),
+    io:format("Result1 of ~w~n", [Result1]),
+    ?assertMatch([{<<"B">>,<<"K">>,[{a,1}]}], Result1),
+
+    ok = aae_put(Cntrl1, {1, 3}, <<"B">>, <<"K0">>, [{b, 1}], [], <<>>),
+    BinaryKey2 = aae_util:make_binarykey(<<"B">>, <<"K0">>),
+    SegmentID2 = 
+        leveled_tictac:get_segment(leveled_tictac:keyto_segment32(BinaryKey2), 
+                                    ?TREE_SIZE),
+
+    % Don't fold - so the PUT must be flushed by the close
+    ok = aae_close(Cntrl1, "TEST-2"),
+    {ok, Cntrl2} = start_wrap({true, "TEST-2"}, RootPath, leveled_so),
+
+    ok = aae_fetchclocks(Cntrl2,[{1, 3}], [SegmentID1, SegmentID2], 
+                            ReturnFun, null),
+    Result2 = start_receiver(),
+    io:format("Result2 of ~w~n", [Result2]),
+    ExpResult2 = [{<<"B">>,<<"K">>,[{a,1}]}, {<<"B">>, <<"K0">>, [{b, 1}]}],
+    ?assertMatch(ExpResult2, lists:usort(Result2)),
+
+    ok = aae_close(Cntrl2, "TEST-3"),
+    aae_util:clean_subdir(RootPath).
+
 
 wrong_indexn_test() ->
     RootPath = "test/emptycntrllr/",
