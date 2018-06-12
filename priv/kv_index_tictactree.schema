@@ -29,7 +29,7 @@
 %% @doc Minimum Rebuild Wait
 %% The minimum number of hours to wait between rebuilds.  Default value is 2 
 %% weeks
-{mapping, "tictac_aae.rebuild_wait", "tictac_aae.rebuild_wait", 
+{mapping, "tictac_aae.rebuild_wait", "tictac_aae.rebuild_wait", [
   {datatype, integer},
   {default, 336}
 ]}.
