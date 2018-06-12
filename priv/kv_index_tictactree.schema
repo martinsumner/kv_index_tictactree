@@ -40,7 +40,7 @@
 %% at the same time, they will actually rebuild randomly between 0 an this 
 %% value (in seconds) after the rebuild time. Default value is 4 days
 {mapping, "tictac_aae.rebuild_delay", "tictac_aae.rebuild_delay", [
-  {datetype, integer},
+  {datatype, integer},
   {default, 345600}
 ]}.
 
