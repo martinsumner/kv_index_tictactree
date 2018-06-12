@@ -3,14 +3,13 @@
 %%%% tictac_aae
 
 %% @doc Enable tictac tree aae
-{mapping, "tictac_aae.active", "tictac_aae.active", [
+{mapping, "tictac_aae.active", "kv_index_tictactree.active", [
   {datatype, {flag, enabled, disabled}},
-  {default, disabled},
-  {commented, disabled}
+  {default, disabled}
 ]}.
 
 %% @doc A path under which aae data files will be stored.
-{mapping, "tictac_aae.data_root", "tictac_aae.data_root", [
+{mapping, "tictac_aae.data_root", "kv_index_tictactree.data_root", [
   {default, "$(platform_data_dir)/tictac_aae"},
   {datatype, directory}
 ]}.
@@ -21,7 +20,7 @@
 %% key store should be kept - leveled_ko (leveled and key-ordered), or 
 %% leveled_so (leveled and segment ordered).
 %% When running in native mode, this setting is ignored
-{mapping, "tictac_aae.parallel_store", "tictac_aae.parallel_store", [
+{mapping, "tictac_aae.parallel_store", "kv_index_tictactree.parallel_store", [
   {datatype, {enum, [leveled_ko, leveled_so]}},
   {default, leveled_so}
 ]}.
@@ -29,7 +28,7 @@
 %% @doc Minimum Rebuild Wait
 %% The minimum number of hours to wait between rebuilds.  Default value is 2 
 %% weeks
-{mapping, "tictac_aae.rebuild_wait", "tictac_aae.rebuild_wait", [
+{mapping, "tictac_aae.rebuild_wait", "kv_index_tictactree.rebuild_wait", [
   {datatype, integer},
   {default, 336}
 ]}.
@@ -39,7 +38,7 @@
 %% next rebuild will be scheduled.  So if all vnodes are scheduled to rebuild 
 %% at the same time, they will actually rebuild randomly between 0 an this 
 %% value (in seconds) after the rebuild time. Default value is 4 days
-{mapping, "tictac_aae.rebuild_delay", "tictac_aae.rebuild_delay", [
+{mapping, "tictac_aae.rebuild_delay", "kv_index_tictactree.rebuild_delay", [
   {datatype, integer},
   {default, 345600}
 ]}.
@@ -49,7 +48,7 @@
 %% allow for fold_heads queries to be run against the parallel store.  
 %% Alternatively, the cost of the paralle key store can be reduced by storing 
 %% only a minimal data set necessary for AAE and monitoring
-{mapping, "tictac_aae.store_heads", "tictac_aae.store_heads", [
+{mapping, "tictac_aae.store_heads", "kv_index_tictactree.store_heads", [
   {datatype, {flag, enabled, disabled}},
   {default, enabled},
   {commented, enabled}
