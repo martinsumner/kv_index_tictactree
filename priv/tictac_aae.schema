@@ -1,6 +1,6 @@
 %% -*- erlang -*-
 
-%%%% kv_index_tictactree
+%%%% tictac_aae
 
 %% @doc Enable tictac tree aae
 {mapping, "tictac_aae.active", "tictac_aae.active", [
