@@ -85,9 +85,10 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
--define(LEVELED_BACKEND_OPTS, [{max_pencillercachesize, 16000},
+-define(LEVELED_BACKEND_OPTS, [{max_pencillercachesize, 32000},
+                                    {cache_size, 4000},
                                     {sync_strategy, none},
-                                    {max_journalsize, 1000000}]).
+                                    {max_journalsize, 100000000}]).
 -define(CHANGEQ_LOGFREQ, 10000).
 -define(STATE_BUCKET, <<"state">>).
 -define(MANIFEST_FN, "keystore"). 
