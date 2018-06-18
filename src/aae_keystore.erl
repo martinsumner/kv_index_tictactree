@@ -70,7 +70,8 @@
                 load_store :: pid()|undefined,
                 load_guid :: list()|undefined,
                 backend_opts = [] :: list(),
-                shutdown_guid = none :: list()|none}).
+                shutdown_guid = none :: list()|none,
+                trim_count = 0 :: integer()}).
 
 -record(manifest, {current_guid :: list()|undefined, 
                     pending_guid :: list()|undefined, 
@@ -98,6 +99,7 @@
 -define(PENDING_EXT, ".pnd").
     % file extension to be used once manifest write is pending
 -define(VALUE_VERSION, 1).
+-define(MAYBE_TRIM, 1000).
 
 -type parallel_stores() :: leveled_so|leveled_ko. 
     % Stores supported for parallel running
@@ -413,7 +415,9 @@ loading({prompt, rebuild_complete}, State) ->
 
 parallel({mput, ObjectSpecs}, State) ->
     ok = do_load(State#state.store_type, State#state.store, ObjectSpecs),
-    {next_state, parallel, State};
+    TrimCount = State#state.trim_count + 1,
+    ok = maybe_trim(State#state.store_type, TrimCount, State#state.store),
+    {next_state, parallel, State#state{trim_count = TrimCount}};
 parallel({prompt, rebuild_start}, State) ->
     GUID = leveled_util:generate_uuid(),
     aae_util:log("KS007", [rebuild_start, GUID], logs()),
@@ -580,6 +584,23 @@ summary_from_native(ObjBin, ObjSize) ->
 %%%============================================================================
 %%% Store functions
 %%%============================================================================
+
+-spec maybe_trim(parallel_stores(), integer(), pid()) -> ok.
+%% @doc
+%% Every Trim count, trim the store
+maybe_trim(StoreType, TrimCount, Store) ->
+    case TrimCount rem ?MAYBE_TRIM of
+        0 ->
+            case StoreType of
+                leveled_so ->
+                    leveled_bookie:book_trimjournal(Store);
+                leveled_ko ->
+                    leveled_bookie:book_trimjournal(Store)
+            end;
+        _ ->
+            ok
+    end.
+            
 
 -spec fold_elements_fun(fun(), list(value_element()), native|parallel) 
                                                                     -> fun().
