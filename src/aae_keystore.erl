@@ -99,7 +99,7 @@
 -define(PENDING_EXT, ".pnd").
     % file extension to be used once manifest write is pending
 -define(VALUE_VERSION, 1).
--define(MAYBE_TRIM, 1000).
+-define(MAYBE_TRIM, 2000).
 
 -type parallel_stores() :: leveled_so|leveled_ko. 
     % Stores supported for parallel running
