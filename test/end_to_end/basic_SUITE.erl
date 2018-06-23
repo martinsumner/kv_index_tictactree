@@ -17,7 +17,8 @@ all() -> [dual_store_compare_medium_so,
             mock_vnode_loadexchangeandrebuild,
             mock_vnode_coveragefold_nativemedium,
             mock_vnode_coveragefold_nativesmall,
-            mock_vnode_coveragefold_parallelmedium].
+            mock_vnode_coveragefold_parallelmedium
+        ].
 
 -define(ROOT_PATH, "test/").
 
@@ -68,6 +69,7 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
     SplitF = fun(_X) -> {leveled_rand:uniform(1000), 1, 0, null} end,
     RPid = self(),
     ReturnFun = fun(R) -> RPid ! {result, R} end,
+    RepairFun = fun(_KL) -> null end,  
 
     {ok, Cntrl1} = 
         aae_controller:aae_start({parallel, StoreType}, 
@@ -86,23 +88,29 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
     
     SW0 = os:timestamp(),
 
-    BKVList = gen_keys([], InitialKeyCount),
+    BKVListXS = gen_keys([], InitialKeyCount),
+    {BKVList, _Discard} = lists:split(20, BKVListXS),
+        % The first 20 keys discarded to create an overlap between the add
+        % replace list
     ok = put_keys(Cntrl1, 2, BKVList, none),
-    ok = put_keys(Cntrl2, 3, BKVList, none),
+    ok = put_keys(Cntrl2, 3, lists:reverse(BKVList), none),
 
-    % Change some of the keys - cheat by using undefined rather than replace 
+    {BKVListRem, _Ignore} = lists:split(10, BKVList),
+    ok = remove_keys(Cntrl1, 2, BKVListRem),
+    ok = remove_keys(Cntrl2, 3, BKVListRem),
+
+    % Change all of the keys - cheat by using undefined rather than replace 
     % properly
 
-    BKVListR = gen_keys([], InitialKeyCount div 10),
+    BKVListR = gen_keys([], 100),
+        % As 100 > 20 expect 20 of these keys to be new, so no clock will be
+        % returned from fetch_clock, and 80 of these will be updates
     ok = put_keys(Cntrl1, 2, BKVListR, undefined),
     ok = put_keys(Cntrl2, 3, BKVListR, undefined),
     
     io:format("Initial put complete in ~w ms~n", 
                 [timer:now_diff(os:timestamp(), SW0)/1000]),
     SW1 = os:timestamp(),
-
-    % Confirm all partitions are aligned as expected using direct access to 
-    % the controller
 
     ok = aae_controller:aae_mergeroot(Cntrl1, 
                                         [{2, 0}, {2, 1}], 
@@ -138,8 +146,7 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
                 [timer:now_diff(os:timestamp(), SW1)/1000]),
     SW2 = os:timestamp(),
 
-    % Confirm no dependencies when using different matching AAE exchanges
-    RepairFun = fun(_KL) -> null end,  
+    % Confirm no differences when using different matching AAE exchanges
 
     {ok, _P1, GUID1} = 
         aae_exchange:start([{exchange_sendfun(Cntrl1), [{2,0}]}],
@@ -776,7 +783,19 @@ put_keys(Cntrl, Nval, [{Bucket, Key, VersionVector}|Tail], PrevVV) ->
                                 VersionVector, 
                                 PrevVV, 
                                 <<>>),
-    put_keys(Cntrl, Nval, Tail).
+    put_keys(Cntrl, Nval, Tail, PrevVV).
+
+remove_keys(_Cntrl, _Nval, []) ->
+    ok;
+remove_keys(Cntrl, Nval, [{Bucket, Key, _VV}|Tail]) ->
+    ok = aae_controller:aae_put(Cntrl, 
+                                calc_preflist(Key, Nval), 
+                                Bucket, 
+                                Key, 
+                                none, 
+                                undefined, 
+                                <<>>),
+    remove_keys(Cntrl, Nval, Tail).
 
 
 gen_riakobjects(0, ObjectList) ->

@@ -53,6 +53,7 @@
             store_fetchclock/3]).
 
 -export([define_objectspec/5,
+            check_objectspec/3,
             generate_value/5,
             generate_treesegment/1,
             value/3]).
@@ -89,7 +90,8 @@
 -define(LEVELED_BACKEND_OPTS, [{max_pencillercachesize, 32000},
                                     {cache_size, 4000},
                                     {sync_strategy, none},
-                                    {max_journalsize, 100000000}]).
+                                    {max_journalsize, 10000000},
+                                    {compression_method, native}]).
 -define(CHANGEQ_LOGFREQ, 10000).
 -define(STATE_BUCKET, <<"state">>).
 -define(MANIFEST_FN, "keystore"). 
@@ -99,7 +101,7 @@
 -define(PENDING_EXT, ".pnd").
     % file extension to be used once manifest write is pending
 -define(VALUE_VERSION, 1).
--define(MAYBE_TRIM, 2000).
+-define(MAYBE_TRIM, 500).
 
 -type parallel_stores() :: leveled_so|leveled_ko. 
     % Stores supported for parallel running
@@ -483,6 +485,19 @@ define_objectspec(Op, SegTree_int, Bucket, Key, Value) ->
                 bucket = Bucket, 
                 key = Key, 
                 value = Value}.
+
+-spec check_objectspec(binary(), binary(), objectspec()) 
+                                                -> {ok, tuple()|null}|false.
+%% @doc
+%% Check to see if an objetc sspec matches the bucket and key, and if so 
+%% return {ok, Value} (or false if not).
+check_objectspec(Bucket, Key, ObjSpec) ->
+    case {ObjSpec#objectspec.bucket, ObjSpec#objectspec.key} of
+        {Bucket, Key} ->
+            {ok, ObjSpec#objectspec.value};
+        _ ->
+            false
+    end.
 
 
 -spec generate_treesegment(leveled_tictac:segment48()) -> integer().
