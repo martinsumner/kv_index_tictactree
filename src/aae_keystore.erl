@@ -91,7 +91,8 @@
                                     {cache_size, 4000},
                                     {sync_strategy, none},
                                     {max_journalsize, 10000000},
-                                    {compression_method, native}]).
+                                    {compression_method, native},
+                                    {compression_point, on_compact}]).
 -define(CHANGEQ_LOGFREQ, 10000).
 -define(STATE_BUCKET, <<"state">>).
 -define(MANIFEST_FN, "keystore"). 
