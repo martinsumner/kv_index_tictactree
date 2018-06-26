@@ -46,7 +46,7 @@
 -define(STORE_PATH, "keystore/").
 -define(TREE_PATH, "aaetree/").
 -define(MEGA, 1000000).
--define(BATCH_LENGTH, 32).
+-define(BATCH_LENGTH, 128).
 -define(DEFAULT_REBUILD_SCHEDULE, {1, 300}).
 
 
@@ -590,7 +590,9 @@ handle_cast({put, IndexN, Bucket, Key, Clock, PrevClock, BinaryObj}, State) ->
             undefined ->
                 case State#state.parallel_keystore of 
                     true ->
-                        resolve_clock(Bucket, Key, State#state.key_store);
+                        resolve_clock(Bucket, Key, 
+                                        State#state.key_store, 
+                                        State#state.objectspecs_queue);
                     false ->
                         % An inert change will be generated
                         Clock
@@ -610,11 +612,6 @@ handle_cast({put, IndexN, Bucket, Key, Clock, PrevClock, BinaryObj}, State) ->
             % responsible preflists
             handle_unexpected_key(Bucket, Key, IndexN, TreeCaches);
         {IndexN, TreeCache} ->
-            % TODO:
-            % Need to handle a PrevClock of unidentified - in this case there
-            % will need to be a read before write against the Key Store.
-            % Note that this should only occur for LWW with Bitcask (or with 
-            % another Backend with the 2i capability removed)
             ok = aae_treecache:cache_alter(TreeCache, BinaryKey, CH, OH)
     end,
 
@@ -751,13 +748,33 @@ get_treecache(IndexN, State)->
             NC
     end.
 
--spec resolve_clock(binary(), binary(), pid()) -> version_vector().
+-spec resolve_clock(binary(), binary(), pid(), list()) -> version_vector().
 %% @doc
 %% Get the Keystore to return the current clock or none if the key is not 
 %% present
-resolve_clock(Bucket, Key, Store) ->
-    aae_keystore:store_fetchclock(Store, Bucket, Key).
+resolve_clock(Bucket, Key, Store, PutQueue) ->
+    QR = lists:foldl(fun check_queuefun/2, {Bucket, Key, false}, PutQueue),
+    case QR of 
+        {Bucket, Key, false} ->
+            aae_keystore:store_fetchclock(Store, Bucket, Key);
+        {Bucket, Key, Clock} ->
+            Clock
+    end.
 
+check_queuefun(ObjectSpec, {Bucket, Key, false}) ->
+    case aae_keystore:check_objectspec(Bucket, Key, ObjectSpec) of
+        {ok, null} ->
+            {Bucket, Key, none};
+        {ok, Value} ->
+            Clock = aae_keystore:value(parallel, 
+                                        {clock, null}, 
+                                        {Bucket, Key, Value}),
+            {Bucket, Key, Clock};
+        false ->
+            {Bucket, Key, false}
+    end;
+check_queuefun(_ObjectSpec, {Bucket, Key, Value}) ->
+    {Bucket, Key, Value}.
 
 -spec maybe_flush_puts(pid(), list(), boolean()) -> ok.
 %% @doc

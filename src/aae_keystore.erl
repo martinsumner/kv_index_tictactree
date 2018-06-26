@@ -53,6 +53,7 @@
             store_fetchclock/3]).
 
 -export([define_objectspec/5,
+            check_objectspec/3,
             generate_value/5,
             generate_treesegment/1,
             value/3]).
@@ -70,7 +71,8 @@
                 load_store :: pid()|undefined,
                 load_guid :: list()|undefined,
                 backend_opts = [] :: list(),
-                shutdown_guid = none :: list()|none}).
+                shutdown_guid = none :: list()|none,
+                trim_count = 0 :: integer()}).
 
 -record(manifest, {current_guid :: list()|undefined, 
                     pending_guid :: list()|undefined, 
@@ -85,9 +87,12 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
--define(LEVELED_BACKEND_OPTS, [{max_pencillercachesize, 16000},
+-define(LEVELED_BACKEND_OPTS, [{max_pencillercachesize, 32000},
+                                    {cache_size, 4000},
                                     {sync_strategy, none},
-                                    {max_journalsize, 1000000}]).
+                                    {max_journalsize, 10000000},
+                                    {compression_method, native},
+                                    {compression_point, on_compact}]).
 -define(CHANGEQ_LOGFREQ, 10000).
 -define(STATE_BUCKET, <<"state">>).
 -define(MANIFEST_FN, "keystore"). 
@@ -97,6 +102,7 @@
 -define(PENDING_EXT, ".pnd").
     % file extension to be used once manifest write is pending
 -define(VALUE_VERSION, 1).
+-define(MAYBE_TRIM, 500).
 
 -type parallel_stores() :: leveled_so|leveled_ko. 
     % Stores supported for parallel running
@@ -412,7 +418,9 @@ loading({prompt, rebuild_complete}, State) ->
 
 parallel({mput, ObjectSpecs}, State) ->
     ok = do_load(State#state.store_type, State#state.store, ObjectSpecs),
-    {next_state, parallel, State};
+    TrimCount = State#state.trim_count + 1,
+    ok = maybe_trim(State#state.store_type, TrimCount, State#state.store),
+    {next_state, parallel, State#state{trim_count = TrimCount}};
 parallel({prompt, rebuild_start}, State) ->
     GUID = leveled_util:generate_uuid(),
     aae_util:log("KS007", [rebuild_start, GUID], logs()),
@@ -478,6 +486,19 @@ define_objectspec(Op, SegTree_int, Bucket, Key, Value) ->
                 bucket = Bucket, 
                 key = Key, 
                 value = Value}.
+
+-spec check_objectspec(binary(), binary(), objectspec()) 
+                                                -> {ok, tuple()|null}|false.
+%% @doc
+%% Check to see if an objetc sspec matches the bucket and key, and if so 
+%% return {ok, Value} (or false if not).
+check_objectspec(Bucket, Key, ObjSpec) ->
+    case {ObjSpec#objectspec.bucket, ObjSpec#objectspec.key} of
+        {Bucket, Key} ->
+            {ok, ObjSpec#objectspec.value};
+        _ ->
+            false
+    end.
 
 
 -spec generate_treesegment(leveled_tictac:segment48()) -> integer().
@@ -579,6 +600,23 @@ summary_from_native(ObjBin, ObjSize) ->
 %%%============================================================================
 %%% Store functions
 %%%============================================================================
+
+-spec maybe_trim(parallel_stores(), integer(), pid()) -> ok.
+%% @doc
+%% Every Trim count, trim the store
+maybe_trim(StoreType, TrimCount, Store) ->
+    case TrimCount rem ?MAYBE_TRIM of
+        0 ->
+            case StoreType of
+                leveled_so ->
+                    leveled_bookie:book_trimjournal(Store);
+                leveled_ko ->
+                    leveled_bookie:book_trimjournal(Store)
+            end;
+        _ ->
+            ok
+    end.
+            
 
 -spec fold_elements_fun(fun(), list(value_element()), native|parallel) 
                                                                     -> fun().

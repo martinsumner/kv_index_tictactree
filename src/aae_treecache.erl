@@ -368,7 +368,9 @@ binary_extractfun(Key, {CurrentHash, OldHash}) ->
     RemoveH = 
         case {CurrentHash, OldHash} of 
             {0, _} ->
-                % Remove - treat like adding abcking
+                % Remove - treat like adding back in
+                % the tictac will bxor this with the key - so don't need to
+                % bxor this here again
                 OldHash;
             {_, 0} ->
                 % Add 
