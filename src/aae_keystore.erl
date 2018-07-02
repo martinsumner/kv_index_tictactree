@@ -18,7 +18,7 @@
 
 -ifdef(fsm_deprecated).
 -compile({nowarn_deprecated_function, 
-            [{gen_fsm, start, 3},
+            [{gen_fsm, start_link, 3},
                 {gen_fsm, send_event, 2},
                 {gen_fsm, sync_send_event, 2},
                 {gen_fsm, sync_send_event, 3},
@@ -148,14 +148,14 @@ store_parallelstart(Path, leveled_so) ->
         [{root_path, Path}, 
             {native, {false, leveled_so}}, 
             {backend_opts, ?LEVELED_BACKEND_OPTS}],
-    {ok, Pid} = gen_fsm:start(?MODULE, [Opts], []),
+    {ok, Pid} = gen_fsm:start_link(?MODULE, [Opts], []),
     store_startupdata(Pid);
 store_parallelstart(Path, leveled_ko) ->
     Opts = 
         [{root_path, Path}, 
             {native, {false, leveled_ko}}, 
             {backend_opts, ?LEVELED_BACKEND_OPTS}],
-    {ok, Pid} = gen_fsm:start(?MODULE, [Opts], []),
+    {ok, Pid} = gen_fsm:start_link(?MODULE, [Opts], []),
     store_startupdata(Pid).
 
 -spec store_nativestart(list(), native_stores(), pid()) ->
@@ -166,7 +166,7 @@ store_parallelstart(Path, leveled_ko) ->
 store_nativestart(Path, NativeStoreType, BackendPid) ->
     Opts = 
         [{root_path, Path}, {native, {true, NativeStoreType, BackendPid}}],
-    {ok, Pid} = gen_fsm:start(?MODULE, [Opts], []),
+    {ok, Pid} = gen_fsm:start_link(?MODULE, [Opts], []),
     store_startupdata(Pid).
 
 
