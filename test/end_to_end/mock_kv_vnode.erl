@@ -409,7 +409,8 @@ handle_cast({rebuild_complete, store}, State) ->
     ok = aae_controller:aae_rebuildtrees(State#state.aae_controller, 
                                             State#state.index_ns,
                                             State#state.preflist_fun,
-                                            Worker),
+                                            Worker,
+                                            true),
 
     {noreply, State#state{aae_rebuild = true}};
 handle_cast({rebuild_complete, tree}, State) ->
