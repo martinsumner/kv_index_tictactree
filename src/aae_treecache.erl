@@ -16,7 +16,7 @@
             terminate/2,
             code_change/3]).
 
--export([cache_open/2,
+-export([cache_open/3,
             cache_new/2,
             cache_alter/4,
             cache_root/1,
@@ -26,7 +26,7 @@
             cache_destroy/1,
             cache_startload/1,
             cache_completeload/2,
-            cache_close/1]).
+            cache_close/2]).
 
 -include_lib("eunit/include/eunit.hrl").
 
@@ -34,8 +34,7 @@
 -define(FINAL_EXT, ".aae").
 -define(START_SQN, 1).
 
--record(state, {save_sqn = 0 :: integer(),
-                is_restored = false :: boolean(),
+-record(state, {is_restored = false :: boolean(),
                 tree :: leveled_tictac:tictactree()|undefined,
                 root_path :: list()|undefined,
                 partition_id :: integer()|undefined,
@@ -51,13 +50,16 @@
 %%% API
 %%%============================================================================
 
--spec cache_open(list(), partition_id()) -> {boolean(), pid()}.
+-spec cache_open(list(), partition_id(), string()) -> {boolean(), pid()}.
 %% @doc
 %% Open a tree cache, using any previously saved one for this tree cache as a 
 %% starting point.  Return is_empty boolean as true to indicate if a new cache 
 %% was created, as well as the PID of this FSM
-cache_open(RootPath, PartitionID) ->
-    Opts = [{root_path, RootPath}, {partition_id, PartitionID}],
+cache_open(RootPath, PartitionID, ShutdownGUID) ->
+    Opts = [{root_path, RootPath}, 
+            {partition_id, PartitionID}, 
+            {shutdown_guid, ShutdownGUID},
+            {ignore_disk, ShutdownGUID == none}],
     {ok, Pid} = gen_server:start_link(?MODULE, [Opts], []),
     IsRestored = gen_server:call(Pid, is_restored, infinity),
     {IsRestored, Pid}.
@@ -77,11 +79,11 @@ cache_new(RootPath, PartitionID) ->
 cache_destroy(AAECache) ->
     gen_server:cast(AAECache, destroy).
 
--spec cache_close(pid()) -> ok.
+-spec cache_close(pid(), string()) -> ok.
 %% @doc
 %% Close a cache with saving
-cache_close(AAECache) ->
-    gen_server:call(AAECache, close, 30000).
+cache_close(AAECache, ShutdownGUID) ->
+    gen_server:call(AAECache, {close, ShutdownGUID}, 30000).
 
 -spec cache_alter(pid(), binary(), integer(), integer()) -> ok.
 %% @doc
@@ -151,28 +153,26 @@ cache_completeload(Pid, LoadedTree) ->
 init([Opts]) ->
     PartitionID = aae_util:get_opt(partition_id, Opts),
     RootPath = aae_util:get_opt(root_path, Opts),
-    IgnoreDisk = aae_util:get_opt(ignore_disk, Opts, false),
+    ShutdownGUID = aae_util:get_opt(shutdown_guid, Opts),
+    IgnoreDisk = aae_util:get_opt(ignore_disk, Opts),
     RootPath0 = filename:join(RootPath, flatten_id(PartitionID)) ++ "/",
-    {StartTree, SaveSQN, IsRestored} = 
+    {StartTree, IsRestored} = 
         case IgnoreDisk of 
             true ->
-                {leveled_tictac:new_tree(PartitionID, ?TREE_SIZE), 
-                    ?START_SQN, 
+                {leveled_tictac:new_tree(PartitionID, ?TREE_SIZE),
                     false};
             false ->
-                case open_from_disk(RootPath0) of 
-                    {none, SQN} ->
+                case open_from_disk(RootPath0, ShutdownGUID) of 
+                    none ->
                         {leveled_tictac:new_tree(PartitionID, ?TREE_SIZE),
-                            SQN, 
                             false};
-                    {Tree, SQN} ->
-                        {Tree, SQN, true}
+                    Tree ->
+                        {Tree, true}
                 end
         end,
     aae_util:log("C0005", [IsRestored, PartitionID], logs()),
     process_flag(trap_exit, true),
-    {ok, #state{save_sqn = SaveSQN, 
-                tree = StartTree, 
+    {ok, #state{tree = StartTree, 
                 is_restored = IsRestored,
                 root_path = RootPath0,
                 partition_id = PartitionID}}.
@@ -184,9 +184,9 @@ handle_call(fetch_root, _From, State) ->
     {reply, leveled_tictac:fetch_root(State#state.tree), State};
 handle_call({fetch_leaves, BranchIDs}, _From, State) ->
     {reply, leveled_tictac:fetch_leaves(State#state.tree, BranchIDs), State};
-handle_call(close, _From, State) ->
+handle_call({close, ShutdownGUID}, _From, State) ->
     save_to_disk(State#state.root_path, 
-                    State#state.save_sqn, 
+                    ShutdownGUID, 
                     State#state.tree),
     {stop, normal, ok, State}.
 
@@ -263,11 +263,7 @@ handle_cast(destroy, State) ->
     aae_util:log("C0004", [State#state.partition_id], logs()),
     {stop, normal, State}.
 
-handle_info({'EXIT', FromPID, _Reason}, State) ->
-    aae_util:log("C0007", [FromPID], logs()),
-    save_to_disk(State#state.root_path, 
-                    State#state.save_sqn, 
-                    State#state.tree),
+handle_info(_Msg, State) ->
     {stop, normal, State}.
 
 terminate(_Reason, _State) ->
@@ -290,75 +286,46 @@ flatten_id({Index, N}) ->
 flatten_id(ID) ->
     integer_to_list(ID).
 
--spec save_to_disk(list(), integer(), leveled_tictac:tictactree()) -> ok.
+-spec save_to_disk(list(), string(), leveled_tictac:tictactree()) -> ok.
 %% @doc
 %% Save the TreeCache to disk, with a checksum so thatit can be 
 %% validated on read.
-save_to_disk(RootPath, SaveSQN, TreeCache) ->
+save_to_disk(RootPath, ShutdownGUID, TreeCache) ->
     Serialised = term_to_binary(leveled_tictac:export_tree(TreeCache)),
     CRC32 = erlang:crc32(Serialised),
     ok = filelib:ensure_dir(RootPath),
-    PendingName = integer_to_list(SaveSQN) ++ ?PENDING_EXT,
+    PendingName = ShutdownGUID ++ ?PENDING_EXT,
     aae_util:log("C0003", [RootPath, PendingName], logs()),
     ok = file:write_file(filename:join(RootPath, PendingName),
                             <<CRC32:32/integer, Serialised/binary>>,
                             [raw]),
     file:rename(filename:join(RootPath, PendingName), 
-                    form_cache_filename(RootPath, SaveSQN)).
+                    form_cache_filename(RootPath, ShutdownGUID)).
 
--spec open_from_disk(list()) -> {leveled_tictac:tictactree()|none, integer()}.
+-spec open_from_disk(list(), string()) -> leveled_tictac:tictactree()|none.
 %% @doc
 %% Open most recently saved TicTac tree cache file on disk, deleting all 
 %% others both used and unused - to save an out of date tree from being used
 %% following a subsequent crash
-open_from_disk(RootPath) ->
+open_from_disk(RootPath, ShutdownGUID) ->
     ok = filelib:ensure_dir(RootPath),
-    {ok, Filenames} = file:list_dir(RootPath),
-    FileFilterFun = 
-        fun(FN, FinalFiles) ->
-            case filename:extension(FN) of 
-                ?PENDING_EXT ->
-                    aae_util:log("C0001", [FN], logs()),
-                    ok = file:delete(filename:join(RootPath, FN)),
-                    FinalFiles;
-                ?FINAL_EXT ->
-                    BaseFN = 
-                        filename:basename(filename:rootname(FN, ?FINAL_EXT)),
-                    [list_to_integer(BaseFN)|FinalFiles];
-                _ ->
-                    FinalFiles
-            end 
-        end,
-    SQNList = 
-        lists:reverse(lists:sort(lists:foldl(FileFilterFun, [], Filenames))),
-    case SQNList of 
-        [] ->
-            {none, 1};
-        [HeadSQN|Tail] ->
-            DeleteFun = 
-                fun(SQN) -> 
-                    ok = file:delete(form_cache_filename(RootPath, SQN)) 
-                end,
-            lists:foreach(DeleteFun, Tail), 
-            FileToUse = form_cache_filename(RootPath, HeadSQN),
-            {ok, <<CRC32:32/integer, STC/binary>>} = file:read_file(FileToUse),
-            case erlang:crc32(STC) of 
-                CRC32 ->
-                    ok = file:delete(FileToUse),
-                    {leveled_tictac:import_tree(binary_to_term(STC)), 
-                        HeadSQN +  1};
-                _ ->
-                    aae_util:log("C0002", [FileToUse], logs()),
-                    {none, 1}
-            end
+    FileToUse = form_cache_filename(RootPath, ShutdownGUID),
+    {ok, <<CRC32:32/integer, STC/binary>>} = file:read_file(FileToUse),
+    case erlang:crc32(STC) of 
+        CRC32 ->
+            ok = file:delete(FileToUse),
+            leveled_tictac:import_tree(binary_to_term(STC));
+        _ ->
+            aae_util:log("C0002", [FileToUse], logs()),
+            none
     end.
 
 
--spec form_cache_filename(list(), integer()) -> list().
+-spec form_cache_filename(list(), string()) -> list().
 %% @doc
-%% Return the cache filename by combining the Root Path with the SQN
-form_cache_filename(RootPath, SaveSQN) ->
-    filename:join(RootPath, integer_to_list(SaveSQN) ++ ?FINAL_EXT).
+%% Return the cache filename by combining the Root Path with the Shutdown GUID
+form_cache_filename(RootPath, ShutdownGUID) ->
+    filename:join(RootPath, ShutdownGUID ++ ?FINAL_EXT).
 
 
 -spec binary_extractfun(binary(), {integer(), integer()}) -> 
@@ -400,8 +367,7 @@ logs() ->
         {"C0003", {info, "Saving tree cache to path ~s and filename ~s"}},
         {"C0004", {info, "Destroying tree cache for partition ~w"}},
         {"C0005", {info, "Starting cache with is_restored=~w and IndexN of ~w"}},
-        {"C0006", {debug, "Altering segment for PartitionID=~w ID=~w Hash=~w"}},
-        {"C0007", {warn, "Treecache exiting after trapping exit from Pid=~w"}}].
+        {"C0006", {debug, "Altering segment for PartitionID=~w ID=~w Hash=~w"}}].
 
 %%%============================================================================
 %%% Test
@@ -417,37 +383,18 @@ setup_savedcaches(RootPath) ->
     Tree2 = leveled_tictac:add_kv(Tree1, 
                                     {<<"K2">>}, {<<"V2">>}, 
                                     fun({K}, {V}) -> {K, V} end),
-    ok = save_to_disk(RootPath, 1, Tree1),
-    ok = save_to_disk(RootPath, 2, Tree2),
-    Tree2.
+    ShutdownGUID = leveled_util:generate_uuid(),
+    ok = save_to_disk(RootPath, ShutdownGUID, Tree2),
+    {Tree2, ShutdownGUID}.
 
-clean_saveopen_test() ->
-    % Check that pending files ar eignored, and that the highest SQN that is
-    % not pending is the one opened
-    RootPath = "test/cache0/",
-    aae_util:clean_subdir(RootPath),
-    Tree2 = setup_savedcaches(RootPath),
-    NextFN = filename:join(RootPath, integer_to_list(3) ++ ?PENDING_EXT),
-    ok = file:write_file(NextFN, <<"delete">>),
-    UnrelatedFN = filename:join(RootPath, "alt.file"),
-    ok = file:write_file(UnrelatedFN, <<"no_delete">>),
-
-    {Tree3, SaveSQN} = open_from_disk(RootPath),
-    ?assertMatch(3, SaveSQN),
-    ?assertMatch([], leveled_tictac:find_dirtyleaves(Tree2, Tree3)),
-    ?assertMatch({none, 1}, open_from_disk(RootPath)),
-    
-    ?assertMatch({ok, <<"no_delete">>}, file:read_file(UnrelatedFN)),
-    ?assertMatch({error, enoent}, file:read_file(NextFN)),
-    aae_util:clean_subdir(RootPath).
 
 corrupt_save_test() ->
     % If any byte is corrupted on disk - then the result should be a failure 
     % to open and the TreeCache reverting to empty
     RootPath = "test/cachecs/",
     aae_util:clean_subdir(RootPath),
-    _Tree2 = setup_savedcaches(RootPath),
-    BestFN = form_cache_filename(RootPath, 2),
+    {_Tree2, ShutdownGUID} = setup_savedcaches(RootPath),
+    BestFN = form_cache_filename(RootPath, ShutdownGUID),
     {ok, LatestCache} = file:read_file(BestFN),
     FlipByteFun =
         fun(Offset) ->
@@ -458,7 +405,7 @@ corrupt_save_test() ->
     BrokenCacheCheckFun =
         fun(BrokenCache) ->
             ok = file:write_file(BestFN, BrokenCache),
-            R = open_from_disk(RootPath),
+            R = open_from_disk(RootPath, ShutdownGUID),
             ?assertMatch({none, 1}, R)
         end,
     ok = lists:foreach(BrokenCacheCheckFun, BrokenCaches),
@@ -482,9 +429,10 @@ simple_test() ->
     
     lists:foreach(AddFun(AAECache0), InitialKeys),
     
-    ok = cache_close(AAECache0),
+    ShutdownGUID = leveled_util:generate_uuid(),
+    ok = cache_close(AAECache0, ShutdownGUID),
 
-    {true, AAECache1} = cache_open(RootPath, PartitionID),
+    {true, AAECache1} = cache_open(RootPath, PartitionID, ShutdownGUID),
     
     lists:foreach(AlterFun(AAECache1), AlternateKeys),
     lists:foreach(RemoveFun(AAECache1), RemoveKeys),
