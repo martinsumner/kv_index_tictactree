@@ -58,7 +58,7 @@
 %% was created, as well as the PID of this FSM
 cache_open(RootPath, PartitionID) ->
     Opts = [{root_path, RootPath}, {partition_id, PartitionID}],
-    {ok, Pid} = gen_server:start(?MODULE, [Opts], []),
+    {ok, Pid} = gen_server:start_link(?MODULE, [Opts], []),
     IsRestored = gen_server:call(Pid, is_restored, infinity),
     {IsRestored, Pid}.
 
@@ -69,7 +69,7 @@ cache_new(RootPath, PartitionID) ->
     Opts = [{root_path, RootPath}, 
             {partition_id, PartitionID}, 
             {ignore_disk, true}],
-    gen_server:start(?MODULE, [Opts], []).
+    gen_server:start_link(?MODULE, [Opts], []).
 
 -spec cache_destroy(pid()) -> ok.
 %% @doc
@@ -170,6 +170,7 @@ init([Opts]) ->
                 end
         end,
     aae_util:log("C0005", [IsRestored, PartitionID], logs()),
+    process_flag(trap_exit, true),
     {ok, #state{save_sqn = SaveSQN, 
                 tree = StartTree, 
                 is_restored = IsRestored,
@@ -262,8 +263,12 @@ handle_cast(destroy, State) ->
     aae_util:log("C0004", [State#state.partition_id], logs()),
     {stop, normal, State}.
 
-handle_info(_Info, State) ->
-    {noreply, State}.
+handle_info({'EXIT', FromPID, _Reason}, State) ->
+    aae_util:log("C0007", [FromPID], logs()),
+    save_to_disk(State#state.root_path, 
+                    State#state.save_sqn, 
+                    State#state.tree),
+    {stop, normal, State}.
 
 terminate(_Reason, _State) ->
     ok.
@@ -395,7 +400,8 @@ logs() ->
         {"C0003", {info, "Saving tree cache to path ~s and filename ~s"}},
         {"C0004", {info, "Destroying tree cache for partition ~w"}},
         {"C0005", {info, "Starting cache with is_restored=~w and IndexN of ~w"}},
-        {"C0006", {debug, "Altering segment for PartitionID=~w ID=~w Hash=~w"}}].
+        {"C0006", {debug, "Altering segment for PartitionID=~w ID=~w Hash=~w"}},
+        {"C0007", {warn, "Treecache exiting after trapping exit from Pid=~w"}}].
 
 %%%============================================================================
 %%% Test
@@ -654,9 +660,7 @@ get_leaf(AAECache0, BranchID, LeafID) ->
 
 
 coverage_cheat_test() ->
-    {noreply, _State0} = handle_info(timeout, #state{}),
     {ok, _State1} = code_change(null, #state{}, null).
-
 
 
 test_setup_funs(InitialKeys) ->
