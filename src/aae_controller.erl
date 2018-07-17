@@ -23,8 +23,7 @@
             terminate/2,
             code_change/3]).
 
--export([aae_nativestart/9,
-            aae_parallelstart/8,
+-export([aae_start/6,
             aae_nextrebuild/1,
             aae_put/7,
             aae_close/2,
@@ -71,8 +70,7 @@
                     rebuild_schedule :: rebuild_schedule(),
                     index_ns :: list(responsible_preflist()),
                     object_splitfun,
-                    root_path :: list(),
-                    preflist_fun :: fun()|null}).
+                    root_path :: list()}).
 
 -type controller_state() :: #state{}.
 
@@ -130,65 +128,26 @@
 %%% API
 %%%============================================================================
 
--spec aae_nativestart(aae_keystore:native_stores(), 
-                        pid(),
-                        boolean(),
-                        string(),
-                        rebuild_schedule(),
-                        list(responsible_preflist()),
-                        string(),
-                        fun(),
-                        fun()) -> {ok, pid()}.
-%% @doc 
-%% Start an AAE Ccontroller with a native key store.
-%% Native key stores must support segment ID accelerated queries as well as a
-%% special Shutdown object that stores a GUID on shutdown so that it is 
-%% possible to confirm alignmeent between cached trees and store at startup -
-%% as the shutdown GUID confirms both have been saved successfully.
-aae_nativestart(KeyStoreT, NativeStorePID, 
-                IsEmpty, ShutdownGUID, 
-                RebuildSchedule, Preflists, RootPath,
-                PreflistFun, WorkerFun) ->
-    AAEopts = 
-        #options{keystore_type = {native, KeyStoreT, NativeStorePID},
-                    startup_storestate = {IsEmpty, ShutdownGUID},
-                    rebuild_schedule = RebuildSchedule,
-                    index_ns = Preflists,
-                    root_path = RootPath,
-                    object_splitfun = null},
-    {ok, Cntrl} = gen_server:start(?MODULE, [AAEopts], []),
-    ok = aae_rebuildtrees(Cntrl, Preflists, PreflistFun, WorkerFun, false),
-    {ok, Cntrl}.
-
--spec aae_parallelstart(aae_keystore:parallel_stores(),
-                        boolean(),
-                        rebuild_schedule(),
-                        list(responsible_preflist()),
-                        string(),
-                        fun(),
-                        fun(),
-                        fun()) -> {ok, pid()}.
+-spec aae_start(keystore_type(), 
+                startup_storestate(), 
+                rebuild_schedule(),
+                list(responsible_preflist()), 
+                list(),
+                fun()) -> {ok, pid()}.
 %% @doc
-%% Start an AAE Controller with a parallel key store, to be used when the
-%% vnode store does not support segmentID-accelerated queries.
-%% Parallel stores require an object_splitfun, a function to split the body
-%% of the inserted object to {Size, SibCount, IndexHash, _Head}
-aae_parallelstart(KeyStoreT,
-                    IsEmpty,
-                    RebuildSchedule, Preflists, RootPath,
-                    ObjectSplitFun,
-                    PreflistFun, WorkerFun) ->
-    AAEopts = 
-        #options{keystore_type = {parallel, KeyStoreT},
-                    startup_storestate = {IsEmpty, none},
-                    rebuild_schedule = RebuildSchedule,
+%% Start an AAE controller 
+%% The ObjectsplitFun must take a vnode object in a binary form and output 
+%% {Size, SibCount, IndexHash, _Head}
+aae_start(KeyStoreT, StartupD, RebuildSch, Preflists, RootPath, ObjSplitFun) ->
+    AAEopts =
+        #options{keystore_type = KeyStoreT,
+                    startup_storestate = StartupD,
+                    rebuild_schedule = RebuildSch,
                     index_ns = Preflists,
                     root_path = RootPath,
-                    object_splitfun = ObjectSplitFun},
-    {ok, Cntrl} = gen_server:start(?MODULE, [AAEopts], []),
-    ok = aae_rebuildtrees(Cntrl, Preflists, PreflistFun, WorkerFun, false),
-    {ok, Cntrl}.
-    
+                    object_splitfun = ObjSplitFun},
+    gen_server:start(?MODULE, [AAEopts], []).
+
 
 -spec aae_nextrebuild(pid()) -> erlang:timestamp().
 %% @doc
@@ -974,7 +933,7 @@ logs() ->
 rebuild_notempty_test() ->
     RootPath = "test/notemptycntrllr/",
     aae_util:clean_subdir(RootPath),
-    {ok, Cntrl0} = start_wrap(false, "1234", RootPath, leveled_so),
+    {ok, Cntrl0} = start_wrap({false, "1234"}, RootPath, leveled_so),
     NRB0 = aae_controller:aae_nextrebuild(Cntrl0),
     ?assertMatch(true, NRB0 < os:timestamp()),
     
@@ -982,13 +941,13 @@ rebuild_notempty_test() ->
     % But shutdown was with rebuild due - so should not reset the rebuild to
     % future 
     ok = aae_close(Cntrl0, "4567"),
-    {ok, Cntrl1} = start_wrap(false, "4567", RootPath, leveled_so),
+    {ok, Cntrl1} = start_wrap({false, "4567"}, RootPath, leveled_so),
     NRB1 = aae_controller:aae_nextrebuild(Cntrl1),
     ?assertMatch(true, NRB1 < os:timestamp()),
     
     % Shutdown then startup with wrong GUID
     ok = aae_close(Cntrl1, "8910"),
-    {ok, Cntrl2} = start_wrap(false, "4567", RootPath, leveled_so),
+    {ok, Cntrl2} = start_wrap({false, "4567"}, RootPath, leveled_so),
     NRB2 = aae_controller:aae_nextrebuild(Cntrl2),
     ?assertMatch(true, NRB2 < os:timestamp()),
     
@@ -998,19 +957,19 @@ rebuild_notempty_test() ->
 rebuild_onempty_test() ->
     RootPath = "test/emptycntrllr/",
     aae_util:clean_subdir(RootPath),
-    {ok, Cntrl0} = start_wrap(true, none, RootPath, leveled_so),
+    {ok, Cntrl0} = start_wrap({true, none}, RootPath, leveled_so),
     NRB0 = aae_controller:aae_nextrebuild(Cntrl0),
     ?assertMatch(false, NRB0 < os:timestamp()),
     
     % Shutdown and startup with GUID 
     ok = aae_close(Cntrl0, "4567"),
-    {ok, Cntrl1} = start_wrap(true, "4567", RootPath, leveled_so),
+    {ok, Cntrl1} = start_wrap({true, "4567"}, RootPath, leveled_so),
     NRB1 = aae_controller:aae_nextrebuild(Cntrl1),
     ?assertMatch(false, NRB1 < os:timestamp()),
     
     % Shutdown then startup with wrong GUID
     ok = aae_close(Cntrl1, "8910"),
-    {ok, Cntrl2} = start_wrap(true, "4567", RootPath, leveled_so),
+    {ok, Cntrl2} = start_wrap({true, "4567"}, RootPath, leveled_so),
     NRB2 = aae_controller:aae_nextrebuild(Cntrl2),
     ?assertMatch(true, NRB2 < os:timestamp()),
     
@@ -1021,7 +980,7 @@ rebuild_onempty_test() ->
 shutdown_parallel_test() ->
     RootPath = "test/shutdownpll/",
     aae_util:clean_subdir(RootPath),
-    {ok, Cntrl0} = start_wrap(false, "1234", RootPath, leveled_so),
+    {ok, Cntrl0} = start_wrap({false, "1234"}, RootPath, leveled_so),
     ok = aae_put(Cntrl0, {1, 3}, <<"B">>, <<"K">>, [{a, 1}], [], <<>>),
     BinaryKey1 = aae_util:make_binarykey(<<"B">>, <<"K">>),
     SegmentID1 = 
@@ -1051,7 +1010,7 @@ shutdown_parallel_test() ->
 
     % Don't fold - so the PUT must be flushed by the close
     ok = aae_close(Cntrl1, "TEST-2"),
-    {ok, Cntrl2} = start_wrap(true, "TEST-2", RootPath, leveled_so),
+    {ok, Cntrl2} = start_wrap({true, "TEST-2"}, RootPath, leveled_so),
 
     ok = aae_fetchclocks(Cntrl2,[{1, 3}], [SegmentID1, SegmentID2], 
                             ReturnFun, null),
@@ -1071,7 +1030,7 @@ wrong_indexn_test() ->
     RPid = self(),
     ReturnFun = fun(R) -> RPid ! {result, R} end,
 
-    {ok, Cntrl0} = start_wrap(true, none, RootPath, leveled_so),
+    {ok, Cntrl0} = start_wrap({true, none}, RootPath, leveled_so),
     NRB0 = aae_controller:aae_nextrebuild(Cntrl0),
     ?assertMatch(false, NRB0 < os:timestamp()),
     
@@ -1151,7 +1110,7 @@ basic_cache_rebuild_tester(StoreType) ->
 
     Preflists = [{0, 3}, {100, 3}, {200, 3}],
     {ok, Cntrl0} = 
-        start_wrap(true, none, RootPath, Preflists, StoreType),
+        start_wrap({true, none}, RootPath, Preflists, StoreType),
     NRB0 = aae_controller:aae_nextrebuild(Cntrl0),
     ?assertMatch(false, NRB0 < os:timestamp()),
 
@@ -1210,7 +1169,7 @@ varyindexn_cache_rebuild_tester(StoreType) ->
 
     Preflists = [{0, 3}, {100, 3}, {200, 3}],
     {ok, Cntrl0} = 
-        start_wrap(true, none, RootPath, Preflists, StoreType),
+        start_wrap({true, none}, RootPath, Preflists, StoreType),
     NRB0 = aae_controller:aae_nextrebuild(Cntrl0),
     ?assertMatch(false, NRB0 < os:timestamp()),
 
@@ -1304,17 +1263,11 @@ coverage_cheat_test() ->
 %%% Test Utils
 %%%============================================================================
 
-start_wrap(IsEmpty, RootPath, StoreType) ->
-    start_wrap(IsEmpty, ShutdownGUID, RootPath, [{0, 3}], StoreType).
+start_wrap(StartupI, RootPath, StoreType) ->
+    start_wrap(StartupI, RootPath, [{0, 3}], StoreType).
 
-start_wrap(IsEmpty, RootPath, RPL, StoreType) ->
+start_wrap(StartupI, RootPath, RPL, StoreType) ->
     F = fun(_X) -> {0, 1, 0, null} end,
-aae_parallelstart(KeyStoreT,
-                    IsEmpty,
-                    RebuildSchedule, Preflists, RootPath,
-                    ObjectSplitFun,
-                    PreflistFun, WorkerFun)
-
     aae_start({parallel, StoreType}, StartupI, {1, 300}, RPL, RootPath, F).
 
 
