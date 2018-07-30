@@ -330,7 +330,7 @@ init([Opts]) ->
             {native, StoreType, BackendPid} ->
                 aae_util:log("AAE02", [StoreType], logs()),
                 StoreRP = filename:join([RootPath, StoreType, ?STORE_PATH]),
-                {ok, {LastRebuild, _GUID, _IsE}, KeyStorePid} =
+                {ok, {LastRebuild, _IsE}, KeyStorePid} =
                     aae_keystore:store_nativestart(StoreRP, 
                                                     StoreType, 
                                                     BackendPid),

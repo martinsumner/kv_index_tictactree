@@ -139,7 +139,7 @@
 %%%============================================================================
 
 -spec store_parallelstart(list(), parallel_stores()) -> 
-                {ok, {os:timestamp()|never, list()|none, boolean()}, pid()}.
+                {ok, {os:timestamp()|never, boolean()}, pid()}.
 %% @doc
 %% Start a store to be run in parallel mode
 store_parallelstart(Path, leveled_so) ->
@@ -158,7 +158,7 @@ store_parallelstart(Path, leveled_ko) ->
     store_startupdata(Pid).
 
 -spec store_nativestart(list(), native_stores(), pid()) ->
-                {ok, {os:timestamp()|never, list()|none, boolean()}, pid()}.
+                {ok, {os:timestamp()|never, boolean()}, pid()}.
 %% @doc
 %% Start a keystore in native mode.  In native mode the store is just a pass
 %% through for queries - and there will be no puts
@@ -347,7 +347,8 @@ native({fold, Limiter, FoldObjectsFun, InitAcc, Elements}, _From, State) ->
 native(startup_metadata, _From, State) ->
     {reply, 
         {State#state.last_rebuild, false}, 
-        native};
+        native,
+        State};
 native(close, _From, State) ->
     {stop, normal, ok, State}.
 

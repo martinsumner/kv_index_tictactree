@@ -263,11 +263,8 @@ handle_cast(destroy, State) ->
     aae_util:log("C0004", [State#state.partition_id], logs()),
     {stop, normal, State}.
 
-handle_info({'EXIT', FromPID, _Reason}, State) ->
-    aae_util:log("C0007", [FromPID], logs()),
-    save_to_disk(State#state.root_path, 
-                    State#state.save_sqn, 
-                    State#state.tree),
+
+handle_info(_Info, State) ->
     {stop, normal, State}.
 
 terminate(_Reason, _State) ->
@@ -660,7 +657,8 @@ get_leaf(AAECache0, BranchID, LeafID) ->
 
 
 coverage_cheat_test() ->
-    {ok, _State1} = code_change(null, #state{}, null).
+    {ok, _State1} = code_change(null, #state{}, null),
+    {stop, normal, _State2} = handle_info({'EXIT', self(), "Test"}, #state{}).
 
 
 test_setup_funs(InitialKeys) ->
