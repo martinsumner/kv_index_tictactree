@@ -133,15 +133,11 @@ Transition between AAE releases is hard (as demonstrated by the difficulties of 
 
 ### Startup, Shutdown and Synchronisation
 
-The `riak_kv_vnode` is expected to be responsible for stopping and starting the `aae_controller` should this version of AAE be implemented.  The `aae_controller` should only be started after the vnode backend has been started, and the Shutdown GUID read - but before the vnode is marked as ready.  If there is wither a match on the Shutdown GUIDs in the controller with the vnode backend, then the two can be considered in sync.  If the two are not in sync, then the rebuild time should be set to the current time, so that a rebuild can bring the stores back into sync.  
+The `riak_kv_vnode` is expected to be responsible for stopping and starting the `aae_controller` should this version of AAE be implemented.  The `aae_controller` should only be started after the vnode backend has been started, but before the vnode is marked as ready.  The trees, parallel keystore (in parallel mode) and vnode store may at this stage be out of sync, if the vnode had not previously shut down cleanly.  Whilst stores are out of sync, they will still operate but return false negative results: however, false negative results will prompt incremental repair of the synchronisation issue.  Incremental repair of a parallel keystore is done using the per-vnode rehash.  Incremental repair of the trees is done through a rehashing of the segments undertaken as part of the `aae_controller:aae_fetchclocks/5`.
+
+If the `aae_treecache` was not shutdown correctly, then the whole cache may be incorrect (e.g. empty).  This would take a long time to incrementally repair, and so this scenario is detected and flagged at startup.  It is therefore recommended at vnode startup, that the `aae_controller:aae_rebuildtrees/5` be called with the `OnlyIfBroken = true`.  This will return `skipped` if the treecache appeared to have been recovered successfully and not rebuild, but will rebuild if a potential issue with any of the tree_caches had been flagged at startup.
 
 Whilst the stores are potentially out of sync, then the controller should operate as normal - this will potentially lead to false repairs until the rebuild is complete.  If to an administrator, the possibility of non-synchronisation is a known possibility, such as when a node is restarting following a hard crash - then the [participate in coverage](https://github.com/basho/riak_core/pull/917) feature can be used to remove the node's vnodes from any coverage plan based AAE exchanges.
-
-There may be options to better automate this by communication of the synchronisation status to the riak_core to be gossiped through the ring.  It is assumed that deferring the vnode being active until the rebuild is complete is not acceptable, as the time required to complete the rebuild is unknown, and may be many minutes.
-
-On startup any previous Shutdown GUID should be removed from both backend vnode and `aae_keystore`.  On shutdown, the backend vnode should have  anew Shutdown GUID inserted before close, and the shutdown of the `aae_controller` should be deferred until the close of the vnode backend is complete.
-
-The `aae_treecache` is not persisted other than at shutdown.  This is as the cost of rebuilding a tree cache is relatively once a parallel key_store is up to date (or using a native key store) is low.
 
 There exists the potential for further improvements of vnode store to aae coordination, should the aae store be used for additional functional reasons in the future.
 
