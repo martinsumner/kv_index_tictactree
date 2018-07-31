@@ -32,7 +32,7 @@
             aae_fetchbranches/4,
             aae_mergebranches/4,
             aae_fetchclocks/5,
-            aae_rebuildtrees/4,
+            aae_rebuildtrees/5,
             aae_rebuildstore/2,
             aae_fold/5]).
 
@@ -59,7 +59,7 @@
                 next_rebuild = os:timestamp() :: erlang:timestamp(),
                 rebuild_schedule = ?DEFAULT_REBUILD_SCHEDULE 
                     :: rebuild_schedule(),
-                prompt_cacherebuild = false :: boolean(),
+                broken_trees = false :: boolean(),
                 parallel_keystore = true :: boolean(),
                 objectspecs_queue = [] :: list(),
                 root_path :: list()|undefined,
@@ -107,6 +107,7 @@
         % be being replaced but the vnode does not know if it is being 
         % replaced.  In this case, it is the responsiblity of the controller 
         % to best determine what the previous version was. 
+    
 
 -export_type([responsible_preflist/0,
                 keystore_type/0,
@@ -259,8 +260,9 @@ aae_close(Pid) ->
     gen_server:call(Pid, close, 30000).
 
 
--spec aae_rebuildtrees(pid(), list(responsible_preflist()), fun()|null, fun())
-                                                                        -> ok. 
+-spec aae_rebuildtrees(pid(), 
+                        list(responsible_preflist()), fun()|null, fun(),
+                        boolean()) -> ok|skipped. 
 %% @doc
 %% Rebuild the tree caches for a store.  Note that this rebuilds the caches
 %% but not the actual key_store itself (required in the case of parallel 
@@ -275,8 +277,10 @@ aae_close(Pid) ->
 %% - a 2-arity WorkerFun which can be passed a Fold and a FinishFun e.g. 
 %% WorkerFun(Folder, FinishFun), with the FinishFun to be called once the 
 %% Fold is complete (being passed the result of the Folder()).
-aae_rebuildtrees(Pid, IndexNs, PreflistFun, WorkerFun) ->
-    gen_server:call(Pid, {rebuild_trees, IndexNs, PreflistFun, WorkerFun}).
+aae_rebuildtrees(Pid, IndexNs, PreflistFun, WorkerFun, OnlyIfBroken) ->
+    gen_server:call(Pid, {rebuild_trees, 
+                            IndexNs, PreflistFun, WorkerFun, 
+                            OnlyIfBroken}).
 
 
 -spec aae_rebuildstore(pid(), fun()) -> {ok, fun()|skip, fun()}.
@@ -372,7 +376,7 @@ init([Opts]) ->
     {ok, State0#state{object_splitfun = Opts#options.object_splitfun,
                         index_ns = Opts#options.index_ns,
                         tree_caches = TreeCaches,
-                        prompt_cacherebuild = not AllTreesOK,
+                        broken_trees = not AllTreesOK,
                         root_path = RootPath,
                         runner = Runner}}.
 
@@ -391,59 +395,73 @@ handle_call(close, _From, State) ->
     lists:foreach(CloseTCFun, State#state.tree_caches),
     ok = aae_runner:runner_stop(State#state.runner),
     {stop, normal, ok, State};
-handle_call({rebuild_trees, IndexNs, PreflistFun, WorkerFun}, _From, State) ->
-    aae_util:log("AAE06", [IndexNs], logs()),
-    % Before the fold flush all the PUTs (if a parallel store)
-    ok = maybe_flush_puts(State#state.key_store, 
-                            State#state.objectspecs_queue,
-                            State#state.parallel_keystore),
-    
-    % Setup a fold over the store
-    {FoldFun, InitAcc} = foldobjects_buildtrees(IndexNs),
-    {async, Folder} = 
-        aae_keystore:store_fold(State#state.key_store, 
-                                all, 
-                                FoldFun, InitAcc, 
-                                [{preflist, PreflistFun}, {hash, null}]),
-    
-    % Handle the current list of responsible preflists for this vnode 
-    % having changed since the last call to start or rebuild the cache trees
-    SetupCacheFun = 
-        fun(IndexN, TreeCachesAcc) ->
-            TreeCache1 = get_treecache(IndexN, State),
-            ok = aae_treecache:cache_startload(TreeCache1),
-            [{IndexN, TreeCache1}|TreeCachesAcc]
-        end,
-    TreeCaches = lists:foldl(SetupCacheFun, [], IndexNs),
+handle_call({rebuild_trees, IndexNs, PreflistFun, WorkerFun, OnlyIfBroken}, 
+                _From, State) ->
+    DontRebuild = OnlyIfBroken and not State#state.broken_trees,
+    case DontRebuild of
+        true ->
+            {reply, skipped, State};
+        false ->
+            aae_util:log("AAE06", [IndexNs], logs()),
+            % Before the fold flush all the PUTs (if a parallel store)
+            ok = maybe_flush_puts(State#state.key_store, 
+                                    State#state.objectspecs_queue,
+                                    State#state.parallel_keystore),
+            
+            % Setup a fold over the store
+            {FoldFun, InitAcc} = foldobjects_buildtrees(IndexNs),
+            {async, Folder} = 
+                aae_keystore:store_fold(State#state.key_store, 
+                                        all, 
+                                        FoldFun, InitAcc, 
+                                        [{preflist, PreflistFun}, 
+                                            {hash, null}]),
+            
+            % Handle the current list of responsible preflists for this vnode 
+            % having changed since the last call to start or rebuild the 
+            % cache trees
+            SetupCacheFun = 
+                fun(IndexN, TreeCachesAcc) ->
+                    TreeCache1 = get_treecache(IndexN, State),
+                    ok = aae_treecache:cache_startload(TreeCache1),
+                    [{IndexN, TreeCache1}|TreeCachesAcc]
+                end,
+            TreeCaches = lists:foldl(SetupCacheFun, [], IndexNs),
 
-    % Produce a Finishfun to be called at the end of the Folder with the 
-    % input as the results.  This should call rebuild_complete on each Tree
-    % cache in turn
-    FinishTreeFun =
-        fun({FoldIndexN, FoldTree}) ->
-            {FoldIndexN, TreeCache} = lists:keyfind(FoldIndexN, 1, TreeCaches),
-            aae_treecache:cache_completeload(TreeCache, FoldTree) 
-        end,
-    FinishFun = 
-        fun(FoldTreeCaches) ->
-            lists:foreach(FinishTreeFun, FoldTreeCaches)
-        end,
+            % Produce a Finishfun to be called at the end of the Folder with
+            % the input as the results.  This should call rebuild_complete on
+            % each Tree cache in turn
+            FinishTreeFun =
+                fun({FoldIndexN, FoldTree}) ->
+                    {FoldIndexN, TreeCache} = 
+                        lists:keyfind(FoldIndexN, 1, TreeCaches),
+                    aae_treecache:cache_completeload(TreeCache, FoldTree) 
+                end,
+            FinishFun = 
+                fun(FoldTreeCaches) ->
+                    lists:foreach(FinishTreeFun, FoldTreeCaches)
+                end,
 
-    WorkerFun(Folder, FinishFun),
+            WorkerFun(Folder, FinishFun),
 
-    % The IndexNs and TreeCaches supported by the controller must now be 
-    % updated to match the lasted provided list of responsible preflists
-    %
-    % Also should schedule the next rebuild time to the future based on 
-    % now as the last rebuild time (we assume the rebuild of the trees 
-    % will be successful, and a rebuild of the store has just been completed)
-    RebuildTS = schedule_rebuild(os:timestamp(), State#state.rebuild_schedule),
-    aae_util:log("AAE11", [RebuildTS], logs()),
-    {reply, 
-        ok, 
-        State#state{tree_caches = TreeCaches, 
-                        index_ns = IndexNs, 
-                        next_rebuild = RebuildTS}};
+            % The IndexNs and TreeCaches supported by the controller must now
+            % be updated to match the lasted provided list of responsible
+            % preflists
+            %
+            % Also should schedule the next rebuild time to the future based on
+            % now as the last rebuild time (we assume the rebuild of the trees
+            % will be successful, and a rebuild of the store has just been
+            % completed)
+            RebuildTS = 
+                schedule_rebuild(os:timestamp(), State#state.rebuild_schedule),
+            aae_util:log("AAE11", [RebuildTS], logs()),
+            {reply, 
+                ok, 
+                State#state{tree_caches = TreeCaches, 
+                                index_ns = IndexNs, 
+                                next_rebuild = RebuildTS,
+                                broken_trees = false}}
+    end;
 handle_call({rebuild_store, SplitObjFun}, _From, State)->
     aae_util:log("AAE12", [State#state.parallel_keystore], logs()),
     ok = maybe_flush_puts(State#state.key_store, 
@@ -1093,7 +1111,8 @@ basic_cache_rebuild_tester(StoreType) ->
     ok = aae_rebuildtrees(Cntrl0, 
                             Preflists, 
                             null,
-                            workerfun(ReturnFun)),
+                            workerfun(ReturnFun),
+                            false),
     ok = start_receiver(),
 
     ok = aae_fetchroot(Cntrl0, [{0, 3}], ReturnFun),
@@ -1130,6 +1149,11 @@ varyindexn_cache_rebuild_tester(StoreType) ->
 
     Preflists = [{0, 3}, {100, 3}, {200, 3}],
     {ok, Cntrl0} = start_wrap(true, RootPath, Preflists, StoreType),
+    skipped = aae_rebuildtrees(Cntrl0, 
+                                Preflists, 
+                                null,
+                                workerfun(ReturnFun),
+                                true),
     NRB0 = aae_controller:aae_nextrebuild(Cntrl0),
     ?assertMatch(false, NRB0 < os:timestamp()),
 
@@ -1157,7 +1181,8 @@ varyindexn_cache_rebuild_tester(StoreType) ->
     ok = aae_rebuildtrees(Cntrl0, 
                             UpdPreflists, 
                             null,
-                            workerfun(ReturnFun)),
+                            workerfun(ReturnFun),
+                            false),
     ok = start_receiver(),
 
     ok = aae_fetchroot(Cntrl0, [{0, 3}], ReturnFun),
@@ -1182,7 +1207,8 @@ varyindexn_cache_rebuild_tester(StoreType) ->
     ok = aae_rebuildtrees(Cntrl0, 
                             Preflists, 
                             null,
-                            workerfun(ReturnFun)),
+                            workerfun(ReturnFun),
+                            false),
     ok = start_receiver(),
 
     ok = aae_fetchroot(Cntrl0, [{0, 3}], ReturnFun),
