@@ -273,7 +273,8 @@ aae_close(Pid) ->
 %% - the Preflists to be rebuilt (we do not assume that preflists stay 
 %% constant within a controller)
 %% - a Preflist Fun for native stores (to calculate the IndexN as the preflist
-%% is not stored)
+%% is not stored).  PreflistFun should be a 2-arity function on the Bucket and
+%% Key and return the IndexN
 %% - a 2-arity WorkerFun which can be passed a Fold and a FinishFun e.g. 
 %% WorkerFun(Folder, FinishFun), with the FinishFun to be called once the 
 %% Fold is complete (being passed the result of the Folder()).
