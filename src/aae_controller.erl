@@ -235,7 +235,7 @@ aae_mergebranches(Pid, IndexNs, BranchIDs, ReturnFun) ->
 %% determine the IndexN of the object, by applying the function to the bucket
 %% and key
 %%
-%% This is a call, to allow for rehahsing of any trees as part of the fetch
+%% This is a call, to allow for rehashing of any trees as part of the fetch
 %% operation.  If no rebuild is running, then as well as fetching the clocks
 %% new segment values can be calculated, replacing the old segment values.
 %% By making this a call, the snapshot for the fold is made before any new 
@@ -453,15 +453,32 @@ handle_call({rebuild_trees, IndexNs, PreflistFun, WorkerFun, OnlyIfBroken},
             % now as the last rebuild time (we assume the rebuild of the trees
             % will be successful, and a rebuild of the store has just been
             % completed)
-            RebuildTS = 
-                schedule_rebuild(os:timestamp(), State#state.rebuild_schedule),
-            aae_util:log("AAE11", [RebuildTS], logs()),
-            {reply, 
-                ok, 
-                State#state{tree_caches = TreeCaches, 
-                                index_ns = IndexNs, 
-                                next_rebuild = RebuildTS,
-                                broken_trees = false}}
+            %
+            % Reschedule will not be required if this was an OnlyIfBroken
+            % rebuild (which would normally follow restart not a store
+            % rebuild) and the store is parallel.  This might otherwise
+            % reschedule an outstanding requirement to rebuild the store.
+            RescheduleRequired = 
+                not (OnlyIfBroken and State#state.parallel_keystore),
+            case RescheduleRequired of
+                true ->
+                    RebuildTS = 
+                        schedule_rebuild(os:timestamp(), 
+                                            State#state.rebuild_schedule),
+                    aae_util:log("AAE11", [RebuildTS], logs()),
+                    {reply, 
+                        ok, 
+                        State#state{tree_caches = TreeCaches, 
+                                        index_ns = IndexNs, 
+                                        next_rebuild = RebuildTS,
+                                        broken_trees = false}};
+                false ->
+                    {reply,
+                        ok,
+                        State#state{tree_caches = TreeCaches, 
+                                        index_ns = IndexNs,
+                                        broken_trees = false}}
+            end
     end;
 handle_call({rebuild_store, SplitObjFun}, _From, State)->
     aae_util:log("AAE12", [State#state.parallel_keystore], logs()),
@@ -920,6 +937,9 @@ logs() ->
 
 -ifdef(TEST).
 
+-define(TEST_DEFAULT_PARTITION, {0, 3}).
+-define(TEST_MINHOURS, 1).
+
 rebuild_notempty_test() ->
     RootPath = "test/notemptycntrllr/",
     aae_util:clean_subdir(RootPath),
@@ -959,6 +979,39 @@ rebuild_onempty_test() ->
     aae_util:clean_subdir(RootPath).
 
 
+shutdown_parallel_rebuild_test() ->
+    Start = 
+        calendar:datetime_to_gregorian_seconds(
+            calendar:now_to_datetime(os:timestamp())),
+    RootPath = "test/shutdownpllrbld/",
+    aae_util:clean_subdir(RootPath),
+    {ok, Cntrl0} = start_wrap(true, RootPath, leveled_so),
+    ok = aae_put(Cntrl0, 
+                    ?TEST_DEFAULT_PARTITION, 
+                    <<"B">>, <<"K">>, [{a, 1}], [], <<>>),
+    NR_TS0 = calendar:now_to_datetime(aae_nextrebuild(Cntrl0)),
+    GS_TS0 = calendar:datetime_to_gregorian_seconds(NR_TS0),
+    ?assertMatch(true, GS_TS0 > (?TEST_MINHOURS * 3600 + Start)),
+    ok = aae_close(Cntrl0),
+
+    TreePath = 
+        filename:join(RootPath, ?TREE_PATH) ++ "/",
+    aae_util:clean_subdir(TreePath),
+
+    {ok, Cntrl1} = start_wrap(false, RootPath, leveled_so),
+    ok = aae_rebuildtrees(Cntrl1, 
+                            [?TEST_DEFAULT_PARTITION], 
+                            null, workerfun(fun(ok) -> ok end), 
+                            true),
+    NR_TS1 = calendar:now_to_datetime(aae_nextrebuild(Cntrl1)),
+    GS_TS1 = calendar:datetime_to_gregorian_seconds(NR_TS1),
+    ?assertMatch(true, GS_TS1 > (?TEST_MINHOURS * 3600 + Start)),
+
+    ok = aae_close(Cntrl1),
+    aae_util:clean_subdir(RootPath).
+
+
+
 shutdown_parallel_test() ->
     RootPath = "test/shutdownpll/",
     aae_util:clean_subdir(RootPath),
@@ -978,7 +1031,9 @@ shutdown_parallel_test() ->
     
     % at this close the PUT has been flushed because of the fold
     ok = aae_close(Cntrl0),
+
     {ok, Cntrl1} = start_wrap(true, RootPath, leveled_so),
+    
     ok = aae_fetchclocks(Cntrl1, [{1, 3}], [SegmentID1], ReturnFun, null),
     Result1 = start_receiver(),
     io:format("Result1 of ~w~n", [Result1]),
@@ -1248,12 +1303,13 @@ coverage_cheat_test() ->
 %%% Test Utils
 %%%============================================================================
 
+
 start_wrap(IsEmpty, RootPath, StoreType) ->
-    start_wrap(IsEmpty, RootPath, [{0, 3}], StoreType).
+    start_wrap(IsEmpty, RootPath, [?TEST_DEFAULT_PARTITION], StoreType).
 
 start_wrap(IsEmpty, RootPath, RPL, StoreType) ->
     F = fun(_X) -> {0, 1, 0, null} end,
-    aae_start({parallel, StoreType}, IsEmpty, {1, 300}, RPL, RootPath, F).
+    aae_start({parallel, StoreType}, IsEmpty, {?TEST_MINHOURS, 300}, RPL, RootPath, F).
 
 
 put_keys(_Cntrl, _Preflists, KeyList, 0) ->
