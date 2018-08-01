@@ -284,12 +284,12 @@ aae_rebuildtrees(Pid, IndexNs, PreflistFun, WorkerFun, OnlyIfBroken) ->
                             OnlyIfBroken}).
 
 
--spec aae_rebuildstore(pid(), fun()) -> {ok, fun()|skip, fun()}.
+-spec aae_rebuildstore(pid(), fun()) -> {ok, fun()|skip, fun()}|ok.
 %% @doc
 %% Prompt the rebuild of the actual AAE key store.  This should return an
 %% object fold fun, and a finish fun.  The object fold fun may be skip if it 
 %% is a native store and so no fold is required.  The finish fun should be 
-%% called once the fold is completed (or imediately if the fold fun is skip).
+%% called once the fold is completed (or immediately if the fold fun is skip).
 %%
 %% The SplitValueFun must be able to take the {B, K, V} to be used in the 
 %% object fold and convert it into {B, K, {IndexN, CurrentClock}} 
