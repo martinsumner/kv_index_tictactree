@@ -946,7 +946,7 @@ logs() ->
         {"KS006",
             {warn, "Pending store is garbage and should be deleted at ~s"}},
         {"KS007",
-            {info, "Rebuild prompt ~w with GUID ~w"}}
+            {info, "Rebuild prompt ~w with GUID ~s"}}
 
         ].
 

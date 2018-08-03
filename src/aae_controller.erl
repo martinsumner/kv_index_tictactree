@@ -404,6 +404,7 @@ handle_call({rebuild_trees, IndexNs, PreflistFun, WorkerFun, OnlyIfBroken},
             {reply, skipped, State};
         false ->
             aae_util:log("AAE06", [IndexNs], logs()),
+            SW = os:timestamp(),
             % Before the fold flush all the PUTs (if a parallel store)
             ok = maybe_flush_puts(State#state.key_store, 
                                     State#state.objectspecs_queue,
@@ -440,7 +441,8 @@ handle_call({rebuild_trees, IndexNs, PreflistFun, WorkerFun, OnlyIfBroken},
                 end,
             FinishFun = 
                 fun(FoldTreeCaches) ->
-                    lists:foreach(FinishTreeFun, FoldTreeCaches)
+                    lists:foreach(FinishTreeFun, FoldTreeCaches),
+                    aae_util:log_timer("AAE13", [], SW, logs())
                 end,
 
             WorkerFun(Folder, FinishFun),
@@ -926,7 +928,9 @@ logs() ->
         {"AAE11",
             {info, "Next rebuild scheduled for ~w"}},
         {"AAE12",
-            {info, "Received rebuild store for parallel store ~w"}}
+            {info, "Received rebuild store for parallel store ~w"}},
+        {"AAE13",
+            {info, "Completed tree rebuild"}}
     
     ].
 
