@@ -224,8 +224,8 @@ handle_cast({complete_load, Tree}, State=#state{loading=Loading})
                                     {CH, OH}, 
                                     fun binary_extractfun/2)
         end,
-    Tree0 = 
-        lists:foldl(LoadFun, Tree, lists:reverse(State#state.change_queue)),
+    Tree0 = lists:foldr(LoadFun, Tree, State#state.change_queue),
+    aae_util:log("C0008", [length(State#state.change_queue)], logs()),
     {noreply, State#state{loading = false, change_queue = [], tree = Tree0}};
 handle_cast({mark_dirtysegments, SegmentList, FoldGUID}, State) ->
     case State#state.loading of 
@@ -398,7 +398,8 @@ logs() ->
         {"C0004", {info, "Destroying tree cache for partition ~w"}},
         {"C0005", {info, "Starting cache with is_restored=~w and IndexN of ~w"}},
         {"C0006", {debug, "Altering segment for PartitionID=~w ID=~w Hash=~w"}},
-        {"C0007", {warn, "Treecache exiting after trapping exit from Pid=~w"}}].
+        {"C0007", {warn, "Treecache exiting after trapping exit from Pid=~w"}},
+        {"C0008", {info, "Complete load of tree with length of change_queue=~w"}}].
 
 %%%============================================================================
 %%% Test

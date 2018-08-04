@@ -730,9 +730,7 @@ foldobjects_buildtrees(IndexNs) ->
             {preflist, IndexN} = lists:keyfind(preflist, 1, V),
             {hash, Hash} = lists:keyfind(hash, 1, V),
             BinK = aae_util:make_binarykey(B, K),
-            BinExtractFun = 
-                fun(_BK, _V) -> 
-                    {BinK, {is_hash, Hash}} end,
+            BinExtractFun = fun(_BK, _V) -> {BinK, {is_hash, Hash}} end,
             case lists:keyfind(IndexN, 1, Acc) of 
                 {IndexN, Tree} ->
                     Tree0 = 
@@ -747,6 +745,7 @@ foldobjects_buildtrees(IndexNs) ->
                                                 BinExtractFun),
                     lists:keyreplace(IndexN, 1, Acc, {IndexN, Tree0});
                 false ->
+                    aae_util:log("AAE14", [IndexN], logs()),
                     Acc 
             end
         end,
@@ -893,7 +892,7 @@ hash_clocks(CurrentVV, PrevVV) ->
 hash_clock(none) ->
     0;
 hash_clock(Clock) ->
-    erlang:phash2(Clock).
+    erlang:phash2(lists:sort(Clock)).
 
 %%%============================================================================
 %%% log definitions
@@ -934,7 +933,10 @@ logs() ->
         {"AAE12",
             {info, "Received rebuild store for parallel store ~w"}},
         {"AAE13",
-            {info, "Completed tree rebuild"}}
+            {info, "Completed tree rebuild"}},
+        {"AAE14",
+            {info, "Mismatch finding unexpected IndexN in fold of ~w"}} 
+                % Probably should be switched to debug
     
     ].
 
