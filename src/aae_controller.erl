@@ -842,10 +842,14 @@ cache(Startup, IndexN, RootPath) ->
 schedule_rebuild(never, Schedule) ->
     schedule_rebuild(os:timestamp(), Schedule);
 schedule_rebuild({MegaSecs, Secs, MicroSecs}, {MinHours, JitterSeconds}) ->
+    SlotCount = min(1024, JitterSeconds),
+    SlotSize = JitterSeconds div SlotCount,
+    P = self(),
+    Slot = erlang:phash2({P, MicroSecs}, SlotCount),
     NewSecs = 
         MegaSecs * ?MEGA 
             + Secs 
-            + MinHours * 3600 + leveled_rand:uniform(JitterSeconds),
+            + MinHours * 3600 + SlotSize * Slot,
     {NewSecs div ?MEGA, NewSecs rem ?MEGA, MicroSecs}.
 
 
@@ -943,6 +947,7 @@ logs() ->
 
 -define(TEST_DEFAULT_PARTITION, {0, 3}).
 -define(TEST_MINHOURS, 1).
+-define(TEST_JITTERSECONDS, 300).
 
 rebuild_notempty_test() ->
     RootPath = "test/notemptycntrllr/",
@@ -1313,7 +1318,10 @@ start_wrap(IsEmpty, RootPath, StoreType) ->
 
 start_wrap(IsEmpty, RootPath, RPL, StoreType) ->
     F = fun(_X) -> {0, 1, 0, null} end,
-    aae_start({parallel, StoreType}, IsEmpty, {?TEST_MINHOURS, 300}, RPL, RootPath, F).
+    aae_start({parallel, StoreType}, 
+                IsEmpty, 
+                {?TEST_MINHOURS, ?TEST_JITTERSECONDS}, 
+                RPL, RootPath, F).
 
 
 put_keys(_Cntrl, _Preflists, KeyList, 0) ->
