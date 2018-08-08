@@ -214,7 +214,9 @@ handle_cast({alter, Key, CurrentHash, OldHash}, State) ->
 handle_cast(start_load, State=#state{loading=Loading}) 
                                                     when Loading == false ->
     {noreply, 
-        State#state{loading = true, change_queue = [], dirty_segments = []}};
+        State#state{loading = true, 
+                    change_queue = [], dirty_segments = [], 
+                    active_fold = undefined}};
 handle_cast({complete_load, Tree}, State=#state{loading=Loading}) 
                                                     when Loading == true ->
     LoadFun = 
