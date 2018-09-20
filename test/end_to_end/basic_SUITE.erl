@@ -73,14 +73,14 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
 
     {ok, Cntrl1} = 
         aae_controller:aae_start({parallel, StoreType}, 
-                                    {true, none}, 
+                                    true, 
                                     {1, 300}, 
                                     [{2, 0}, {2, 1}], 
                                     VnodePath1, 
                                     SplitF),
     {ok, Cntrl2} = 
         aae_controller:aae_start({parallel, StoreType}, 
-                                    {true, none}, 
+                                    true, 
                                     {1, 300}, 
                                     [{3, 0}, {3, 1}, {3, 2}], 
                                     VnodePath2, 
@@ -258,8 +258,8 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
                 [timer:now_diff(os:timestamp(), SW2)/1000]),
 
     % Shutdown and tidy up
-    ok = aae_controller:aae_close(Cntrl1, none),
-    ok = aae_controller:aae_close(Cntrl2, none),
+    ok = aae_controller:aae_close(Cntrl1),
+    ok = aae_controller:aae_close(Cntrl2),
     RootPath = reset_filestructure().
 
 

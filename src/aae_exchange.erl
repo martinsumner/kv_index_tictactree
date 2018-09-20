@@ -597,12 +597,12 @@ logs() ->
             {info, "Exchange id=~s led to prompting of repair_count=~w"}},
         {"EX005",
             {info, "Exchange id=~s throttled count=~w at state=~w"}},
-        {"EX006", % TODO: should be debug in production
-            {info, "State change to ~w for exchange id=~s"}},
-        {"EX007", % TODO: should be changed to debug in production
-            {info, "Reply received for colour=~w in exchange id=~s"}},
-        {"EX008", % TODO: should be changed to debug in production
-            {info, "Comparison between BlueList ~w and PinkList ~w"}}
+        {"EX006",
+            {debug, "State change to ~w for exchange id=~s"}},
+        {"EX007", 
+            {debug, "Reply received for colour=~w in exchange id=~s"}},
+        {"EX008", 
+            {debug, "Comparison between BlueList ~w and PinkList ~w"}}
         ].
 
 

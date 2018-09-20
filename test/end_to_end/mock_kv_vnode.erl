@@ -61,9 +61,6 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
--define(BUCKET_SDG, <<"MD">>).
--define(KEY_SDG, <<"SHUDOWN_GUID">>).
--define(TAG_SDG, o).
 -define(RIAK_TAG, o_rkv).
 -define(REBUILD_SCHEDULE, {1, 60}).
 -define(LASTMOD_LEN, 29). 
@@ -165,17 +162,6 @@ init([Opts]) ->
     RP = Opts#options.root_path,
     {ok, VnSt} = 
         leveled_bookie:book_start(RP, 4000, 100000000, none),
-    ShutdownGUID = 
-        case leveled_bookie:book_get(VnSt, ?BUCKET_SDG, ?KEY_SDG, ?TAG_SDG) of
-            not_found ->
-                none;
-            {ok, Value} when is_list(Value) ->
-                ok = leveled_bookie:book_delete(VnSt, 
-                                                ?BUCKET_SDG, 
-                                                ?KEY_SDG, 
-                                                []),
-                Value
-        end,
     IsEmpty = leveled_bookie:book_isempty(VnSt, ?RIAK_TAG),
     KeyStoreType = 
         case Opts#options.aae of 
@@ -186,7 +172,7 @@ init([Opts]) ->
         end,
     {ok, AAECntrl} = 
         aae_controller:aae_start(KeyStoreType, 
-                                    {IsEmpty, ShutdownGUID}, 
+                                    IsEmpty, 
                                     ?REBUILD_SCHEDULE, 
                                     Opts#options.index_ns, 
                                     RP, 
@@ -361,13 +347,7 @@ handle_call({fold_aae, Limiter, FoldFun, InitAcc, Elements}, _From, State) ->
                                 Elements),
     {reply, R, State};
 handle_call(close, _From, State) ->
-    ShutdownGUID = leveled_util:generate_uuid(),
-    ok = leveled_bookie:book_put(State#state.vnode_store, 
-                                    ?BUCKET_SDG, ?KEY_SDG, 
-                                    ShutdownGUID, [], 
-                                    ?TAG_SDG),
-    ok = leveled_bookie:book_close(State#state.vnode_store),
-    ok = aae_controller:aae_close(State#state.aae_controller, ShutdownGUID),
+    ok = aae_controller:aae_close(State#state.aae_controller),
     {stop, normal, ok, State}.
 
 handle_cast({push, Bucket, Key, UpdClock, ObjectBin, IndexN}, State) ->
@@ -409,7 +389,8 @@ handle_cast({rebuild_complete, store}, State) ->
     ok = aae_controller:aae_rebuildtrees(State#state.aae_controller, 
                                             State#state.index_ns,
                                             State#state.preflist_fun,
-                                            Worker),
+                                            Worker,
+                                            false),
 
     {noreply, State#state{aae_rebuild = true}};
 handle_cast({rebuild_complete, tree}, State) ->
