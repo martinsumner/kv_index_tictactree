@@ -718,8 +718,7 @@ do_fetchclock(leveled_so, Store, Bucket, Key) ->
     Seg0 = generate_treesegment(Seg),
     do_fetchclock(leveled_so, Store, Bucket, Key, Seg0);
 do_fetchclock(leveled_ko, Store, Bucket, Key) ->
-    HeadKey = {Key, ?NULL_SUBKEY},
-    case leveled_bookie:book_head(Store, Bucket, HeadKey, ?HEAD_TAG) of
+    case leveled_bookie:book_headonly(Store, Bucket, Key, ?NULL_SUBKEY) of
         not_found ->
             none;
         {ok, V} ->
