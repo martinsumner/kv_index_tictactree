@@ -102,6 +102,7 @@
     % file extension to be used once manifest write is pending
 -define(VALUE_VERSION, 1).
 -define(MAYBE_TRIM, 500).
+-define(NULL_SUBKEY, <<>>).
 
 -type parallel_stores() :: leveled_so|leveled_ko. 
     % Stores supported for parallel running
@@ -684,7 +685,7 @@ dedup_map(leveled_so, ObjectSpecs) ->
                 <<SegTS_int:24/integer>>, % needs to be binary not bitstring  
                 term_to_binary({ObjSpec#objectspec.bucket, 
                                 ObjSpec#objectspec.key}), 
-                null, 
+                ?NULL_SUBKEY,
                 ObjSpec#objectspec.value}
         end,
     lists:ukeysort(3, lists:map(SegmentOrderedMapFun, ObjectSpecs));
@@ -697,7 +698,7 @@ dedup_map(leveled_ko, ObjectSpecs) ->
                 true ->
                     {Acc, Members};
                 false ->
-                    UpdSpec = {ObjSpec#objectspec.op, B, K, null, 
+                    UpdSpec = {ObjSpec#objectspec.op, B, K, ?NULL_SUBKEY, 
                                 ObjSpec#objectspec.value},
                     {[UpdSpec|Acc], [{B, K}|Members]}
             end
@@ -717,7 +718,8 @@ do_fetchclock(leveled_so, Store, Bucket, Key) ->
     Seg0 = generate_treesegment(Seg),
     do_fetchclock(leveled_so, Store, Bucket, Key, Seg0);
 do_fetchclock(leveled_ko, Store, Bucket, Key) ->
-    case leveled_bookie:book_head(Store, Bucket, Key, ?HEAD_TAG) of 
+    HeadKey = {Key, ?NULL_SUBKEY},
+    case leveled_bookie:book_head(Store, Bucket, HeadKey, ?HEAD_TAG) of
         not_found ->
             none;
         {ok, V} ->
@@ -760,7 +762,7 @@ do_fetchclock(leveled_so, Store, Bucket, Key, Seg) ->
 do_fold(leveled_so, Store, {segments, SegList}, FoldObjectsFun, InitAcc) ->
     Query = 
         populate_so_query(SegList, 
-                            {fun(_S, BKBin, V, Acc) ->
+                            {fun(_S, {BKBin, _SK}, V, Acc) ->
                                     {B, K} = binary_to_term(BKBin),
                                     FoldObjectsFun(B, K, V, Acc)
                                 end,
@@ -768,7 +770,7 @@ do_fold(leveled_so, Store, {segments, SegList}, FoldObjectsFun, InitAcc) ->
     leveled_bookie:book_returnfolder(Store, Query);
 do_fold(leveled_ko, Store, {segments, SegList}, FoldObjectsFun, InitAcc) ->
     FoldFun = 
-        fun(B, K, V, Acc) ->
+        fun(B, {K, ?NULL_SUBKEY}, V, Acc) ->
             SegTree_int = value(parallel, {aae_segment, null}, {B, K, V}),
             case lists:member(SegTree_int, SegList) of 
                 true ->
@@ -793,7 +795,7 @@ do_fold(leveled_nko, Store, {segments, SegList}, FoldObjectsFun, InitAcc) ->
 do_fold(leveled_so, Store, {buckets, BucketList}, FoldObjectsFun, InitAcc) ->
     Query = 
         populate_so_query(all, 
-                            {fun(_S, BKBin, V, Acc) ->
+                            {fun(_S, {BKBin, _SK}, V, Acc) ->
                                     {B, K} = binary_to_term(BKBin),
                                     case lists:member(B, BucketList) of 
                                         true ->
@@ -805,11 +807,13 @@ do_fold(leveled_so, Store, {buckets, BucketList}, FoldObjectsFun, InitAcc) ->
                                 InitAcc}),
     leveled_bookie:book_returnfolder(Store, Query);
 do_fold(leveled_ko, Store, {buckets, BucketList}, FoldObjectsFun, InitAcc) ->
+    FoldFun = 
+        fun(B, {K, ?NULL_SUBKEY}, V, Acc) -> FoldObjectsFun(B, K, V, Acc) end,
     Query = 
         {foldheads_bybucket,
             ?HEAD_TAG, 
             BucketList, bucket_list,
-            {FoldObjectsFun, InitAcc},
+            {FoldFun, InitAcc},
             false, true, false},
     leveled_bookie:book_returnfolder(Store, Query);
 do_fold(leveled_nko, Store, {buckets, BucketList}, FoldObjectsFun, InitAcc) ->
@@ -823,17 +827,19 @@ do_fold(leveled_nko, Store, {buckets, BucketList}, FoldObjectsFun, InitAcc) ->
 do_fold(leveled_so, Store, all, FoldObjectsFun, InitAcc) ->
     Query = 
         populate_so_query(all,
-                            {fun(_S, BKBin, V, Acc) -> 
+                            {fun(_S, {BKBin, _SK}, V, Acc) -> 
                                     {B, K} = binary_to_term(BKBin),
                                     FoldObjectsFun(B, K, V, Acc)
                                 end, 
                                 InitAcc}),
     leveled_bookie:book_returnfolder(Store, Query);
 do_fold(leveled_ko, Store, all, FoldObjectsFun, InitAcc) ->
+    FoldFun = 
+        fun(B, {K, ?NULL_SUBKEY}, V, Acc) -> FoldObjectsFun(B, K, V, Acc) end,
     Query =
         {foldheads_allkeys, 
             ?HEAD_TAG,
-            {FoldObjectsFun, InitAcc},
+            {FoldFun, InitAcc},
             false, true, false},
     leveled_bookie:book_returnfolder(Store, Query);
 do_fold(leveled_nko, Store, all, FoldObjectsFun, InitAcc) ->
