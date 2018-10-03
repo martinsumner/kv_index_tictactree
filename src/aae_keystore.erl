@@ -103,6 +103,10 @@
 -define(VALUE_VERSION, 1).
 -define(MAYBE_TRIM, 500).
 -define(NULL_SUBKEY, <<>>).
+-define(CHECK_NATIVE_PRESENCE, true). 
+    % Things will be faster if false, but there will be data loss scenarios
+    % which won't be detected - most noticeably the loss of a Journal file
+    % without correlated loss from the Ledger
 
 -type parallel_stores() :: leveled_so|leveled_ko. 
     % Stores supported for parallel running
@@ -789,7 +793,9 @@ do_fold(leveled_nko, Store, {segments, SegList}, FoldObjectsFun, InitAcc) ->
         {foldheads_allkeys, 
             ?RIAK_TAG,
             {FoldObjectsFun, InitAcc},
-            false, true, SegList},
+            ?CHECK_NATIVE_PRESENCE, 
+            true, 
+            SegList},
     leveled_bookie:book_returnfolder(Store, Query);
 do_fold(leveled_so, Store, {buckets, BucketList}, FoldObjectsFun, InitAcc) ->
     Query = 
@@ -821,7 +827,9 @@ do_fold(leveled_nko, Store, {buckets, BucketList}, FoldObjectsFun, InitAcc) ->
             ?RIAK_TAG, 
             BucketList, bucket_list,
             {FoldObjectsFun, InitAcc},
-            false, true, false},
+            ?CHECK_NATIVE_PRESENCE, 
+            true, 
+            false},
     leveled_bookie:book_returnfolder(Store, Query);
 do_fold(leveled_so, Store, all, FoldObjectsFun, InitAcc) ->
     Query = 
@@ -846,7 +854,9 @@ do_fold(leveled_nko, Store, all, FoldObjectsFun, InitAcc) ->
         {foldheads_allkeys, 
             ?RIAK_TAG,
             {FoldObjectsFun, InitAcc},
-            false, true, false},
+            ?CHECK_NATIVE_PRESENCE,
+            true, 
+            false},
     leveled_bookie:book_returnfolder(Store, Query).
 
 
