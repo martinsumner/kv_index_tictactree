@@ -48,6 +48,7 @@
 -define(MEGA, 1000000).
 -define(BATCH_LENGTH, 128).
 -define(DEFAULT_REBUILD_SCHEDULE, {1, 300}).
+-define(EMPTY, <<>>).
 
 
 -record(state, {key_store :: pid()|undefined,
@@ -179,10 +180,7 @@ aae_fetchroot(Pid, IndexNs, ReturnFun) ->
 aae_mergeroot(Pid, IndexNs, ReturnFun) ->
     MergeFoldFun =
         fun({_IndexN, Root}, RootAcc) ->
-            case Root of 
-                false -> RootAcc;
-                R -> aae_exchange:merge_root(R, RootAcc)
-            end
+            aae_exchange:merge_root(Root, RootAcc)
         end,
     WrappedReturnFun = 
         fun(Result) ->
@@ -211,12 +209,7 @@ aae_fetchbranches(Pid, IndexNs, BranchIDs, ReturnFun) ->
 aae_mergebranches(Pid, IndexNs, BranchIDs, ReturnFun) ->
     MergeFoldFun =
         fun({_IndexN, Branches}, BranchesAcc) ->
-            Branches0 = 
-                case Branches of 
-                    false -> [];
-                    Bs -> Bs
-                end,
-            aae_exchange:merge_branches(Branches0, BranchesAcc)
+            aae_exchange:merge_branches(Branches, BranchesAcc)
         end,
     WrappedReturnFun = 
         fun(Result) ->
@@ -675,7 +668,7 @@ handle_cast({fetch_root, IndexNs, ReturnFun}, State) ->
                         aae_treecache:cache_root(TreeCache);
                     false ->
                         aae_util:log("AAE04", [IndexN], logs()),
-                        false
+                        ?EMPTY
                 end,
             {IndexN, Root}
         end,
@@ -691,7 +684,7 @@ handle_cast({fetch_branches, IndexNs, BranchIDs, ReturnFun}, State) ->
                         aae_treecache:cache_leaves(TreeCache, BranchIDs);
                     false ->
                         aae_util:log("AAE04", [IndexN], logs()),
-                        false
+                        lists:map(fun(X) -> {X, ?EMPTY} end, BranchIDs)
                 end,
             {IndexN, Leaves}
         end,
@@ -1088,7 +1081,7 @@ wrong_indexn_test() ->
 
     ok = aae_fetchroot(Cntrl0, [{1, 3}], ReturnFun),
     [{{1, 3}, F0}] = start_receiver(),
-    ?assertMatch(false, F0),
+    ?assertMatch(?EMPTY, F0),
     
     io:format("Put entry - wrong index~n"),
     ok = aae_put(Cntrl0, {1, 3}, <<"B">>, <<"K">>, [{a, 1}], [], <<>>),
@@ -1098,7 +1091,7 @@ wrong_indexn_test() ->
     
     ok = aae_fetchroot(Cntrl0, [{1, 3}], ReturnFun),
     [{{1, 3}, F1}] = start_receiver(),
-    ?assertMatch(false, F1),
+    ?assertMatch(?EMPTY, F1),
     
     io:format("Put entry - correct index same key~n"),
     ok = aae_put(Cntrl0, {0, 3}, <<"B">>, <<"K">>, [{c, 1}], [], <<>>),
@@ -1108,7 +1101,7 @@ wrong_indexn_test() ->
 
     ok = aae_fetchroot(Cntrl0, [{1, 3}], ReturnFun),
     [{{1, 3}, F2}] = start_receiver(),
-    ?assertMatch(false, F2),
+    ?assertMatch(?EMPTY, F2),
     
     BranchIDL = leveled_tictac:find_dirtysegments(Root1, Root2),
     ?assertMatch(1, length(BranchIDL)),
@@ -1116,7 +1109,7 @@ wrong_indexn_test() ->
     
     ok = aae_fetchbranches(Cntrl0, [{0, 3}], BranchIDL, ReturnFun),
     [{{0,3}, [{BranchID, Branch3}]}] = start_receiver(),
-    ?assertMatch(false,<<0:131072/integer>> == Branch3),
+    ?assertMatch(false, <<0:131072/integer>> == Branch3),
 
     SegIDL = leveled_tictac:find_dirtysegments(Branch3, <<0:8192>>),
     ?assertMatch(1, length(SegIDL)),
@@ -1243,7 +1236,7 @@ varyindexn_cache_rebuild_tester(StoreType) ->
     [{{200,3}, Root2}] = start_receiver(),
     ok = aae_fetchroot(Cntrl0, [{300, 3}], ReturnFun),
     [{{300,3}, Root3}] = start_receiver(),
-    ?assertMatch(false, Root3),
+    ?assertMatch(?EMPTY, Root3),
 
     ok = aae_rebuildtrees(Cntrl0, 
                             UpdPreflists, 
@@ -1286,7 +1279,7 @@ varyindexn_cache_rebuild_tester(StoreType) ->
     [{{200,3}, RB2_Root2}] = start_receiver(),
     ok = aae_fetchroot(Cntrl0, [{300, 3}], ReturnFun),
     [{{300,3}, RB2_Root3}] = start_receiver(),
-    ?assertMatch(false, RB2_Root3),
+    ?assertMatch(?EMPTY, RB2_Root3),
 
     SegIDL = leveled_tictac:find_dirtysegments(Root0, RB1_Root0),
     io:format("Count of dirty segments in IndexN 0 ~w~n", [length(SegIDL)]),
@@ -1298,7 +1291,7 @@ varyindexn_cache_rebuild_tester(StoreType) ->
     
     ok = aae_fetchbranches(Cntrl0, [{300, 3}], [1], ReturnFun),
     [{{300, 3}, RB2_Branch3}] = start_receiver(),
-    ?assertMatch(false, RB2_Branch3),
+    ?assertMatch([{1, ?EMPTY}], RB2_Branch3),
 
     ok = aae_close(Cntrl0),
     aae_util:clean_subdir(RootPath).
