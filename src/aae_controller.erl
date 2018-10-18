@@ -48,6 +48,7 @@
 -define(MEGA, 1000000).
 -define(BATCH_LENGTH, 128).
 -define(DEFAULT_REBUILD_SCHEDULE, {1, 300}).
+-define(EMPTY, <<>>).
 
 
 -record(state, {key_store :: pid()|undefined,
@@ -179,10 +180,7 @@ aae_fetchroot(Pid, IndexNs, ReturnFun) ->
 aae_mergeroot(Pid, IndexNs, ReturnFun) ->
     MergeFoldFun =
         fun({_IndexN, Root}, RootAcc) ->
-            case Root of 
-                false -> RootAcc;
-                R -> aae_exchange:merge_root(R, RootAcc)
-            end
+            aae_exchange:merge_root(Root, RootAcc)
         end,
     WrappedReturnFun = 
         fun(Result) ->
@@ -211,12 +209,7 @@ aae_fetchbranches(Pid, IndexNs, BranchIDs, ReturnFun) ->
 aae_mergebranches(Pid, IndexNs, BranchIDs, ReturnFun) ->
     MergeFoldFun =
         fun({_IndexN, Branches}, BranchesAcc) ->
-            Branches0 = 
-                case Branches of 
-                    false -> [];
-                    Bs -> Bs
-                end,
-            aae_exchange:merge_branches(Branches0, BranchesAcc)
+            aae_exchange:merge_branches(Branches, BranchesAcc)
         end,
     WrappedReturnFun = 
         fun(Result) ->
@@ -631,15 +624,18 @@ handle_cast({put, IndexN, Bucket, Key, Clock, PrevClock, BinaryObj}, State) ->
     
     % Update the TreeCache associated with the Key (should a cache exist for
     % that store)
-    case lists:keyfind(IndexN, 1, TreeCaches) of 
-        false ->
-            % Note that this will eventually end up in the Tree Cache if in 
-            % the future the IndexN combination is added to the list of 
-            % responsible preflists
-            handle_unexpected_key(Bucket, Key, IndexN, TreeCaches);
-        {IndexN, TreeCache} ->
-            ok = aae_treecache:cache_alter(TreeCache, BinaryKey, CH, OH)
-    end,
+    State0 = 
+        case lists:keyfind(IndexN, 1, TreeCaches) of 
+            false ->
+                % Note that this will eventually end up in the Tree Cache if in
+                % the future the IndexN combination is added to the list of
+                % responsible preflists
+                handle_unexpected_key(Bucket, Key, IndexN, TreeCaches),
+                State#state{next_rebuild = os:timestamp()};
+            {IndexN, TreeCache} ->
+                ok = aae_treecache:cache_alter(TreeCache, BinaryKey, CH, OH),
+                State
+        end,
 
     % Batch up an update to the Key Store
     %
@@ -647,24 +643,24 @@ handle_cast({put, IndexN, Bucket, Key, Clock, PrevClock, BinaryObj}, State) ->
     % perhaps a new bucket has been configured withe a new IndexN.  When 
     % the next cache rebuild happens, the latest IndexNs will be passed in and
     % then the unexpected key will be included in the cache
-    case State#state.parallel_keystore of 
+    case State0#state.parallel_keystore of 
         true ->
             SegmentID = leveled_tictac:keyto_segment48(BinaryKey),
             ObjSpec =  generate_objectspec(Bucket, Key, SegmentID, IndexN,
                                             BinaryObj, 
                                             Clock, CH, 
                                             State#state.object_splitfun),
-            UpdSpecL = [ObjSpec|State#state.objectspecs_queue],
+            UpdSpecL = [ObjSpec|State0#state.objectspecs_queue],
             case length(UpdSpecL) >= ?BATCH_LENGTH of 
                 true ->
                     % Push to the KeyStore as batch is now at least full
-                    maybe_flush_puts(State#state.key_store, UpdSpecL, true),
-                    {noreply, State#state{objectspecs_queue = []}};
+                    maybe_flush_puts(State0#state.key_store, UpdSpecL, true),
+                    {noreply, State0#state{objectspecs_queue = []}};
                 false ->
-                    {noreply, State#state{objectspecs_queue = UpdSpecL}}
+                    {noreply, State0#state{objectspecs_queue = UpdSpecL}}
             end;
         false ->
-            {noreply, State}
+            {noreply, State0}
     end;
 handle_cast({fetch_root, IndexNs, ReturnFun}, State) ->
     FetchRootFun = 
@@ -675,7 +671,7 @@ handle_cast({fetch_root, IndexNs, ReturnFun}, State) ->
                         aae_treecache:cache_root(TreeCache);
                     false ->
                         aae_util:log("AAE04", [IndexN], logs()),
-                        false
+                        ?EMPTY
                 end,
             {IndexN, Root}
         end,
@@ -691,7 +687,7 @@ handle_cast({fetch_branches, IndexNs, BranchIDs, ReturnFun}, State) ->
                         aae_treecache:cache_leaves(TreeCache, BranchIDs);
                     false ->
                         aae_util:log("AAE04", [IndexN], logs()),
-                        false
+                        lists:map(fun(X) -> {X, ?EMPTY} end, BranchIDs)
                 end,
             {IndexN, Leaves}
         end,
@@ -948,6 +944,7 @@ logs() ->
 -ifdef(TEST).
 
 -define(TEST_DEFAULT_PARTITION, {0, 3}).
+-define(ALTERNATIVE_PARTITION, {1, 3}).
 -define(TEST_MINHOURS, 1).
 -define(TEST_JITTERSECONDS, 300).
 
@@ -955,35 +952,45 @@ rebuild_notempty_test() ->
     RootPath = "test/notemptycntrllr/",
     aae_util:clean_subdir(RootPath),
     {ok, Cntrl0} = start_wrap(false, RootPath, leveled_so),
-    NRB0 = aae_controller:aae_nextrebuild(Cntrl0),
+    NRB0 = aae_nextrebuild(Cntrl0),
     ?assertMatch(true, NRB0 < os:timestamp()),
     
     % Shutdown was with rebuild due - so should not reset the rebuild to
     % future 
     ok = aae_close(Cntrl0),
     {ok, Cntrl1} = start_wrap(false, RootPath, leveled_so),
-    NRB1 = aae_controller:aae_nextrebuild(Cntrl1),
+    NRB1 = aae_nextrebuild(Cntrl1),
     ?assertMatch(true, NRB1 < os:timestamp()),
-    
+
+    ok = aae_put(Cntrl1, ?TEST_DEFAULT_PARTITION, 
+                <<"B">>, <<"K">>, [{a, 1}], none, <<>>),
+    NRB1 = aae_nextrebuild(Cntrl1),
+    ok = aae_put(Cntrl1, ?ALTERNATIVE_PARTITION, 
+                <<"B">>, <<"K0">>, [{a, 1}], none, <<>>),
+    NRB2 = aae_nextrebuild(Cntrl1),
+    ?assertMatch(true, NRB2 > NRB1),
+    ?assertMatch(true, NRB2 < os:timestamp()),
+    % The rebuild time should have been reset 
+    ok = aae_close(Cntrl1),
     aae_util:clean_subdir(RootPath).
 
 rebuild_onempty_test() ->
     RootPath = "test/emptycntrllr/",
     aae_util:clean_subdir(RootPath),
     {ok, Cntrl0} = start_wrap(true, RootPath, leveled_so),
-    NRB0 = aae_controller:aae_nextrebuild(Cntrl0),
+    NRB0 = aae_nextrebuild(Cntrl0),
     ?assertMatch(false, NRB0 < os:timestamp()),
     
     % Shutdown and startup 
     ok = aae_close(Cntrl0),
     {ok, Cntrl1} = start_wrap(true, RootPath, leveled_so),
-    NRB1 = aae_controller:aae_nextrebuild(Cntrl1),
+    NRB1 = aae_nextrebuild(Cntrl1),
     ?assertMatch(false, NRB1 < os:timestamp()),
     
     % Shutdown then startup with wrong ISEmpty state
     ok = aae_close(Cntrl1),
     {ok, Cntrl2} = start_wrap(false, RootPath, leveled_so),
-    NRB2 = aae_controller:aae_nextrebuild(Cntrl2),
+    NRB2 = aae_nextrebuild(Cntrl2),
     ?assertMatch(true, NRB2 < os:timestamp()),
     
     ok = aae_close(Cntrl2),
@@ -1088,7 +1095,7 @@ wrong_indexn_test() ->
 
     ok = aae_fetchroot(Cntrl0, [{1, 3}], ReturnFun),
     [{{1, 3}, F0}] = start_receiver(),
-    ?assertMatch(false, F0),
+    ?assertMatch(?EMPTY, F0),
     
     io:format("Put entry - wrong index~n"),
     ok = aae_put(Cntrl0, {1, 3}, <<"B">>, <<"K">>, [{a, 1}], [], <<>>),
@@ -1098,7 +1105,7 @@ wrong_indexn_test() ->
     
     ok = aae_fetchroot(Cntrl0, [{1, 3}], ReturnFun),
     [{{1, 3}, F1}] = start_receiver(),
-    ?assertMatch(false, F1),
+    ?assertMatch(?EMPTY, F1),
     
     io:format("Put entry - correct index same key~n"),
     ok = aae_put(Cntrl0, {0, 3}, <<"B">>, <<"K">>, [{c, 1}], [], <<>>),
@@ -1108,7 +1115,7 @@ wrong_indexn_test() ->
 
     ok = aae_fetchroot(Cntrl0, [{1, 3}], ReturnFun),
     [{{1, 3}, F2}] = start_receiver(),
-    ?assertMatch(false, F2),
+    ?assertMatch(?EMPTY, F2),
     
     BranchIDL = leveled_tictac:find_dirtysegments(Root1, Root2),
     ?assertMatch(1, length(BranchIDL)),
@@ -1116,7 +1123,7 @@ wrong_indexn_test() ->
     
     ok = aae_fetchbranches(Cntrl0, [{0, 3}], BranchIDL, ReturnFun),
     [{{0,3}, [{BranchID, Branch3}]}] = start_receiver(),
-    ?assertMatch(false,<<0:131072/integer>> == Branch3),
+    ?assertMatch(false, <<0:131072/integer>> == Branch3),
 
     SegIDL = leveled_tictac:find_dirtysegments(Branch3, <<0:8192>>),
     ?assertMatch(1, length(SegIDL)),
@@ -1180,6 +1187,9 @@ basic_cache_rebuild_tester(StoreType) ->
                             null,
                             workerfun(ReturnFun),
                             false),
+    ok = aae_fetchclocks(Cntrl0,
+                            Preflists, lists:seq(1, 16),
+                            fun(_R) -> ok end, null),
     ok = start_receiver(),
 
     ok = aae_fetchroot(Cntrl0, [{0, 3}], ReturnFun),
@@ -1243,7 +1253,7 @@ varyindexn_cache_rebuild_tester(StoreType) ->
     [{{200,3}, Root2}] = start_receiver(),
     ok = aae_fetchroot(Cntrl0, [{300, 3}], ReturnFun),
     [{{300,3}, Root3}] = start_receiver(),
-    ?assertMatch(false, Root3),
+    ?assertMatch(?EMPTY, Root3),
 
     ok = aae_rebuildtrees(Cntrl0, 
                             UpdPreflists, 
@@ -1286,7 +1296,7 @@ varyindexn_cache_rebuild_tester(StoreType) ->
     [{{200,3}, RB2_Root2}] = start_receiver(),
     ok = aae_fetchroot(Cntrl0, [{300, 3}], ReturnFun),
     [{{300,3}, RB2_Root3}] = start_receiver(),
-    ?assertMatch(false, RB2_Root3),
+    ?assertMatch(?EMPTY, RB2_Root3),
 
     SegIDL = leveled_tictac:find_dirtysegments(Root0, RB1_Root0),
     io:format("Count of dirty segments in IndexN 0 ~w~n", [length(SegIDL)]),
@@ -1298,7 +1308,7 @@ varyindexn_cache_rebuild_tester(StoreType) ->
     
     ok = aae_fetchbranches(Cntrl0, [{300, 3}], [1], ReturnFun),
     [{{300, 3}, RB2_Branch3}] = start_receiver(),
-    ?assertMatch(false, RB2_Branch3),
+    ?assertMatch([{1, ?EMPTY}], RB2_Branch3),
 
     ok = aae_close(Cntrl0),
     aae_util:clean_subdir(RootPath).

@@ -335,14 +335,16 @@ code_change(_OldVsn, StateName, State, _Extra) ->
 %%%============================================================================
 
 
--spec merge_root(binary(), binary()) -> binary().
+-spec merge_binary(binary(), binary()) -> binary().
 %% @doc
-%% Merge an individual result for a set of preflists into the accumulated 
-%% binary for the tree root
-merge_root(ResultBin, <<>>) ->
+%% Merge two binaries - where one might be empty (as nothing has been seen for
+%% that preflist, or the accumulator is the initial one)
+merge_binary(<<>>, AccBin) ->
+    AccBin;
+merge_binary(ResultBin, <<>>) ->
     ResultBin;
-merge_root(ResultBin, RootAccBin) ->
-    leveled_tictac:merge_binaries(ResultBin, RootAccBin).
+merge_binary(ResultBin, AccBin) ->
+    leveled_tictac:merge_binaries(ResultBin, AccBin).
 
 -spec merge_branches(branch_results(), branch_results()) -> branch_results().
 %% @doc
@@ -356,13 +358,20 @@ merge_branches([{BranchID, BranchBin}|Rest], BranchAccL) ->
             % First response has an empty accumulator
             merge_branches(Rest, [{BranchID, BranchBin}|BranchAccL]);
         {BranchID, BinAcc} ->
-            BinAcc0 = leveled_tictac:merge_binaries(BranchBin, BinAcc),
+            BinAcc0 = merge_binary(BranchBin, BinAcc),
             merge_branches(Rest, 
                             lists:keyreplace(BranchID, 
                                                 1, 
                                                 BranchAccL, 
                                                 {BranchID, BinAcc0}))
     end.
+
+-spec merge_root(binary(), binary()) -> binary().
+%% @doc
+%% Merge an individual result for a set of preflists into the accumulated 
+%% binary for the tree root
+merge_root(Root, RootAcc) ->
+    merge_binary(Root, RootAcc).
 
 %%%============================================================================
 %%% Internal Functions
