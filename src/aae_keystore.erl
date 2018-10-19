@@ -107,7 +107,16 @@
     % Things will be faster if false, but there will be data loss scenarios
     % which won't be detected - most noticeably the loss of a Journal file
     % without correlated loss from the Ledger
+-define(NOCHECK_PRESENCE, false). 
+    % needs to be false if it is a parallel store, and may be false if query
+    % is not part of the internal AAE process
+-define(SNAP_PREFOLD, true).
+    % Allow for the snapshot to be taken before the fold function is returned
+    % so the fold will represent the state of the store when the request was
+    % processed, and not when the fold was run
 
+-type bucket() :: binary()|{binary(),binary()}.
+-type key() :: binary().
 -type parallel_stores() :: leveled_so|leveled_ko. 
     % Stores supported for parallel running
 -type native_stores() :: leveled_nko.
@@ -122,7 +131,10 @@
     % function to apply to the f(Bucket, Key) for elements where the item
     % needs to be calculated (like IndexN in native stores)
 -type fold_limiter()
-    :: all|{segments, list(integer())}|{buckets, list(binary())}.
+    :: all|
+        {segments, list(integer())}|
+        {buckets, list(bucket())}|
+        {key_range, bucket(), key(), key()}.
     % Limit the scope of the fold, to specific segments or to specific 
     % buckets (and otherwise state all).
 -type rebuild_prompts()
@@ -763,14 +775,12 @@ do_fetchclock(leveled_so, Store, Bucket, Key, Seg) ->
 %% There should be no refresh of the iterator, the snapshot should last the
 %% duration of the fold.
 do_fold(leveled_so, Store, {segments, SegList}, FoldObjectsFun, InitAcc) ->
-    Query = 
-        populate_so_query(SegList, 
-                            {fun(_S, {BKBin, _SK}, V, Acc) ->
-                                    {B, K} = binary_to_term(BKBin),
-                                    FoldObjectsFun(B, K, V, Acc)
-                                end,
-                                InitAcc}),
-    leveled_bookie:book_returnfolder(Store, Query);
+    FoldFun = 
+        fun(_S, {BKBin, _SK}, V, Acc) ->
+            {B, K} = binary_to_term(BKBin),
+            FoldObjectsFun(B, K, V, Acc)
+        end,
+    setup_so_query(SegList, {FoldFun, InitAcc}, Store);
 do_fold(leveled_ko, Store, {segments, SegList}, FoldObjectsFun, InitAcc) ->
     FoldFun = 
         fun(B, {K, ?NULL_SUBKEY}, V, Acc) ->
@@ -782,104 +792,131 @@ do_fold(leveled_ko, Store, {segments, SegList}, FoldObjectsFun, InitAcc) ->
                     Acc 
             end
         end,
-    Query =
-        {foldheads_allkeys, 
-            ?HEAD_TAG,
-            {FoldFun, InitAcc},
-            false, true, SegList},
-    leveled_bookie:book_returnfolder(Store, Query);
+    leveled_bookie:book_headfold(Store, 
+                                    ?HEAD_TAG, 
+                                    {FoldFun, InitAcc}, 
+                                    ?NOCHECK_PRESENCE, 
+                                    ?SNAP_PREFOLD, 
+                                    SegList);
 do_fold(leveled_nko, Store, {segments, SegList}, FoldObjectsFun, InitAcc) ->
-    Query =
-        {foldheads_allkeys, 
-            ?RIAK_TAG,
-            {FoldObjectsFun, InitAcc},
-            ?CHECK_NATIVE_PRESENCE, 
-            true, 
-            SegList},
-    leveled_bookie:book_returnfolder(Store, Query);
+    leveled_bookie:book_headfold(Store, 
+                                    ?RIAK_TAG, 
+                                    {FoldObjectsFun, InitAcc}, 
+                                    ?CHECK_NATIVE_PRESENCE, 
+                                    ?SNAP_PREFOLD, 
+                                    SegList);
 do_fold(leveled_so, Store, {buckets, BucketList}, FoldObjectsFun, InitAcc) ->
-    Query = 
-        populate_so_query(all, 
-                            {fun(_S, {BKBin, _SK}, V, Acc) ->
-                                    {B, K} = binary_to_term(BKBin),
-                                    case lists:member(B, BucketList) of 
-                                        true ->
-                                            FoldObjectsFun(B, K, V, Acc);
-                                        false ->
-                                            Acc
-                                    end
-                                end,
-                                InitAcc}),
-    leveled_bookie:book_returnfolder(Store, Query);
+    FoldFun = 
+        fun(_S, {BKBin, _SK}, V, Acc) ->
+            {B, K} = binary_to_term(BKBin),
+            case lists:member(B, BucketList) of 
+                true ->
+                    FoldObjectsFun(B, K, V, Acc);
+                false ->
+                    Acc
+            end
+        end,
+    setup_so_query(all, {FoldFun, InitAcc}, Store);
 do_fold(leveled_ko, Store, {buckets, BucketList}, FoldObjectsFun, InitAcc) ->
     FoldFun = 
         fun(B, {K, ?NULL_SUBKEY}, V, Acc) -> FoldObjectsFun(B, K, V, Acc) end,
-    Query = 
-        {foldheads_bybucket,
-            ?HEAD_TAG, 
-            BucketList, bucket_list,
-            {FoldFun, InitAcc},
-            false, true, false},
-    leveled_bookie:book_returnfolder(Store, Query);
+    leveled_bookie:book_headfold(Store, 
+                                    ?HEAD_TAG, 
+                                    {bucket_list, BucketList}, 
+                                    {FoldFun, InitAcc}, 
+                                    ?NOCHECK_PRESENCE, 
+                                    ?SNAP_PREFOLD, 
+                                    false);
 do_fold(leveled_nko, Store, {buckets, BucketList}, FoldObjectsFun, InitAcc) ->
-    Query = 
-        {foldheads_bybucket,
-            ?RIAK_TAG, 
-            BucketList, bucket_list,
-            {FoldObjectsFun, InitAcc},
-            ?CHECK_NATIVE_PRESENCE, 
-            true, 
-            false},
-    leveled_bookie:book_returnfolder(Store, Query);
+    leveled_bookie:book_headfold(Store, 
+                                    ?RIAK_TAG, 
+                                    {bucket_list, BucketList}, 
+                                    {FoldObjectsFun, InitAcc}, 
+                                    ?NOCHECK_PRESENCE, 
+                                    ?SNAP_PREFOLD, 
+                                    false);
 do_fold(leveled_so, Store, all, FoldObjectsFun, InitAcc) ->
-    Query = 
-        populate_so_query(all,
-                            {fun(_S, {BKBin, _SK}, V, Acc) -> 
-                                    {B, K} = binary_to_term(BKBin),
-                                    FoldObjectsFun(B, K, V, Acc)
-                                end, 
-                                InitAcc}),
-    leveled_bookie:book_returnfolder(Store, Query);
+    FoldFun = 
+        fun(_S, {BKBin, _SK}, V, Acc) -> 
+            {B, K} = binary_to_term(BKBin),
+            FoldObjectsFun(B, K, V, Acc)
+        end,
+    setup_so_query(all, {FoldFun, InitAcc}, Store);
 do_fold(leveled_ko, Store, all, FoldObjectsFun, InitAcc) ->
     FoldFun = 
         fun(B, {K, ?NULL_SUBKEY}, V, Acc) -> FoldObjectsFun(B, K, V, Acc) end,
-    Query =
-        {foldheads_allkeys, 
-            ?HEAD_TAG,
-            {FoldFun, InitAcc},
-            false, true, false},
-    leveled_bookie:book_returnfolder(Store, Query);
+    leveled_bookie:book_headfold(Store, 
+                                    ?HEAD_TAG, 
+                                    {FoldFun, InitAcc}, 
+                                    ?NOCHECK_PRESENCE, 
+                                    ?SNAP_PREFOLD, 
+                                    false);
 do_fold(leveled_nko, Store, all, FoldObjectsFun, InitAcc) ->
-    Query = 
-        {foldheads_allkeys, 
-            ?RIAK_TAG,
-            {FoldObjectsFun, InitAcc},
-            ?CHECK_NATIVE_PRESENCE,
-            true, 
-            false},
-    leveled_bookie:book_returnfolder(Store, Query).
+    leveled_bookie:book_headfold(Store, 
+                                    ?RIAK_TAG, 
+                                    {FoldObjectsFun, InitAcc}, 
+                                    ?CHECK_NATIVE_PRESENCE, 
+                                    ?SNAP_PREFOLD, 
+                                    false);
+do_fold(leveled_so, Store, {key_range, B, SK, EK}, FoldObjectsFun, InitAcc) ->
+    FoldFun = 
+        fun(_Seg, {BKBin, _SubK}, V, Acc) ->
+            {B0, K0} = binary_to_term(BKBin),
+            case {B0, K0 >= SK, K0 < EK} of
+                {B, true, true} ->
+                    FoldObjectsFun(B, K0, V, Acc);
+                _ ->
+                    Acc
+            end
+        end,
+    setup_so_query(all, {FoldFun, InitAcc}, Store);
+do_fold(leveled_ko, Store, {key_range, B0, SK, EK}, FoldObjectsFun, InitAcc) ->
+    FoldFun = 
+        fun(B, {K, ?NULL_SUBKEY}, V, Acc) -> FoldObjectsFun(B, K, V, Acc) end,
+    leveled_bookie:book_headfold(Store, 
+                                    ?HEAD_TAG, 
+                                    {range, 
+                                        B0, 
+                                        {{SK, ?NULL_SUBKEY}, 
+                                            {EK, ?NULL_SUBKEY}}},
+                                    {FoldFun, InitAcc}, 
+                                    ?NOCHECK_PRESENCE, 
+                                    ?SNAP_PREFOLD, 
+                                    false);
+do_fold(leveled_nko, Store, {key_range, B, SK, EK}, FoldObjectsFun, InitAcc) ->
+    leveled_bookie:book_headfold(Store, 
+                                    ?RIAK_TAG, 
+                                    {range, B, {SK, EK}}, 
+                                    {FoldObjectsFun, InitAcc}, 
+                                    ?NOCHECK_PRESENCE, 
+                                    ?SNAP_PREFOLD, 
+                                    false).
 
 
--spec populate_so_query(all|list(), tuple()) -> tuple().
+-spec setup_so_query(all|list(), tuple(), pid()) -> {async, fun()}.
 %% @doc
 %% Pupulate query template
-populate_so_query(all, FoldFun) ->
-    {foldheads_allkeys,
-            ?HEAD_TAG,
-            FoldFun,
-            false, true, false};
-populate_so_query(SegList, FoldFun) ->
+setup_so_query(all, FoldAccT, Store) ->
+    leveled_bookie:book_headfold(Store, 
+                                    ?HEAD_TAG, 
+                                    FoldAccT, 
+                                    ?NOCHECK_PRESENCE, 
+                                    ?SNAP_PREFOLD, 
+                                    false);
+setup_so_query(SegList, FoldAccT, Store) ->
     MapSegFun = 
         fun(S) -> 
             S0 = leveled_tictac:get_segment(S, ?TREE_SIZE),
             <<S0:24/integer>> 
         end,
     SegList0 = lists:map(MapSegFun, SegList),
-    {foldheads_bybucket,
-            ?HEAD_TAG, 
-            SegList0, bucket_list,
-            FoldFun,
-            false, true, false}.
+    leveled_bookie:book_headfold(Store, 
+                                    ?HEAD_TAG, 
+                                    {bucket_list, SegList0}, 
+                                    FoldAccT, 
+                                    ?NOCHECK_PRESENCE, 
+                                    ?SNAP_PREFOLD, 
+                                    false).
 
 
 

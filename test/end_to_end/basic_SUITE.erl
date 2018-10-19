@@ -144,9 +144,46 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
     
     io:format("Direct partition compare complete in ~w ms~n", 
                 [timer:now_diff(os:timestamp(), SW1)/1000]),
+
+    % Now do a comparison based based on some key range queries:
     SW2 = os:timestamp(),
+    Bucket = integer_to_binary(1),
+    StartKey = list_to_binary(string:right(integer_to_list(10), 6, $0)),
+    EndKey = list_to_binary(string:right(integer_to_list(50), 6, $0)),
+    Elements = [{sibcount, null}],
+    SCFoldFun = 
+        fun(FB, FK, [{sibcount, FSc}], {FAccKL, FAccSc}) ->
+            true = FB == Bucket,
+            true = FK >= StartKey,
+            true = FK < EndKey,
+            {[FK|FAccKL], FAccSc + FSc}
+        end,
+    SCInitAcc = {[], 0},
+
+    {async, SCFolder1} = 
+        aae_controller:aae_fold(Cntrl1, 
+                                {key_range, Bucket, StartKey, EndKey}, 
+                                SCFoldFun, 
+                                SCInitAcc,
+                                Elements),
+    {async, SCFolder2} = 
+        aae_controller:aae_fold(Cntrl2, 
+                                {key_range, Bucket, StartKey, EndKey}, 
+                                SCFoldFun, 
+                                SCInitAcc,
+                                Elements),
+    SCF1 = SCFolder1(),
+    SCF2 = SCFolder2(),
+
+    true = SCF1 == SCF2,
+    true = element(2, SCF1) == 8,
+    true = length(element(1, SCF1)) == 8,
+    io:format("Comparison through key range folder in ~w ms with results ~w~n", 
+                [timer:now_diff(os:timestamp(), SW2)/1000, SCF1]),
+
 
     % Confirm no differences when using different matching AAE exchanges
+    SW3 = os:timestamp(),
 
     {ok, _P1, GUID1} = 
         aae_exchange:start([{exchange_sendfun(Cntrl1), [{2,0}]}],
@@ -255,7 +292,7 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
     true = ExchangeState8 == root_compare,
 
     io:format("Comparison through exchange complete in ~w ms~n", 
-                [timer:now_diff(os:timestamp(), SW2)/1000]),
+                [timer:now_diff(os:timestamp(), SW3)/1000]),
 
     % Shutdown and tidy up
     ok = aae_controller:aae_close(Cntrl1),
@@ -392,6 +429,45 @@ mock_vnode_loadexchangeandrebuild(_Config) ->
     io:format("Exchange id ~s~n", [GUID1a]),
     {ExchangeState1a, 0} = start_receiver(),
     true = ExchangeState1a == root_compare,
+
+    % Compare the two stores using an AAE fold - and prove that AAE fold is
+    % working as expected
+    Bucket = integer_to_binary(3),  
+    StartKey = list_to_binary(string:right(integer_to_list(10), 6, $0)),
+    EndKey = list_to_binary(string:right(integer_to_list(50), 6, $0)),
+    Elements = [{sibcount, null}, {clock, null}, {hash, null}],
+    InitAcc = {[], 0},
+    FoldKRFun = 
+        fun(FB, FK, FEs, {KCHAcc, SCAcc}) ->
+            true = FB == Bucket,
+            true = FK >= StartKey,
+            true = FK < EndKey,
+            {clock, FC} = lists:keyfind(clock, 1, FEs),
+            {hash, FH} = lists:keyfind(hash, 1, FEs),
+            {sibcount, FSC} = lists:keyfind(sibcount, 1, FEs),
+            {[{FK, FC, FH}|KCHAcc], SCAcc + FSC}
+        end,
+    
+    {async, VNNF} = 
+        mock_kv_vnode:fold_aae(VNN, 
+                                {key_range, Bucket, StartKey, EndKey}, 
+                                FoldKRFun, 
+                                InitAcc,
+                                Elements),
+    {async, VNPF} = 
+        mock_kv_vnode:fold_aae(VNP, 
+                                {key_range, Bucket, StartKey, EndKey}, 
+                                FoldKRFun, 
+                                InitAcc,
+                                Elements),
+    
+    {VNNF_KL, VNNF_SC} = VNNF(),
+    {VNPF_KL, VNPF_SC} = VNPF(),
+    true = VNNF_SC == 8,
+    true = VNPF_SC == 8,
+    true = lists:usort(VNNF_KL) == lists:usort(VNPF_KL),
+    true = length(VNNF_KL) == 8,
+    true = length(VNPF_KL) == 8,
 
     % Make change to one vnode only (the parallel one)
     Idx1 = erlang:phash2(RogueObj1#r_object.key) rem length(IndexNs),
