@@ -49,7 +49,7 @@
             store_mput/2,
             store_mload/2,
             store_prompt/2,
-            store_fold/5,
+            store_fold/6,
             store_fetchclock/3]).
 
 -export([define_objectspec/5,
@@ -125,29 +125,29 @@
     % Saves state of what store is currently active
 -type objectspec() :: #objectspec{}.
     % Object specification required by the store within mputs
+-type range_limiter()
+    :: all|{buckets, list(bucket())}|{key_range, bucket(), key(), key()}.
+    % Limit the scope of the fold, to specific segments or to specific 
+    % buckets (and otherwise state all).
+-type segment_limiter()
+    :: all|{segments, list(integer())}.
+-type rebuild_prompts()
+    :: rebuild_start|rebuild_complete.
+    % Prompts to be used when rebuilding the key store (note this is rebuild
+    % of the key store not just the aae trees)
 -type value_element() 
     :: {preflist|clock|hash|size|sibcount|indexhash|aae_segment, fun()|null}.
     % A request for a value element to be returned from a value, and the
     % function to apply to the f(Bucket, Key) for elements where the item
     % needs to be calculated (like IndexN in native stores)
--type fold_limiter()
-    :: all|
-        {segments, list(integer())}|
-        {buckets, list(bucket())}|
-        {key_range, bucket(), key(), key()}.
-    % Limit the scope of the fold, to specific segments or to specific 
-    % buckets (and otherwise state all).
--type rebuild_prompts()
-    :: rebuild_start|rebuild_complete.
-    % Prompts to be used when rebuilding the key store (note this is rebuild
-    % of the key store not just the aae trees)
 
 -export_type([parallel_stores/0,
                 native_stores/0,
                 manifest/0,
                 objectspec/0,
                 value_element/0,
-                fold_limiter/0,
+                range_limiter/0,
+                segment_limiter/0,
                 rebuild_prompts/0]).
 
 
@@ -246,14 +246,20 @@ store_prompt(Pid, Prompt) ->
     gen_fsm:send_event(Pid, {prompt, Prompt}).
 
 
--spec store_fold(pid(), fold_limiter(), fun(), any(), list(value_element())) 
-                                                    -> any()|{async, fun()}.
+-spec store_fold(pid(), 
+                    range_limiter(),
+                    segment_limiter(), 
+                    fun(), any(), 
+                    list(value_element())) -> any()|{async, fun()}.
 %% @doc
 %% Return a fold function to asynchronously run a fold over a snapshot of the
 %% store
-store_fold(Pid, Limiter, FoldObjectsFun, InitAcc, Elements) ->
+store_fold(Pid, RLimiter, SLimiter, FoldObjectsFun, InitAcc, Elements) ->
     gen_fsm:sync_send_event(Pid, 
-                            {fold, Limiter, FoldObjectsFun, InitAcc, Elements},
+                            {fold, 
+                                RLimiter, SLimiter,
+                                FoldObjectsFun, InitAcc,
+                                Elements},
                             infinity).
 
 
@@ -307,10 +313,10 @@ init([Opts]) ->
                         last_rebuild = Manifest0#manifest.last_rebuild}}
     end.
 
-loading({fold, Limiter, FoldObjectsFun, InitAcc, Elements}, _From, State) ->
-    FoldElementsFun = fold_elements_fun(FoldObjectsFun, Elements, parallel),
+loading({fold, Range, Segments, FoldFun, InitAcc, Elements}, _From, State) ->
+    FoldElementsFun = fold_elements_fun(FoldFun, Elements, parallel),
     Result = do_fold(State#state.store_type, State#state.store,
-                        Limiter, FoldElementsFun, InitAcc),
+                        Range, Segments, FoldElementsFun, InitAcc),
     {reply, Result, loading, State};
 loading({fetch_clock, Bucket, Key}, _From, State) ->
     VV = do_fetchclock(State#state.store_type, State#state.store, Bucket, Key),
@@ -320,10 +326,10 @@ loading(close, _From, State) ->
     ok = close_store(State#state.store_type, State#state.store),
     {stop, normal, ok, State}.
 
-parallel({fold, Limiter, FoldObjectsFun, InitAcc, Elements}, _From, State) ->
-    FoldElementsFun = fold_elements_fun(FoldObjectsFun, Elements, parallel),
+parallel({fold, Range, Segments, FoldFun, InitAcc, Elements}, _From, State) ->
+    FoldElementsFun = fold_elements_fun(FoldFun, Elements, parallel),
     Result = do_fold(State#state.store_type, State#state.store,
-                        Limiter, FoldElementsFun, InitAcc),
+                        Range, Segments, FoldElementsFun, InitAcc),
     {reply, Result, parallel, State};
 parallel({fetch_clock, Bucket, Key}, _From, State) ->
     VV = do_fetchclock(State#state.store_type, State#state.store, Bucket, Key),
@@ -338,9 +344,9 @@ parallel(startup_metadata, _From, State) ->
         parallel, 
         State}.
 
-native({fold, Limiter, FoldObjectsFun, InitAcc, Elements}, _From, State) ->
+native({fold, Range, Segments, FoldFun, InitAcc, Elements}, _From, State) ->
     FoldElementsFun = 
-        case Limiter of 
+        case Segments of 
             {segments, SegList} ->
                 Elements0 = lists:ukeysort(1, [{aae_segment, null}|Elements]),
                 FoldObjectsFun0 =
@@ -349,17 +355,17 @@ native({fold, Limiter, FoldObjectsFun, InitAcc, Elements}, _From, State) ->
                             lists:keyfind(aae_segment, 1, V),
                         case lists:member(SegID, SegList) of
                             true ->
-                                FoldObjectsFun(B, K, V, Acc);
+                                FoldFun(B, K, V, Acc);
                             false ->
                                 Acc
                         end
                     end,
                 fold_elements_fun(FoldObjectsFun0, Elements0, native);
             _ ->
-                fold_elements_fun(FoldObjectsFun, Elements, native)
+                fold_elements_fun(FoldFun, Elements, native)
         end,
     Result = do_fold(State#state.store_type, State#state.store,
-                        Limiter, FoldElementsFun, InitAcc),
+                        Range, Segments, FoldElementsFun, InitAcc),
     {reply, Result, native, State};
 native(startup_metadata, _From, State) ->
     {reply, 
@@ -748,7 +754,7 @@ do_fetchclock(leveled_ko, Store, Bucket, Key) ->
 %% This function is split-out from do_fetchclock/4 to make unit testing of this
 %% scenario easier.
 do_fetchclock(leveled_so, Store, Bucket, Key, Seg) ->
-    FoldObjFun  = 
+    FoldFun  = 
         fun(B, K, V, Acc) ->
             case {B, K} of 
                 {Bucket, Key} ->
@@ -759,11 +765,12 @@ do_fetchclock(leveled_so, Store, Bucket, Key, Seg) ->
         end,
     InitAcc = none,
     {async, Folder} = 
-        do_fold(leveled_so, Store, {segments, [Seg]}, FoldObjFun, InitAcc),
+        do_fold(leveled_so, Store, all, {segments, [Seg]}, FoldFun, InitAcc),
     Folder().
 
--spec do_fold(parallel_stores(), pid(), fold_limiter(), fun(), any()) 
-                                                            -> {async, fun()}.
+-spec do_fold(parallel_stores(), pid(), 
+                range_limiter(), segment_limiter(), 
+                fun(), any()) -> {async, fun()}.
 %% @doc
 %% Fold over the store applying FoldObjectsFun to each object and the 
 %% accumulator.  The store can be limited by a list of segments or a list
@@ -774,150 +781,138 @@ do_fetchclock(leveled_so, Store, Bucket, Key, Seg) ->
 %% been taken prior to the fold, and should not happen as part of the fold.
 %% There should be no refresh of the iterator, the snapshot should last the
 %% duration of the fold.
-do_fold(leveled_so, Store, {segments, SegList}, FoldObjectsFun, InitAcc) ->
+do_fold(leveled_so, Store, Range, SegFilter, FoldObjectsFun, InitAcc) ->
     FoldFun = 
         fun(_S, {BKBin, _SK}, V, Acc) ->
             {B, K} = binary_to_term(BKBin),
-            FoldObjectsFun(B, K, V, Acc)
-        end,
-    setup_so_query(SegList, {FoldFun, InitAcc}, Store);
-do_fold(leveled_ko, Store, {segments, SegList}, FoldObjectsFun, InitAcc) ->
-    FoldFun = 
-        fun(B, {K, ?NULL_SUBKEY}, V, Acc) ->
-            SegTree_int = value(parallel, {aae_segment, null}, {B, K, V}),
-            case lists:member(SegTree_int, SegList) of 
-                true ->
-                    FoldObjectsFun(B, K, V, Acc);
-                false ->
-                    Acc 
-            end
-        end,
-    leveled_bookie:book_headfold(Store, 
-                                    ?HEAD_TAG, 
-                                    {FoldFun, InitAcc}, 
-                                    ?NOCHECK_PRESENCE, 
-                                    ?SNAP_PREFOLD, 
-                                    SegList);
-do_fold(leveled_nko, Store, {segments, SegList}, FoldObjectsFun, InitAcc) ->
-    leveled_bookie:book_headfold(Store, 
-                                    ?RIAK_TAG, 
-                                    {FoldObjectsFun, InitAcc}, 
-                                    ?CHECK_NATIVE_PRESENCE, 
-                                    ?SNAP_PREFOLD, 
-                                    SegList);
-do_fold(leveled_so, Store, {buckets, BucketList}, FoldObjectsFun, InitAcc) ->
-    FoldFun = 
-        fun(_S, {BKBin, _SK}, V, Acc) ->
-            {B, K} = binary_to_term(BKBin),
-            case lists:member(B, BucketList) of 
+            case range_check(Range, B, K) of
                 true ->
                     FoldObjectsFun(B, K, V, Acc);
                 false ->
                     Acc
             end
         end,
-    setup_so_query(all, {FoldFun, InitAcc}, Store);
-do_fold(leveled_ko, Store, {buckets, BucketList}, FoldObjectsFun, InitAcc) ->
-    FoldFun = 
-        fun(B, {K, ?NULL_SUBKEY}, V, Acc) -> FoldObjectsFun(B, K, V, Acc) end,
-    leveled_bookie:book_headfold(Store, 
-                                    ?HEAD_TAG, 
-                                    {bucket_list, BucketList}, 
-                                    {FoldFun, InitAcc}, 
-                                    ?NOCHECK_PRESENCE, 
-                                    ?SNAP_PREFOLD, 
-                                    false);
-do_fold(leveled_nko, Store, {buckets, BucketList}, FoldObjectsFun, InitAcc) ->
-    leveled_bookie:book_headfold(Store, 
-                                    ?RIAK_TAG, 
-                                    {bucket_list, BucketList}, 
-                                    {FoldObjectsFun, InitAcc}, 
-                                    ?NOCHECK_PRESENCE, 
-                                    ?SNAP_PREFOLD, 
-                                    false);
-do_fold(leveled_so, Store, all, FoldObjectsFun, InitAcc) ->
-    FoldFun = 
-        fun(_S, {BKBin, _SK}, V, Acc) -> 
-            {B, K} = binary_to_term(BKBin),
-            FoldObjectsFun(B, K, V, Acc)
+    case SegFilter of
+        all ->
+            leveled_bookie:book_headfold(Store, 
+                                            ?HEAD_TAG,
+                                            {FoldFun, InitAcc}, 
+                                            ?NOCHECK_PRESENCE, 
+                                            ?SNAP_PREFOLD, 
+                                            false);
+        {segments, SegList} ->
+            MapSegFun = 
+                fun(S) -> 
+                    S0 = leveled_tictac:get_segment(S, ?TREE_SIZE),
+                    <<S0:24/integer>> 
+                end,
+            SegList0 = lists:map(MapSegFun, SegList),
+            leveled_bookie:book_headfold(Store, 
+                                            ?HEAD_TAG,
+                                            {bucket_list, SegList0},
+                                            {FoldFun, InitAcc}, 
+                                            ?NOCHECK_PRESENCE, 
+                                            ?SNAP_PREFOLD, 
+                                            false)
+    end;
+do_fold(leveled_ko, Store, Range, SegFilter, FoldObjectsFun, InitAcc) ->
+    {FoldFun, SegList} =
+        case SegFilter of
+            {segments, Segments} ->
+                SegFoldFun = 
+                    fun(B, {K, ?NULL_SUBKEY}, V, Acc) ->
+                        SegTree_int = 
+                            value(parallel, {aae_segment, null}, {B, K, V}),
+                        case lists:member(SegTree_int, Segments) of 
+                            true ->
+                                FoldObjectsFun(B, K, V, Acc);
+                            false ->
+                                Acc 
+                        end
+                    end,
+                {SegFoldFun, Segments};
+            all ->
+                {fun(B, {K, ?NULL_SUBKEY}, V, Acc) -> 
+                        FoldObjectsFun(B, K, V, Acc)
+                    end,
+                    false}
         end,
-    setup_so_query(all, {FoldFun, InitAcc}, Store);
-do_fold(leveled_ko, Store, all, FoldObjectsFun, InitAcc) ->
-    FoldFun = 
-        fun(B, {K, ?NULL_SUBKEY}, V, Acc) -> FoldObjectsFun(B, K, V, Acc) end,
-    leveled_bookie:book_headfold(Store, 
-                                    ?HEAD_TAG, 
-                                    {FoldFun, InitAcc}, 
-                                    ?NOCHECK_PRESENCE, 
-                                    ?SNAP_PREFOLD, 
-                                    false);
-do_fold(leveled_nko, Store, all, FoldObjectsFun, InitAcc) ->
-    leveled_bookie:book_headfold(Store, 
-                                    ?RIAK_TAG, 
-                                    {FoldObjectsFun, InitAcc}, 
-                                    ?CHECK_NATIVE_PRESENCE, 
-                                    ?SNAP_PREFOLD, 
-                                    false);
-do_fold(leveled_so, Store, {key_range, B, SK, EK}, FoldObjectsFun, InitAcc) ->
-    FoldFun = 
-        fun(_Seg, {BKBin, _SubK}, V, Acc) ->
-            {B0, K0} = binary_to_term(BKBin),
-            case {B0, K0 >= SK, K0 < EK} of
-                {B, true, true} ->
-                    FoldObjectsFun(B, K0, V, Acc);
-                _ ->
-                    Acc
-            end
+    case Range of
+        all ->
+            leveled_bookie:book_headfold(Store, 
+                                            ?HEAD_TAG, 
+                                            {FoldFun, InitAcc}, 
+                                            ?NOCHECK_PRESENCE, 
+                                            ?SNAP_PREFOLD, 
+                                            SegList);
+        {buckets, BucketList} ->
+            leveled_bookie:book_headfold(Store, 
+                                            ?HEAD_TAG,
+                                            {bucket_list, BucketList}, 
+                                            {FoldFun, InitAcc}, 
+                                            ?NOCHECK_PRESENCE, 
+                                            ?SNAP_PREFOLD, 
+                                            SegList);
+        {key_range, B0, SK, EK} ->
+            leveled_bookie:book_headfold(Store, 
+                                            ?HEAD_TAG, 
+                                            {range, 
+                                                B0, 
+                                                {{SK, ?NULL_SUBKEY}, 
+                                                    {EK, ?NULL_SUBKEY}}},
+                                            {FoldFun, InitAcc}, 
+                                            ?NOCHECK_PRESENCE, 
+                                            ?SNAP_PREFOLD, 
+                                            SegList)
+    end;     
+do_fold(leveled_nko, Store, Range, SegFilter, FoldObjectsFun, InitAcc) ->
+    SegList = 
+        case SegFilter of
+            {segments, Segments} ->
+                Segments;
+            all ->
+                false
         end,
-    setup_so_query(all, {FoldFun, InitAcc}, Store);
-do_fold(leveled_ko, Store, {key_range, B0, SK, EK}, FoldObjectsFun, InitAcc) ->
-    FoldFun = 
-        fun(B, {K, ?NULL_SUBKEY}, V, Acc) -> FoldObjectsFun(B, K, V, Acc) end,
-    leveled_bookie:book_headfold(Store, 
-                                    ?HEAD_TAG, 
-                                    {range, 
-                                        B0, 
-                                        {{SK, ?NULL_SUBKEY}, 
-                                            {EK, ?NULL_SUBKEY}}},
-                                    {FoldFun, InitAcc}, 
-                                    ?NOCHECK_PRESENCE, 
-                                    ?SNAP_PREFOLD, 
-                                    false);
-do_fold(leveled_nko, Store, {key_range, B, SK, EK}, FoldObjectsFun, InitAcc) ->
-    leveled_bookie:book_headfold(Store, 
-                                    ?RIAK_TAG, 
-                                    {range, B, {SK, EK}}, 
-                                    {FoldObjectsFun, InitAcc}, 
-                                    ?NOCHECK_PRESENCE, 
-                                    ?SNAP_PREFOLD, 
-                                    false).
+    case Range of
+        all ->
+            leveled_bookie:book_headfold(Store, 
+                                            ?RIAK_TAG, 
+                                            {FoldObjectsFun, InitAcc}, 
+                                            ?CHECK_NATIVE_PRESENCE, 
+                                            ?SNAP_PREFOLD, 
+                                            SegList);
+        {buckets, BucketList} ->
+            leveled_bookie:book_headfold(Store, 
+                                            ?RIAK_TAG, 
+                                            {bucket_list, BucketList}, 
+                                            {FoldObjectsFun, InitAcc}, 
+                                            ?NOCHECK_PRESENCE, 
+                                            ?SNAP_PREFOLD, 
+                                            SegList);
+        {key_range, B, SK, EK} ->
+            leveled_bookie:book_headfold(Store, 
+                                            ?RIAK_TAG, 
+                                            {range, B, {SK, EK}}, 
+                                            {FoldObjectsFun, InitAcc}, 
+                                            ?NOCHECK_PRESENCE, 
+                                            ?SNAP_PREFOLD, 
+                                            SegList)
+    end.
 
 
--spec setup_so_query(all|list(), tuple(), pid()) -> {async, fun()}.
-%% @doc
-%% Pupulate query template
-setup_so_query(all, FoldAccT, Store) ->
-    leveled_bookie:book_headfold(Store, 
-                                    ?HEAD_TAG, 
-                                    FoldAccT, 
-                                    ?NOCHECK_PRESENCE, 
-                                    ?SNAP_PREFOLD, 
-                                    false);
-setup_so_query(SegList, FoldAccT, Store) ->
-    MapSegFun = 
-        fun(S) -> 
-            S0 = leveled_tictac:get_segment(S, ?TREE_SIZE),
-            <<S0:24/integer>> 
-        end,
-    SegList0 = lists:map(MapSegFun, SegList),
-    leveled_bookie:book_headfold(Store, 
-                                    ?HEAD_TAG, 
-                                    {bucket_list, SegList0}, 
-                                    FoldAccT, 
-                                    ?NOCHECK_PRESENCE, 
-                                    ?SNAP_PREFOLD, 
-                                    false).
-
+range_check(all, _B, _K) ->
+    true;
+range_check({buckets, BucketList}, Bucket, _K) ->
+    lists:member(Bucket, BucketList);
+range_check({key_range, Bucket, StartKey, EndKey}, Bucket, Key) ->
+    case {Key >= StartKey, Key < EndKey} of
+        {true, true} ->
+            true;
+        _ ->
+            false
+    end;
+range_check(_Range, _B, _K) ->
+    false.
 
 
 -spec open_manifest(list()) -> {ok, manifest()}|false.
@@ -1107,7 +1102,7 @@ load_tester(StoreType) ->
         end,
     
     {async, Folder0} = 
-        store_fold(Store0, all, FoldObjectsFun, [], [{clock, null}]),
+        store_fold(Store0, all, all, FoldObjectsFun, [], [{clock, null}]),
     Res0 = lists:usort(Folder0()),
     ?assertMatch(96, length(Res0)),
     
@@ -1119,7 +1114,7 @@ load_tester(StoreType) ->
     ?assertMatch(FirstClock, store_fetchclock(Store0, <<"B1">>, FirstKey)),
 
     {async, Folder1} = 
-        store_fold(Store0, all, FoldObjectsFun, [], [{clock, null}]),
+        store_fold(Store0, all, all, FoldObjectsFun, [], [{clock, null}]),
     Res1 = lists:usort(Folder1()),
     ?assertMatch(Res0, Res1),
 
@@ -1127,7 +1122,7 @@ load_tester(StoreType) ->
 
     % 4 adds, 20 alterations, 8 removes -> 92 entries
     {async, Folder2} = 
-        store_fold(Store0, all, FoldObjectsFun, [], [{clock, null}]),
+        store_fold(Store0, all, all, FoldObjectsFun, [], [{clock, null}]),
     Res2 = lists:usort(Folder2()),
     ?assertMatch(92, length(Res2)),
 
@@ -1136,7 +1131,7 @@ load_tester(StoreType) ->
     ok = store_mload(Store0, L3),
 
     {async, Folder3} = 
-        store_fold(Store0, all, FoldObjectsFun, [], [{clock, null}]),
+        store_fold(Store0, all, all, FoldObjectsFun, [], [{clock, null}]),
     Res3 = lists:usort(Folder3()),
     ?assertMatch(Res2, Res3),
 
@@ -1145,7 +1140,7 @@ load_tester(StoreType) ->
     ok = store_prompt(Store0, rebuild_complete),
 
     {async, Folder4} = 
-        store_fold(Store0, all, FoldObjectsFun, [], [{clock, null}]),
+        store_fold(Store0, all, all, FoldObjectsFun, [], [{clock, null}]),
     Res4 = lists:usort(Folder4()),
     ?assertMatch(Res2, Res4),
 
@@ -1153,7 +1148,7 @@ load_tester(StoreType) ->
 
     % Removes now complete so only 80 entries
     {async, Folder5} = 
-        store_fold(Store0, all, FoldObjectsFun, [], [{clock, null}]),
+        store_fold(Store0, all, all, FoldObjectsFun, [], [{clock, null}]),
     Res5 = lists:usort(Folder5()),
     ?assertMatch(FinalState, Res5),
 
@@ -1165,13 +1160,14 @@ load_tester(StoreType) ->
     ?assertMatch(true, LastRebuildTime > RebuildCompleteTime),
    
     {async, Folder6} = 
-        store_fold(Store1, all, FoldObjectsFun, [], [{clock, null}]),
+        store_fold(Store1, all, all, FoldObjectsFun, [], [{clock, null}]),
     Res6 = lists:usort(Folder6()),
     ?assertMatch(Res5, Res6),
 
     {async, Folder7} = 
         store_fold(Store1, 
                     {buckets, [<<"B1">>]},
+                    all,
                     FoldObjectsFun, [], 
                     [{clock, null}]),
     Res7 = lists:usort(Folder7()),
@@ -1180,6 +1176,7 @@ load_tester(StoreType) ->
     {async, Folder8} = 
         store_fold(Store1, 
                     {buckets, [<<"B2">>]}, 
+                    all,
                     FoldObjectsFun, [], 
                     [{clock, null}]),
     Res8 = lists:usort(Folder8()),
@@ -1202,7 +1199,8 @@ load_tester(StoreType) ->
     io:format("FinalStateSL: ~w~n", [FinalStateSL]),
 
     {async, Folder9} = 
-        store_fold(Store1, 
+        store_fold(Store1,
+                    all,
                     {segments, SegList}, 
                     FoldObjectsFun, [], 
                     [{clock, null}]),
@@ -1304,7 +1302,7 @@ big_load_tester(StoreType) ->
 
     ok = store_prompt(Store0, rebuild_complete),
 
-    {async, Folder2} = store_fold(Store0, all, FoldObjectsFun, 0, []),
+    {async, Folder2} = store_fold(Store0, all, all, FoldObjectsFun, 0, []),
     ?assertMatch(KeyCount, Folder2() - KeyCount),
 
     ok = store_close(Store0),
@@ -1347,7 +1345,7 @@ big_load_tester(StoreType) ->
 
 timed_fold(Store, KeyCount, FoldObjectsFun, StoreType, DoubleCount) ->
     SW = os:timestamp(),
-    {async, Folder} = store_fold(Store, all, FoldObjectsFun, 0, []),
+    {async, Folder} = store_fold(Store, all, all, FoldObjectsFun, 0, []),
     case DoubleCount of 
         true ->
             ?assertMatch(KeyCount, Folder() - KeyCount);

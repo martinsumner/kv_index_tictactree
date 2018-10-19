@@ -22,7 +22,7 @@
             rebuild/2,
             rehash/4,
             rebuild_complete/2,
-            fold_aae/5,
+            fold_aae/6,
             close/1]).
 
 -export([extractclock_from_riakhead/1,
@@ -125,14 +125,18 @@ rebuild_complete(Vnode, Stage) ->
 rehash(Vnode, Bucket, Key, IndexN) ->
     gen_server:call(Vnode, {rehash, Bucket, Key, IndexN}).
 
--spec fold_aae(pid(), tuple(), fun(), any(), 
-                        list(aae_keystore:value_element())) -> {async, fun()}.
+-spec fold_aae(pid(), 
+                aae_keystore:range_limiter(), aae_keystore:segment_limiter(),
+                fun(), any(), 
+                list(aae_keystore:value_element())) -> {async, fun()}.
 %% @doc
 %% Fold over the heads in the aae store (which may be the key store when 
 %% running in native mode)
-fold_aae(Vnode, Limiter, FoldObjectsFun, InitAcc, Elements) ->
+fold_aae(Vnode, Range, Segments, FoldObjectsFun, InitAcc, Elements) ->
     gen_server:call(Vnode, 
-                    {fold_aae, Limiter, FoldObjectsFun, InitAcc, Elements}).
+                    {fold_aae, 
+                        Range, Segments,
+                        FoldObjectsFun, InitAcc, Elements}).
 
 -spec exchange_message(pid(), tuple()|atom(), list(tuple()), atom()) -> ok.
 %% @doc
@@ -340,9 +344,11 @@ handle_call({aae, Msg, IndexNs, ReturnFun}, _From, State) ->
                                                 State#state.preflist_fun)
     end,
     {reply, ok, State};
-handle_call({fold_aae, Limiter, FoldFun, InitAcc, Elements}, _From, State) ->
+handle_call({fold_aae, Range, Segments, FoldFun, InitAcc, Elements}, 
+                                                        _From, State) ->
     R = aae_controller:aae_fold(State#state.aae_controller, 
-                                Limiter, 
+                                Range,
+                                Segments, 
                                 FoldFun, InitAcc, 
                                 Elements),
     {reply, R, State};

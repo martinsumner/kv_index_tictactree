@@ -162,13 +162,15 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
 
     {async, SCFolder1} = 
         aae_controller:aae_fold(Cntrl1, 
-                                {key_range, Bucket, StartKey, EndKey}, 
+                                {key_range, Bucket, StartKey, EndKey},
+                                all,
                                 SCFoldFun, 
                                 SCInitAcc,
                                 Elements),
     {async, SCFolder2} = 
         aae_controller:aae_fold(Cntrl2, 
-                                {key_range, Bucket, StartKey, EndKey}, 
+                                {key_range, Bucket, StartKey, EndKey},
+                                all,
                                 SCFoldFun, 
                                 SCInitAcc,
                                 Elements),
@@ -450,13 +452,15 @@ mock_vnode_loadexchangeandrebuild(_Config) ->
     
     {async, VNNF} = 
         mock_kv_vnode:fold_aae(VNN, 
-                                {key_range, Bucket, StartKey, EndKey}, 
+                                {key_range, Bucket, StartKey, EndKey},
+                                all,
                                 FoldKRFun, 
                                 InitAcc,
                                 Elements),
     {async, VNPF} = 
         mock_kv_vnode:fold_aae(VNP, 
-                                {key_range, Bucket, StartKey, EndKey}, 
+                                {key_range, Bucket, StartKey, EndKey},
+                                all,
                                 FoldKRFun, 
                                 InitAcc,
                                 Elements),
@@ -468,6 +472,27 @@ mock_vnode_loadexchangeandrebuild(_Config) ->
     true = lists:usort(VNNF_KL) == lists:usort(VNPF_KL),
     true = length(VNNF_KL) == 8,
     true = length(VNPF_KL) == 8,
+    
+    [{K1, C1, H1}|_Rest] = VNNF_KL,
+    BinaryKey1 = aae_util:make_binarykey(Bucket, K1),
+    SegmentID1 = element(2, leveled_tictac:keyto_segment48(BinaryKey1)),
+
+    {async, VNNF_SL} = 
+        mock_kv_vnode:fold_aae(VNN, 
+                                {key_range, Bucket, StartKey, EndKey},
+                                {segments, [SegmentID1]},
+                                FoldKRFun, 
+                                InitAcc,
+                                Elements),
+    {async, VNPF_SL} = 
+        mock_kv_vnode:fold_aae(VNP, 
+                                {key_range, Bucket, StartKey, EndKey},
+                                {segments, [SegmentID1]},
+                                FoldKRFun, 
+                                InitAcc,
+                                Elements),
+    {[{K1, C1, H1}], 1} = VNNF_SL(),
+    {[{K1, C1, H1}], 1} = VNPF_SL(),
 
     % Make change to one vnode only (the parallel one)
     Idx1 = erlang:phash2(RogueObj1#r_object.key) rem length(IndexNs),
@@ -739,10 +764,10 @@ mock_vnode_coveragefolder(Type, InitialKeyCount) ->
     
     SWF1 = os:timestamp(),
     {async, Folder1} = 
-        mock_kv_vnode:fold_aae(VNN1, all, SibCountFoldFun, 
+        mock_kv_vnode:fold_aae(VNN1, all, all, SibCountFoldFun, 
                                 {0, []}, [{sibcount, null}]),
     {async, Folder3} = 
-        mock_kv_vnode:fold_aae(VNN3, all, SibCountFoldFun, 
+        mock_kv_vnode:fold_aae(VNN3, all, all, SibCountFoldFun, 
                                 Folder1(), [{sibcount, null}]),
     {SC1, SibL1} = Folder3(),
     io:format("Coverage fold took ~w with output ~w for store ~w~n", 
@@ -753,11 +778,15 @@ mock_vnode_coveragefolder(Type, InitialKeyCount) ->
     SWF2 = os:timestamp(),
     BucketListA = [integer_to_binary(0), integer_to_binary(1)],
     {async, Folder2} = 
-        mock_kv_vnode:fold_aae(VNN2, {buckets, BucketListA}, SibCountFoldFun, 
-                                {0, []}, [{sibcount, null}]),
+        mock_kv_vnode:fold_aae(VNN2, 
+                                {buckets, BucketListA}, all, 
+                                SibCountFoldFun, {0, []},
+                                [{sibcount, null}]),
     {async, Folder4} = 
-        mock_kv_vnode:fold_aae(VNN4, {buckets, BucketListA}, SibCountFoldFun, 
-                                Folder2(), [{sibcount, null}]),
+        mock_kv_vnode:fold_aae(VNN4, 
+                                {buckets, BucketListA}, all,
+                                SibCountFoldFun, Folder2(),
+                                [{sibcount, null}]),
     {SC2, SibL2} = Folder4(),
     io:format("Coverage fold took ~w with output ~w for store ~w~n", 
                 [timer:now_diff(os:timestamp(), SWF2),SC2, Type]),
@@ -774,19 +803,19 @@ mock_vnode_coveragefolder(Type, InitialKeyCount) ->
         end,
 
     {async, Folder1HS} = 
-        mock_kv_vnode:fold_aae(VNN1, all, HashSizeFoldFun, 
+        mock_kv_vnode:fold_aae(VNN1, all, all, HashSizeFoldFun, 
                                 [], [{hash, null}, {size, null}]),
     {async, Folder3HS} = 
-        mock_kv_vnode:fold_aae(VNN3, all, HashSizeFoldFun, 
+        mock_kv_vnode:fold_aae(VNN3, all, all, HashSizeFoldFun, 
                                 Folder1HS(), [{hash, null}, {size, null}]),
     BKHSzL1 = Folder3HS(),
     true = length(BKHSzL1) == InitialKeyCount,
 
     {async, Folder2HS} = 
-        mock_kv_vnode:fold_aae(VNN2, all, HashSizeFoldFun, 
+        mock_kv_vnode:fold_aae(VNN2, all, all, HashSizeFoldFun, 
                                 [], [{hash, null}, {size, null}]),
     {async, Folder4HS} = 
-        mock_kv_vnode:fold_aae(VNN4, all, HashSizeFoldFun, 
+        mock_kv_vnode:fold_aae(VNN4, all, all, HashSizeFoldFun, 
                                 Folder2HS(), [{hash, null}, {size, null}]),
     BKHSzL2 = Folder4HS(),
     true = length(BKHSzL2) == InitialKeyCount,
