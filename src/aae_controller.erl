@@ -108,7 +108,7 @@
         % be being replaced but the vnode does not know if it is being 
         % replaced.  In this case, it is the responsiblity of the controller 
         % to best determine what the previous version was. 
-    
+
 
 -export_type([responsible_preflist/0,
                 keystore_type/0,
@@ -221,7 +221,9 @@ aae_mergebranches(Pid, IndexNs, BranchIDs, ReturnFun) ->
     
 
 -spec aae_fetchclocks(pid(), 
-                        list(responsible_preflist()), list(integer()), 
+                        list(responsible_preflist()),
+                        list(integer()), 
+                            % fetch_clocks assumes "large" tree size
                         fun(), null|fun()) -> ok.
 %% @doc
 %% Fetch all the keys and clocks but use the passed in 2-arity function to 
@@ -535,7 +537,6 @@ handle_call({fold, RLimiter, SLimiter, FoldObjectsFun, InitAcc, Elements},
     {reply, R, State};
 handle_call({fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PreflFun},
                                                             _From, State) ->
-    
     SegmentMap = lists:map(fun(S) -> {S, 0} end, SegmentIDs),
     InitMap = 
         lists:map(fun(IdxN) -> 
@@ -595,7 +596,7 @@ handle_call({fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PreflFun},
     {async, Folder} = 
         aae_keystore:store_fold(State#state.key_store, 
                                 all,
-                                {segments, SegmentIDs}, 
+                                {segments, SegmentIDs, ?TREE_SIZE}, 
                                 FoldObjFun, 
                                 {[], InitMap},
                                 [{preflist, PreflFun}, 
