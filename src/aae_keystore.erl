@@ -52,7 +52,8 @@
             store_fold/6,
             store_fetchclock/3]).
 
--export([define_objectspec/5,
+-export([define_addobjectspec/3,
+            define_delobjectspec/3,
             check_objectspec/3,
             generate_value/5,
             generate_treesegment/1,
@@ -82,6 +83,7 @@
                         segment_id :: integer(),
                         bucket :: binary(),
                         key :: binary(),
+                        last_mod_dates :: undefined|list(os:timestamp()),
                         value = null :: tuple()|null}).
 
 -include_lib("eunit/include/eunit.hrl").
@@ -100,7 +102,7 @@
     % file extension to be used once manifest write is complete
 -define(PENDING_EXT, ".pnd").
     % file extension to be used once manifest write is pending
--define(VALUE_VERSION, 1).
+-define(VALUE_VERSION, 2).
 -define(MAYBE_TRIM, 500).
 -define(NULL_SUBKEY, <<>>).
 -define(CHECK_NATIVE_PRESENCE, true). 
@@ -135,11 +137,27 @@
     :: rebuild_start|rebuild_complete.
     % Prompts to be used when rebuilding the key store (note this is rebuild
     % of the key store not just the aae trees)
+-type metadata() 
+    :: binary().
+    % Metadata should be a binary which can be unwrapped using term_to_binary
+-type value_v2()
+    :: {2, 
+        {tuple(), aae_controller:version_vector(), 
+            non_neg_integer(), non_neg_integer(), non_neg_integer(), 
+            non_neg_integer(), non_neg_integer(),
+            list(erlang:timestamp())|undefined, metadata()}}.
+-type value() ::
+    value_v2().
+    % Value v1 has been an dgone pre-release, so no backwards compatability has
+    % been maintained
+
 -type value_element() 
-    :: {preflist|clock|hash|size|sibcount|indexhash|aae_segment, fun()|null}.
+    :: {preflist|clock|hash|size|sibcount|indexhash|aae_segment|lmd|md, 
+        fun()|null}.
     % A request for a value element to be returned from a value, and the
     % function to apply to the f(Bucket, Key) for elements where the item
     % needs to be calculated (like IndexN in native stores)
+
 
 -export_type([parallel_stores/0,
                 native_stores/0,
@@ -218,7 +236,7 @@ store_close(Pid) ->
 store_mput(Pid, ObjectSpecs) ->
     gen_fsm:send_event(Pid, {mput, ObjectSpecs}).
 
--spec store_mload(pid(), list()) -> ok.
+-spec store_mload(pid(), list(objectspec())) -> ok.
 %% @doc
 %% Put multiple objectspecs into the store.  The object specs should be of the
 %% form {ObjectOp, Segment, Bucket, Key, Value}.
@@ -487,22 +505,34 @@ code_change(_OldVsn, StateName, State, _Extra) ->
 %%% Key Codec
 %%%============================================================================
 
--spec define_objectspec(add|remove, 
-                        integer(), binary(), binary(), tuple()|null) 
-                                                            -> objectspec().
+-spec define_addobjectspec(bucket(), key(), value()) -> objectspec().
 %% @doc
 %% Create an ObjectSpec for adding to the backend store
-define_objectspec(Op, SegTree_int, Bucket, Key, Value) ->
-    #objectspec{op = Op, 
-                segment_id = SegTree_int,
+define_addobjectspec(Bucket, Key, V) ->
+    #objectspec{op = add, 
+                segment_id = 
+                    value(parallel, {aae_segment, null}, {Bucket, Key, V}),
+                last_mod_dates =
+                    value(parallel, {lmd, null}, {Bucket, Key, V}),
                 bucket = Bucket, 
                 key = Key, 
-                value = Value}.
+                value = V}.
+
+-spec define_delobjectspec(bucket(), key(), non_neg_integer())
+                                                            -> objectspec().
+%% @doc
+%% Create an object spec to remove an object from the backend store
+define_delobjectspec(Bucket, Key, Segment) ->
+    #objectspec{op = remove, 
+                segment_id = Segment,
+                bucket = Bucket, 
+                key = Key, 
+                value = null}.
 
 -spec check_objectspec(binary(), binary(), objectspec()) 
                                                 -> {ok, tuple()|null}|false.
 %% @doc
-%% Check to see if an objetc sspec matches the bucket and key, and if so 
+%% Check to see if an objetc spec matches the bucket and key, and if so 
 %% return {ok, Value} (or false if not).
 check_objectspec(Bucket, Key, ObjSpec) ->
     case {ObjSpec#objectspec.bucket, ObjSpec#objectspec.key} of
@@ -522,10 +552,12 @@ generate_treesegment(SegmentID) ->
 
 -spec generate_value(tuple(), integer(), 
                         aae_controller:version_vector(), integer(), 
-                        {integer(), integer(), integer(), any()}) -> tuple().
+                        {integer(), integer(), integer(), 
+                            list(os:timestamp())|undefined, metadata()})
+                                                        -> value_v2().
 %% @doc
 %% Create a value based on the current active version number
-%% Currently the "head" is ignored.  This may eb changed to support other 
+%% Currently the "head" is ignored.  This may be changed to support other 
 %% coverage fold features in the future.  Other items
 %% PreflistID - {Partition, NVal} - although this is largeish, compression 
 %% should minimise the disk footprint
@@ -535,9 +567,10 @@ generate_treesegment(SegmentID) ->
 %% SibCount - the count of siblings for the object (on this vnode only)
 %% IndexHash - A Hash of all the index fields and terms for this object
 generate_value(PreflistID, SegTS_int, Clock, Hash, 
-                                        {Size, SibCount, IndexHash, _Head}) ->
+                            {Size, SibCount, IndexHash, SibLMD, SibMD}) ->
     {?VALUE_VERSION, 
-        {PreflistID, Clock, Hash, Size, SibCount, IndexHash, SegTS_int}}.
+        {PreflistID, Clock, Hash, Size, SibCount, IndexHash, SegTS_int,
+            SibLMD, SibMD}}.
 
 %% Some helper functions for accessing individual value elements by version, 
 %% intended to make it easier to uplift the version of the value format at a
@@ -546,27 +579,32 @@ generate_value(PreflistID, SegTS_int, Clock, Hash,
 %% These value functions will change between native and parallel stores
 
 
--spec value(parallel|native, {atom(), fun()|null}, tuple()) -> any().
+-spec value(parallel|native, {atom(), fun()|null}, {bucket(), key(), value()})
+                                                                    -> any().
 %% @doc
 %% Return the value referenced by the secend input from the tuple containing
 %% {Bucket, Key, Value}.  For the parallel store this should be a straight 
 %% element fetch.  For the native store this will require the binary to be 
 %% processed.  A function can be passed in to handle the scenario where this
 %% is not pre-defined
-value(parallel, {preflist, _F}, {_B, _K, {1, ValueItems}}) ->
+value(parallel, {preflist, _F}, {_B, _K, {2, ValueItems}}) ->
     element(1, ValueItems);
-value(parallel, {clock, _F}, {_B, _K, {1, ValueItems}}) ->
+value(parallel, {clock, _F}, {_B, _K, {2, ValueItems}}) ->
     element(2, ValueItems);
-value(parallel, {hash, _F}, {_B, _K, {1, ValueItems}}) ->
+value(parallel, {hash, _F}, {_B, _K, {2, ValueItems}}) ->
     element(3, ValueItems);
-value(parallel, {size, _F}, {_B, _K, {1, ValueItems}}) ->
+value(parallel, {size, _F}, {_B, _K, {2, ValueItems}}) ->
     element(4, ValueItems);
-value(parallel, {sibcount, _F}, {_B, _K, {1, ValueItems}}) ->
+value(parallel, {sibcount, _F}, {_B, _K, {2, ValueItems}}) ->
     element(5, ValueItems);
-value(parallel, {indexhash, _F}, {_B, _K, {1, ValueItems}}) ->
+value(parallel, {indexhash, _F}, {_B, _K, {2, ValueItems}}) ->
     element(6, ValueItems);
-value(parallel, {aae_segment, _F}, {_B, _K, {1, ValueItems}}) ->
+value(parallel, {aae_segment, _F}, {_B, _K, {2, ValueItems}}) ->
     element(7, ValueItems);
+value(parallel, {lmd, _F}, {_B, _K, {2, ValueItems}}) ->
+    element(8, ValueItems);
+value(parallel, {md, _F}, {_B, _K, {2, ValueItems}}) ->
+    element(9, ValueItems);
 value(native, {clock, _F}, {_B, _K, V}) ->
     element(1, summary_from_native(V));
 value(native, {hash, _F}, {_B, _K, V}) ->
@@ -1240,14 +1278,16 @@ fetch_clock_test() ->
     % When fetching clocks we may have multiple matches on a segment ID
     % Want to prove that here.  Rather than trying to force a hash collision
     % on the segment ID, we will just generate false segment IDs
+    ObjSplitFun = fun(static) -> {0, 1, 0, null} end,
+    WrappedFun = aae_controller:wrapped_splitobjfun(ObjSplitFun),
     GenVal =
         fun(Clock) ->
-            generate_value({1, 3}, 1, Clock, 0, {0, 1, 0, null})
+            generate_value({1, 3}, 1, Clock, 0, WrappedFun(static))
         end,
-    Spc1 = define_objectspec(add, 1, <<"B1">>, <<"K2">>, GenVal([{"a", 1}])),
-    Spc2 = define_objectspec(add, 1, <<"B1">>, <<"K3">>, GenVal([{"b", 1}])),
-    Spc3 = define_objectspec(add, 1, <<"B2">>, <<"K1">>, GenVal([{"c", 1}])),
-    Spc4 = define_objectspec(add, 1, <<"B1">>, <<"K1">>, GenVal([{"d", 1}])),
+    Spc1 = define_addobjectspec(<<"B1">>, <<"K2">>, GenVal([{"a", 1}])),
+    Spc2 = define_addobjectspec(<<"B1">>, <<"K3">>, GenVal([{"b", 1}])),
+    Spc3 = define_addobjectspec(<<"B2">>, <<"K1">>, GenVal([{"c", 1}])),
+    Spc4 = define_addobjectspec(<<"B1">>, <<"K1">>, GenVal([{"d", 1}])),
 
     {ok, Store0} = open_store(leveled_so, 
                                 ?LEVELED_BACKEND_OPTS, 
@@ -1392,10 +1432,10 @@ coverage_cheat_test() ->
 
 dumb_value_test() ->
     V = generate_value({0, 3}, 0, [{a, 1}], erlang:phash2(<<>>), 
-                        {100, 1, 0, null}),
-    ?assertMatch(100, value(parallel, {size, null}, {null, null, V})),
-    ?assertMatch(1, value(parallel, {sibcount, null}, {null, null, V})),
-    ?assertMatch(0, value(parallel, {indexhash, null}, {null, null, V})).
+                        {100, 1, 0, undefined, term_to_binary([])}),
+    ?assertMatch(100, value(parallel, {size, null}, {<<"B">>, <<"K">>, V})),
+    ?assertMatch(1, value(parallel, {sibcount, null}, {<<"B">>, <<"K">>, V})),
+    ?assertMatch(0, value(parallel, {indexhash, null}, {<<"B">>, <<"K">>, V})).
 
 generate_objectspecs(Op, B, KeyList) ->
     FoldFun = 
@@ -1405,9 +1445,15 @@ generate_objectspecs(Op, B, KeyList) ->
                 leveled_tictac:keyto_segment48(aae_util:make_binarykey(B, K)),
             Seg0 = generate_treesegment(Seg),
             Value = generate_value({0, 0}, Seg0, Clock, Hash, 
-                                    {Size, SibCount, 0, null}),
+                                    {Size, SibCount, 0, 
+                                        undefined, term_to_binary([])}),
             
-            define_objectspec(Op, Seg0, B, K, Value)
+            case Op of
+                add ->
+                    define_addobjectspec(B, K, Value);
+                remove ->
+                    define_delobjectspec(B, K, Seg0)
+            end
         end,
     lists:map(FoldFun, KeyList).
             

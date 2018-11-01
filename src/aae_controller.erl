@@ -37,7 +37,8 @@
             aae_fold/6]).
 
 -export([foldobjects_buildtrees/1,
-            hash_clocks/2]).
+            hash_clocks/2,
+            wrapped_splitobjfun/1]).
 
 -export([rebuild_worker/1]).
 
@@ -49,6 +50,7 @@
 -define(BATCH_LENGTH, 128).
 -define(DEFAULT_REBUILD_SCHEDULE, {1, 300}).
 -define(EMPTY, <<>>).
+-define(EMPTY_MD, term_to_binary([])).
 
 
 -record(state, {key_store :: pid()|undefined,
@@ -130,15 +132,17 @@
 %% @doc
 %% Start an AAE controller 
 %% The ObjectsplitFun must take a vnode object in a binary form and output 
-%% {Size, SibCount, IndexHash, _Head}
+%% {Size, SibCount, IndexHash, LMD, MD}.  If the SplitFun previously outputted
+%% {Size, SibCount, IndexHash, null} that output will be converted
 aae_start(KeyStoreT, IsEmpty, RebuildSch, Preflists, RootPath, ObjSplitFun) ->
+    WrapObjSplitFun = wrapped_splitobjfun(ObjSplitFun),
     AAEopts =
         #options{keystore_type = KeyStoreT,
                     store_isempty = IsEmpty,
                     rebuild_schedule = RebuildSch,
                     index_ns = Preflists,
                     root_path = RootPath,
-                    object_splitfun = ObjSplitFun},
+                    object_splitfun = WrapObjSplitFun},
     gen_server:start(?MODULE, [AAEopts], []).
 
 
@@ -757,7 +761,20 @@ foldobjects_buildtrees(IndexNs) ->
     
     {FoldObjectsFun, InitAcc}.
     
-
+wrapped_splitobjfun(ObjectSplitFun) ->
+    fun(Obj) ->
+        case ObjectSplitFun(Obj) of
+            {Size, SibCount, IndexHash, Val} ->
+                Val0 =
+                    case Val of
+                        null -> ?EMPTY_MD;
+                        ValB when is_binary(ValB) -> ValB
+                    end,
+                {Size, SibCount, IndexHash, undefined, Val0};
+            T ->
+                T
+        end
+    end.
 
 %%%============================================================================
 %%% Internal functions
@@ -867,17 +884,17 @@ generate_objectspec(Bucket, Key, SegmentID, _IndexN,
                         _BinaryObj, none, _CurrentHash, 
                         _SplitFun) ->
     SegTree_int = aae_keystore:generate_treesegment(SegmentID),
-    aae_keystore:define_objectspec(remove, SegTree_int, Bucket, Key, null);
+    aae_keystore:define_delobjectspec(Bucket, Key, SegTree_int);
 generate_objectspec(Bucket, Key, SegmentID, IndexN,
                         BinaryObj, CurrentVV, CurrentHash, 
                         SplitFun) ->
     SegTree_int = aae_keystore:generate_treesegment(SegmentID),
-    KSV = aae_keystore:generate_value(IndexN, 
+    Value = aae_keystore:generate_value(IndexN, 
                                         SegTree_int,
                                         CurrentVV, 
                                         CurrentHash, 
                                         SplitFun(BinaryObj)),
-    aae_keystore:define_objectspec(add, SegTree_int, Bucket, Key, KSV).
+    aae_keystore:define_addobjectspec(Bucket, Key, Value).
 
 
 -spec handle_unexpected_key(binary(), binary(), tuple(), list(tuple())) -> ok.
