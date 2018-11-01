@@ -447,7 +447,7 @@ mock_vnode_loadexchangeandrebuild(_Config) ->
             {clock, FC} = lists:keyfind(clock, 1, FEs),
             {hash, FH} = lists:keyfind(hash, 1, FEs),
             {sibcount, FSC} = lists:keyfind(sibcount, 1, FEs),
-            {[{FK, FC, FH}|KCHAcc], SCAcc + FSC}
+            {lists:usort([{FK, FC, FH}|KCHAcc]), SCAcc + FSC}
         end,
     
     {async, VNNF} = 
@@ -473,26 +473,37 @@ mock_vnode_loadexchangeandrebuild(_Config) ->
     true = length(VNNF_KL) == 8,
     true = length(VNPF_KL) == 8,
     
-    [{K1, C1, H1}|_Rest] = VNNF_KL,
+    [{K1, C1, H1}|Rest] = VNNF_KL,
+    [{K2, C2, H2}|_Rest] = Rest,
     BinaryKey1 = aae_util:make_binarykey(Bucket, K1),
-    SegmentID1 = element(2, leveled_tictac:keyto_segment48(BinaryKey1)),
+    BinaryKey2 = aae_util:make_binarykey(Bucket, K2),
+    SegmentID1 = 
+        leveled_tictac:get_segment(
+            element(1, leveled_tictac:tictac_hash(BinaryKey1, <<>>)), 
+            small),
+    SegmentID2 = 
+        leveled_tictac:get_segment(
+            element(1, leveled_tictac:tictac_hash(BinaryKey2, <<>>)), 
+            small),
+    io:format("Looking for Segment IDs K1 ~w ~w K2 ~w ~w~n",
+                [K1, SegmentID1, K2, SegmentID2]),
 
     {async, VNNF_SL} = 
         mock_kv_vnode:fold_aae(VNN, 
                                 {key_range, Bucket, StartKey, EndKey},
-                                {segments, [SegmentID1]},
+                                {segments, [SegmentID1, SegmentID2], small},
                                 FoldKRFun, 
                                 InitAcc,
                                 Elements),
     {async, VNPF_SL} = 
         mock_kv_vnode:fold_aae(VNP, 
                                 {key_range, Bucket, StartKey, EndKey},
-                                {segments, [SegmentID1]},
+                                {segments, [SegmentID1, SegmentID2], small},
                                 FoldKRFun, 
                                 InitAcc,
                                 Elements),
-    {[{K1, C1, H1}], 1} = VNNF_SL(),
-    {[{K1, C1, H1}], 1} = VNPF_SL(),
+    {[{K1, C1, H1}, {K2, C2, H2}], 2} = VNNF_SL(),
+    {[{K1, C1, H1}, {K2, C2, H2}], 2} = VNPF_SL(),
 
     % Make change to one vnode only (the parallel one)
     Idx1 = erlang:phash2(RogueObj1#r_object.key) rem length(IndexNs),

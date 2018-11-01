@@ -130,7 +130,7 @@
     % Limit the scope of the fold, to specific segments or to specific 
     % buckets (and otherwise state all).
 -type segment_limiter()
-    :: all|{segments, list(integer())}.
+    :: all|{segments, list(integer()), small|medium|large}.
 -type rebuild_prompts()
     :: rebuild_start|rebuild_complete.
     % Prompts to be used when rebuilding the key store (note this is rebuild
@@ -347,13 +347,17 @@ parallel(startup_metadata, _From, State) ->
 native({fold, Range, Segments, FoldFun, InitAcc, Elements}, _From, State) ->
     FoldElementsFun = 
         case Segments of 
-            {segments, SegList} ->
+            {segments, SegList, TreeSize} ->
                 Elements0 = lists:ukeysort(1, [{aae_segment, null}|Elements]),
+                SegList0 = 
+                    leveled_tictac:adjust_segmentmatch_list(SegList, 
+                                                            TreeSize,
+                                                            ?TREE_SIZE),
                 FoldObjectsFun0 =
                     fun(B, K, V, Acc) ->
                         {aae_segment, SegID} = 
                             lists:keyfind(aae_segment, 1, V),
-                        case lists:member(SegID, SegList) of
+                        case lists:member(SegID, SegList0) of
                             true ->
                                 FoldFun(B, K, V, Acc);
                             false ->
@@ -765,7 +769,9 @@ do_fetchclock(leveled_so, Store, Bucket, Key, Seg) ->
         end,
     InitAcc = none,
     {async, Folder} = 
-        do_fold(leveled_so, Store, all, {segments, [Seg]}, FoldFun, InitAcc),
+        do_fold(leveled_so, Store, all,
+                    {segments, [Seg], ?TREE_SIZE},
+                    FoldFun, InitAcc),
     Folder().
 
 -spec do_fold(parallel_stores(), pid(), 
@@ -800,16 +806,20 @@ do_fold(leveled_so, Store, Range, SegFilter, FoldObjectsFun, InitAcc) ->
                                             ?NOCHECK_PRESENCE, 
                                             ?SNAP_PREFOLD, 
                                             false);
-        {segments, SegList} ->
+        {segments, SegList, TreeSize} ->
+            SegList0 = 
+                leveled_tictac:adjust_segmentmatch_list(SegList,
+                                                        TreeSize,
+                                                        ?TREE_SIZE),
             MapSegFun = 
                 fun(S) -> 
                     S0 = leveled_tictac:get_segment(S, ?TREE_SIZE),
                     <<S0:24/integer>> 
                 end,
-            SegList0 = lists:map(MapSegFun, SegList),
+            SegList1 = lists:map(MapSegFun, SegList0),
             leveled_bookie:book_headfold(Store, 
                                             ?HEAD_TAG,
-                                            {bucket_list, SegList0},
+                                            {bucket_list, SegList1},
                                             {FoldFun, InitAcc}, 
                                             ?NOCHECK_PRESENCE, 
                                             ?SNAP_PREFOLD, 
@@ -818,12 +828,16 @@ do_fold(leveled_so, Store, Range, SegFilter, FoldObjectsFun, InitAcc) ->
 do_fold(leveled_ko, Store, Range, SegFilter, FoldObjectsFun, InitAcc) ->
     {FoldFun, SegList} =
         case SegFilter of
-            {segments, Segments} ->
+            {segments, Segments, TreeSize} ->
+                SegList0 = 
+                    leveled_tictac:adjust_segmentmatch_list(Segments,
+                                                            TreeSize,
+                                                            ?TREE_SIZE),
                 SegFoldFun = 
                     fun(B, {K, ?NULL_SUBKEY}, V, Acc) ->
                         SegTree_int = 
                             value(parallel, {aae_segment, null}, {B, K, V}),
-                        case lists:member(SegTree_int, Segments) of 
+                        case lists:member(SegTree_int, SegList0) of 
                             true ->
                                 FoldObjectsFun(B, K, V, Acc);
                             false ->
@@ -868,7 +882,7 @@ do_fold(leveled_ko, Store, Range, SegFilter, FoldObjectsFun, InitAcc) ->
 do_fold(leveled_nko, Store, Range, SegFilter, FoldObjectsFun, InitAcc) ->
     SegList = 
         case SegFilter of
-            {segments, Segments} ->
+            {segments, Segments, _TreeSize} ->
                 Segments;
             all ->
                 false
@@ -967,6 +981,7 @@ clear_pendingpath(Manifest, RootPath) ->
             aae_util:log("KS006", [PendingPath], logs()),
             Manifest#manifest{pending_guid = undefined}
     end.
+
 
 
 %%%============================================================================
@@ -1201,7 +1216,7 @@ load_tester(StoreType) ->
     {async, Folder9} = 
         store_fold(Store1,
                     all,
-                    {segments, SegList}, 
+                    {segments, SegList, large}, 
                     FoldObjectsFun, [], 
                     [{clock, null}]),
     Res9 = lists:usort(Folder9()),
