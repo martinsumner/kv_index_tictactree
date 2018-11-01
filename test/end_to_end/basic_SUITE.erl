@@ -5,6 +5,8 @@
             dual_store_compare_medium_ko/1,
             dual_store_compare_large_so/1,
             dual_store_compare_large_ko/1,
+            aae_fold_keyorder/1,
+            aae_fold_segmentorder/1,
             mock_vnode_loadexchangeandrebuild/1,
             mock_vnode_coveragefold_nativemedium/1,
             mock_vnode_coveragefold_nativesmall/1,
@@ -14,6 +16,8 @@ all() -> [dual_store_compare_medium_so,
             dual_store_compare_medium_ko,
             dual_store_compare_large_so,
             dual_store_compare_large_ko,
+            aae_fold_keyorder,
+            aae_fold_segmentorder,
             mock_vnode_loadexchangeandrebuild,
             mock_vnode_coveragefold_nativemedium,
             mock_vnode_coveragefold_nativesmall,
@@ -301,6 +305,135 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
     ok = aae_controller:aae_close(Cntrl2),
     RootPath = reset_filestructure().
 
+aae_fold_keyorder(_Config) ->
+    aae_fold_tester(leveled_ko, 50000).
+
+aae_fold_segmentorder(_Config) ->
+    aae_fold_tester(leveled_so, 50000).
+
+
+aae_fold_tester(ParallelStoreType, KeyCount) ->
+    RootPath = reset_filestructure(),
+    FoldPath1 = filename:join(RootPath, "folder1/"),
+    SplitF = 
+        fun(X) -> 
+            {leveled_rand:uniform(1000), 1, 0, element(1, X), element(2, X)}
+        end,
+    
+    {ok, Cntrl1} = 
+        aae_controller:aae_start({parallel, ParallelStoreType}, 
+                                    true, 
+                                    {1, 300}, 
+                                    [{2, 0}, {2, 1}], 
+                                    FoldPath1, 
+                                    SplitF),
+
+    BKVListXS = gen_keys([], KeyCount),
+    
+    {SWLowMegaS, SWLowS, _SWLowMicroS} = os:timestamp(),
+    timer:sleep(1000),
+    ok = put_keys(Cntrl1, 2, BKVListXS, none),
+    timer:sleep(1000),
+    {SWHighMegaS, SWHighS, _SWHighMicroS} = os:timestamp(),
+    BucketList = [integer_to_binary(1), integer_to_binary(3)],
+    FoldElements = [{clock, null}, {md, null}],
+    FoldFun =
+        fun(B, _K, ElementList, {B1Count, B3Count}) ->
+            {clock, FoldClock} = lists:keyfind(clock, 1, ElementList),
+            {md, FoldMD} = lists:keyfind(md, 1, ElementList),
+            case binary_to_term(FoldMD) of
+                [{clock, FoldClock}] ->
+                    case B of
+                        <<"1">> ->
+                            {B1Count + 1, B3Count};
+                        <<"3">> ->
+                            {B1Count, B3Count + 1}
+                    end
+            end
+        end,
+    InitAcc = {0, 0},
+    {async, Runner1} = 
+        aae_controller:aae_fold(Cntrl1, 
+                                {buckets, BucketList},
+                                all,
+                                all,
+                                false,
+                                FoldFun,
+                                InitAcc,
+                                FoldElements),
+    true = {KeyCount div 5, KeyCount div 5} == Runner1(),
+
+    {async, Runner2} = 
+        aae_controller:aae_fold(Cntrl1, 
+                                {buckets, BucketList},
+                                all,
+                                {SWLowMegaS * 1000000 + SWLowS,
+                                    SWHighMegaS * 1000000 + SWHighS},
+                                false,
+                                FoldFun,
+                                InitAcc,
+                                FoldElements),
+    true = {KeyCount div 5, KeyCount div 5} == Runner2(),
+
+    {async, Runner3} = 
+        aae_controller:aae_fold(Cntrl1, 
+                                {buckets, BucketList},
+                                all,
+                                {0, SWLowMegaS * 1000000 + SWLowS},
+                                false,
+                                FoldFun,
+                                InitAcc,
+                                FoldElements),
+    
+    {0, 0} = Runner3(),
+
+    {async, Runner4} = 
+        aae_controller:aae_fold(Cntrl1, 
+                                {buckets, BucketList},
+                                all,
+                                {SWHighMegaS * 1000000 + SWHighS, 
+                                    infinity},
+                                false,
+                                FoldFun,
+                                InitAcc,
+                                FoldElements),
+    {0, 0} = Runner4(),
+    
+    {async, Runner5} = 
+        aae_controller:aae_fold(Cntrl1, 
+                                {buckets, BucketList},
+                                all,
+                                all,
+                                2000,
+                                FoldFun,
+                                InitAcc,
+                                FoldElements),
+    case ParallelStoreType of
+        leveled_ko ->
+            {0, {2000, 0}} = Runner5();
+        leveled_so ->
+            true = {KeyCount div 5, KeyCount div 5} == Runner5()
+    end,
+
+    {async, Runner6} = 
+        aae_controller:aae_fold(Cntrl1, 
+                                {buckets, BucketList},
+                                all,
+                                {SWLowMegaS * 1000000 + SWLowS,
+                                    SWHighMegaS * 1000000 + SWHighS},
+                                2000,
+                                FoldFun,
+                                InitAcc,
+                                FoldElements),
+    case ParallelStoreType of
+        leveled_ko ->
+            {0, {2000, 0}} = Runner6();
+        leveled_so ->
+            true = {KeyCount div 5, KeyCount div 5} == Runner6()
+    end,
+
+    ok = aae_controller:aae_close(Cntrl1),
+    RootPath = reset_filestructure().
 
 
 mock_vnode_loadexchangeandrebuild(_Config) ->
@@ -898,7 +1031,8 @@ put_keys(Cntrl, Nval, [{Bucket, Key, VersionVector}|Tail], PrevVV) ->
                                 Key, 
                                 VersionVector, 
                                 PrevVV, 
-                                <<>>),
+                                {[os:timestamp()],
+                                    term_to_binary([{clock, VersionVector}])}),
     put_keys(Cntrl, Nval, Tail, PrevVV).
 
 remove_keys(_Cntrl, _Nval, []) ->

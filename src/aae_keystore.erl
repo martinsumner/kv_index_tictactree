@@ -49,7 +49,7 @@
             store_mput/2,
             store_mload/2,
             store_prompt/2,
-            store_fold/6,
+            store_fold/8,
             store_fetchclock/3]).
 
 -export([define_addobjectspec/3,
@@ -133,6 +133,16 @@
     % buckets (and otherwise state all).
 -type segment_limiter()
     :: all|{segments, list(integer()), small|medium|large}.
+-type modified_limiter()
+    :: all|{integer(), integer()}.
+    % A range of last modified dates to use in the fold
+-type count_limiter()
+    :: pos_integer()|false.
+    % A Limit on the count of objects returned.  If there is a leveled_so
+    % backend to the keystore it is not possible to continue if the count is
+    % reached
+    % The count will be ignored if it is a leveled_so backend (as no
+    % continuation is possible if too_many_results is hit)
 -type rebuild_prompts()
     :: rebuild_start|rebuild_complete.
     % Prompts to be used when rebuilding the key store (note this is rebuild
@@ -266,16 +276,19 @@ store_prompt(Pid, Prompt) ->
 
 -spec store_fold(pid(), 
                     range_limiter(),
-                    segment_limiter(), 
+                    segment_limiter(),
+                    modified_limiter(),
+                    count_limiter(),
                     fun(), any(), 
                     list(value_element())) -> any()|{async, fun()}.
 %% @doc
 %% Return a fold function to asynchronously run a fold over a snapshot of the
 %% store
-store_fold(Pid, RLimiter, SLimiter, FoldObjectsFun, InitAcc, Elements) ->
+store_fold(Pid, RLimiter, SLimiter, LMDLimiter, MaxObjectCount, 
+            FoldObjectsFun, InitAcc, Elements) ->
     gen_fsm:sync_send_event(Pid, 
                             {fold, 
-                                RLimiter, SLimiter,
+                                RLimiter, SLimiter, LMDLimiter, MaxObjectCount,
                                 FoldObjectsFun, InitAcc,
                                 Elements},
                             infinity).
@@ -331,10 +344,11 @@ init([Opts]) ->
                         last_rebuild = Manifest0#manifest.last_rebuild}}
     end.
 
-loading({fold, Range, Segments, FoldFun, InitAcc, Elements}, _From, State) ->
+loading({fold, Range, Segments, LMD, Count, FoldFun, InitAcc, Elements},
+                                                            _From, State) ->
     FoldElementsFun = fold_elements_fun(FoldFun, Elements, parallel),
     Result = do_fold(State#state.store_type, State#state.store,
-                        Range, Segments, FoldElementsFun, InitAcc),
+                        Range, Segments, LMD, Count, FoldElementsFun, InitAcc),
     {reply, Result, loading, State};
 loading({fetch_clock, Bucket, Key}, _From, State) ->
     VV = do_fetchclock(State#state.store_type, State#state.store, Bucket, Key),
@@ -344,10 +358,11 @@ loading(close, _From, State) ->
     ok = close_store(State#state.store_type, State#state.store),
     {stop, normal, ok, State}.
 
-parallel({fold, Range, Segments, FoldFun, InitAcc, Elements}, _From, State) ->
+parallel({fold, Range, Segments, LMD, Count, FoldFun, InitAcc, Elements},
+                                                            _From, State) ->
     FoldElementsFun = fold_elements_fun(FoldFun, Elements, parallel),
     Result = do_fold(State#state.store_type, State#state.store,
-                        Range, Segments, FoldElementsFun, InitAcc),
+                        Range, Segments, LMD, Count, FoldElementsFun, InitAcc),
     {reply, Result, parallel, State};
 parallel({fetch_clock, Bucket, Key}, _From, State) ->
     VV = do_fetchclock(State#state.store_type, State#state.store, Bucket, Key),
@@ -362,7 +377,8 @@ parallel(startup_metadata, _From, State) ->
         parallel, 
         State}.
 
-native({fold, Range, Segments, FoldFun, InitAcc, Elements}, _From, State) ->
+native({fold, Range, Segments, LMD, Count, FoldFun, InitAcc, Elements},
+                                                            _From, State) ->
     FoldElementsFun = 
         case Segments of 
             {segments, SegList, TreeSize} ->
@@ -387,7 +403,7 @@ native({fold, Range, Segments, FoldFun, InitAcc, Elements}, _From, State) ->
                 fold_elements_fun(FoldFun, Elements, native)
         end,
     Result = do_fold(State#state.store_type, State#state.store,
-                        Range, Segments, FoldElementsFun, InitAcc),
+                        Range, Segments, LMD, Count, FoldElementsFun, InitAcc),
     {reply, Result, native, State};
 native(startup_metadata, _From, State) ->
     {reply, 
@@ -814,11 +830,13 @@ do_fetchclock(leveled_so, Store, Bucket, Key, Seg) ->
     {async, Folder} = 
         do_fold(leveled_so, Store, all,
                     {segments, [Seg], ?TREE_SIZE},
+                    all, false,
                     FoldFun, InitAcc),
     Folder().
 
 -spec do_fold(parallel_stores(), pid(), 
-                range_limiter(), segment_limiter(), 
+                range_limiter(), segment_limiter(),
+                modified_limiter(), count_limiter(),
                 fun(), any()) -> {async, fun()}.
 %% @doc
 %% Fold over the store applying FoldObjectsFun to each object and the 
@@ -830,7 +848,14 @@ do_fetchclock(leveled_so, Store, Bucket, Key, Seg) ->
 %% been taken prior to the fold, and should not happen as part of the fold.
 %% There should be no refresh of the iterator, the snapshot should last the
 %% duration of the fold.
-do_fold(leveled_so, Store, Range, SegFilter, FoldObjectsFun, InitAcc) ->
+do_fold(leveled_so, Store, Range, SegFilter, LMDRange, MoC,
+                            FoldObjectsFun, InitAcc) when is_integer(MoC) ->
+    aae_util:log("KS008", [], logs()),
+    do_fold(leveled_so, 
+                Store, Range, SegFilter, LMDRange, false,
+                FoldObjectsFun, InitAcc);
+do_fold(leveled_so, Store, Range, SegFilter, LMDRange, false,
+                                                    FoldObjectsFun, InitAcc) ->
     FoldFun = 
         fun(_S, {BKBin, _SK}, V, Acc) ->
             {B, K} = binary_to_term(BKBin),
@@ -845,9 +870,12 @@ do_fold(leveled_so, Store, Range, SegFilter, FoldObjectsFun, InitAcc) ->
         all ->
             leveled_bookie:book_headfold(Store, 
                                             ?HEAD_TAG,
+                                            all,
                                             {FoldFun, InitAcc}, 
                                             ?NOCHECK_PRESENCE, 
                                             ?SNAP_PREFOLD, 
+                                            false,
+                                            modify_modifiedrange(LMDRange),
                                             false);
         {segments, SegList, TreeSize} ->
             SegList0 = 
@@ -866,9 +894,12 @@ do_fold(leveled_so, Store, Range, SegFilter, FoldObjectsFun, InitAcc) ->
                                             {FoldFun, InitAcc}, 
                                             ?NOCHECK_PRESENCE, 
                                             ?SNAP_PREFOLD, 
+                                            false,
+                                            modify_modifiedrange(LMDRange),
                                             false)
     end;
-do_fold(leveled_ko, Store, Range, SegFilter, FoldObjectsFun, InitAcc) ->
+do_fold(leveled_ko, Store, Range, SegFilter, LMDRange, MaxObjects,
+                                                    FoldObjectsFun, InitAcc) ->
     {FoldFun, SegList} =
         case SegFilter of
             {segments, Segments, TreeSize} ->
@@ -894,35 +925,23 @@ do_fold(leveled_ko, Store, Range, SegFilter, FoldObjectsFun, InitAcc) ->
                     end,
                     false}
         end,
-    case Range of
-        all ->
-            leveled_bookie:book_headfold(Store, 
-                                            ?HEAD_TAG, 
-                                            {FoldFun, InitAcc}, 
-                                            ?NOCHECK_PRESENCE, 
-                                            ?SNAP_PREFOLD, 
-                                            SegList);
-        {buckets, BucketList} ->
-            leveled_bookie:book_headfold(Store, 
-                                            ?HEAD_TAG,
-                                            {bucket_list, BucketList}, 
-                                            {FoldFun, InitAcc}, 
-                                            ?NOCHECK_PRESENCE, 
-                                            ?SNAP_PREFOLD, 
-                                            SegList);
-        {key_range, B0, SK, EK} ->
-            leveled_bookie:book_headfold(Store, 
-                                            ?HEAD_TAG, 
-                                            {range, 
-                                                B0, 
-                                                {{SK, ?NULL_SUBKEY}, 
-                                                    {EK, ?NULL_SUBKEY}}},
-                                            {FoldFun, InitAcc}, 
-                                            ?NOCHECK_PRESENCE, 
-                                            ?SNAP_PREFOLD, 
-                                            SegList)
-    end;     
-do_fold(leveled_nko, Store, Range, SegFilter, FoldObjectsFun, InitAcc) ->
+    ReformattedRange =
+        case Range of
+            {key_range, B0, SK, EK} ->
+                {range, B0,  {{SK, ?NULL_SUBKEY}, {EK, ?NULL_SUBKEY}}};
+            {buckets, BucketList} ->
+                {bucket_list, BucketList};
+            all ->
+                all
+        end,
+    leveled_bookie:book_headfold(Store,
+                                    ?HEAD_TAG, ReformattedRange,
+                                    {FoldFun, InitAcc}, 
+                                    ?NOCHECK_PRESENCE, ?SNAP_PREFOLD, 
+                                    SegList, modify_modifiedrange(LMDRange),
+                                    MaxObjects);
+do_fold(leveled_nko, Store, Range, SegFilter, LMDRange, MaxObjects,
+                                                    FoldObjectsFun, InitAcc) ->
     SegList = 
         case SegFilter of
             {segments, Segments, _TreeSize} ->
@@ -930,32 +949,27 @@ do_fold(leveled_nko, Store, Range, SegFilter, FoldObjectsFun, InitAcc) ->
             all ->
                 false
         end,
-    case Range of
-        all ->
-            leveled_bookie:book_headfold(Store, 
-                                            ?RIAK_TAG, 
-                                            {FoldObjectsFun, InitAcc}, 
-                                            ?CHECK_NATIVE_PRESENCE, 
-                                            ?SNAP_PREFOLD, 
-                                            SegList);
-        {buckets, BucketList} ->
-            leveled_bookie:book_headfold(Store, 
-                                            ?RIAK_TAG, 
-                                            {bucket_list, BucketList}, 
-                                            {FoldObjectsFun, InitAcc}, 
-                                            ?NOCHECK_PRESENCE, 
-                                            ?SNAP_PREFOLD, 
-                                            SegList);
-        {key_range, B, SK, EK} ->
-            leveled_bookie:book_headfold(Store, 
-                                            ?RIAK_TAG, 
-                                            {range, B, {SK, EK}}, 
-                                            {FoldObjectsFun, InitAcc}, 
-                                            ?NOCHECK_PRESENCE, 
-                                            ?SNAP_PREFOLD, 
-                                            SegList)
-    end.
+    ReformattedRange =
+        case Range of
+            {key_range, B0, SK, EK} ->
+                {range, B0, {SK, EK}};
+            {buckets, BucketList} ->
+                {bucket_list, BucketList};
+            all ->
+                all
+        end,
+    leveled_bookie:book_headfold(Store,
+                                    ?RIAK_TAG, ReformattedRange,
+                                    {FoldObjectsFun, InitAcc}, 
+                                    ?NOCHECK_PRESENCE, ?SNAP_PREFOLD, 
+                                    SegList, modify_modifiedrange(LMDRange),
+                                    MaxObjects).
 
+
+modify_modifiedrange(all) ->
+    false;
+modify_modifiedrange({ST, ET}) ->
+    {ST, ET}.
 
 range_check(all, _B, _K) ->
     true;
@@ -1051,7 +1065,10 @@ logs() ->
         {"KS006",
             {warn, "Pending store is garbage and should be deleted at ~s"}},
         {"KS007",
-            {info, "Rebuild prompt ~w with GUID ~s"}}
+            {info, "Rebuild prompt ~w with GUID ~s"}},
+        {"KS008",
+            {warn, "Count Limit on fold to be ignored as segment-ordered" 
+                    ++ " backend so all results will be returned"}}
 
         ].
 
@@ -1062,6 +1079,10 @@ logs() ->
 
 -ifdef(TEST).
 
+
+store_fold(Pid, RLimiter, SLimiter, FoldObjectsFun, InitAcc, Elements) ->
+    store_fold(Pid, RLimiter, SLimiter, all, false, 
+                FoldObjectsFun, InitAcc, Elements).
 
 -spec store_currentstatus(pid()) -> {atom(), list()}.
 %% @doc

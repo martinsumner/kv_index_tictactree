@@ -34,7 +34,8 @@
             aae_fetchclocks/5,
             aae_rebuildtrees/5,
             aae_rebuildstore/2,
-            aae_fold/6]).
+            aae_fold/6,
+            aae_fold/8]).
 
 -export([foldobjects_buildtrees/1,
             hash_clocks/2,
@@ -109,7 +110,7 @@
         % `undefined` is speficially resrved for the case that an object may 
         % be being replaced but the vnode does not know if it is being 
         % replaced.  In this case, it is the responsiblity of the controller 
-        % to best determine what the previous version was. 
+        % to best determine what the previous version was.
 
 
 -export_type([responsible_preflist/0,
@@ -245,16 +246,32 @@ aae_fetchclocks(Pid, IndexNs, SegmentIDs, ReturnFun, PrefLFun) ->
                     {fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PrefLFun}).
 
 -spec aae_fold(pid(), 
-                aae_keystore:range_limiter(), aae_keystore:segment_limiter(), 
+                aae_keystore:range_limiter(),
+                aae_keystore:segment_limiter(),
                 fun(), any(), 
                 list(aae_keystore:value_element())) -> {async, fun()}.
 %% @doc
 %% Return a folder to fold over the keys in the aae_keystore (or native 
 %% keystore if in native mode)
 aae_fold(Pid, RLimiter, SLimiter, FoldObjectsFun, InitAcc, Elements) ->
+    aae_fold(Pid, RLimiter, SLimiter, all, false, 
+                FoldObjectsFun, InitAcc, Elements).
+
+-spec aae_fold(pid(), 
+                aae_keystore:range_limiter(),
+                aae_keystore:segment_limiter(),
+                aae_keystore:modified_limiter(),
+                aae_keystore:count_limiter(),
+                fun(), any(), 
+                list(aae_keystore:value_element())) -> {async, fun()}.
+%% @doc
+%% Return a folder to fold over the keys in the aae_keystore (or native 
+%% keystore if in native mode)
+aae_fold(Pid, RLimiter, SLimiter, LMDLimiter, MaxObjectCount,
+            FoldObjectsFun, InitAcc, Elements) ->
     gen_server:call(Pid, 
                     {fold, 
-                        RLimiter, SLimiter, 
+                        RLimiter, SLimiter, LMDLimiter, MaxObjectCount,
                         FoldObjectsFun, InitAcc, 
                         Elements}).
 
@@ -420,6 +437,7 @@ handle_call({rebuild_trees, IndexNs, PreflistFun, WorkerFun, OnlyIfBroken},
             {async, Folder} = 
                 aae_keystore:store_fold(State#state.key_store, 
                                         all, all,
+                                        all, false,
                                         FoldFun, InitAcc, 
                                         [{preflist, PreflistFun}, 
                                             {hash, null}]),
@@ -527,14 +545,16 @@ handle_call({rebuild_store, SplitObjFun}, _From, State)->
                                             rebuild_complete),
             {reply, ok, State}
     end;
-handle_call({fold, RLimiter, SLimiter, FoldObjectsFun, InitAcc, Elements}, 
-                                                            _From, State) ->
+handle_call({fold, RLimiter, SLimiter, LMDLimiter, MaxObjectCount,
+                    FoldObjectsFun, InitAcc, Elements},  _From, State) ->
     ok = maybe_flush_puts(State#state.key_store, 
                             State#state.objectspecs_queue,
                             State#state.parallel_keystore),
     R = aae_keystore:store_fold(State#state.key_store, 
                                 RLimiter,
-                                SLimiter, 
+                                SLimiter,
+                                LMDLimiter,
+                                MaxObjectCount,
                                 FoldObjectsFun, 
                                 InitAcc,
                                 Elements),
@@ -600,7 +620,8 @@ handle_call({fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PreflFun},
     {async, Folder} = 
         aae_keystore:store_fold(State#state.key_store, 
                                 all,
-                                {segments, SegmentIDs, ?TREE_SIZE}, 
+                                {segments, SegmentIDs, ?TREE_SIZE},
+                                all, false, 
                                 FoldObjFun, 
                                 {[], InitMap},
                                 [{preflist, PreflFun}, 
