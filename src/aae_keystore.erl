@@ -745,14 +745,16 @@ dedup_map(leveled_so, ObjectSpecs) ->
     SegmentOrderedMapFun = 
         fun(ObjSpec) ->
             SegTS_int = ObjSpec#objectspec.segment_id,
-            {ObjSpec#objectspec.op, 
-                <<SegTS_int:24/integer>>, % needs to be binary not bitstring  
+            {ObjSpec#objectspec.op,
+                v1,
+                <<SegTS_int:24/integer>>, 
                 term_to_binary({ObjSpec#objectspec.bucket, 
                                 ObjSpec#objectspec.key}), 
                 ?NULL_SUBKEY,
+                ObjSpec#objectspec.last_mod_dates,
                 ObjSpec#objectspec.value}
         end,
-    lists:ukeysort(3, lists:map(SegmentOrderedMapFun, ObjectSpecs));
+    lists:ukeysort(4, lists:map(SegmentOrderedMapFun, ObjectSpecs));
 dedup_map(leveled_ko, ObjectSpecs) ->
     FoldFun =
         fun(ObjSpec, {Acc, Members}) ->
@@ -762,7 +764,10 @@ dedup_map(leveled_ko, ObjectSpecs) ->
                 true ->
                     {Acc, Members};
                 false ->
-                    UpdSpec = {ObjSpec#objectspec.op, B, K, ?NULL_SUBKEY, 
+                    UpdSpec = {ObjSpec#objectspec.op,
+                                v1,
+                                B, K, ?NULL_SUBKEY,
+                                ObjSpec#objectspec.last_mod_dates,
                                 ObjSpec#objectspec.value},
                     {[UpdSpec|Acc], [{B, K}|Members]}
             end
