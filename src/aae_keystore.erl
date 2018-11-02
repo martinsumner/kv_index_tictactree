@@ -176,6 +176,8 @@
                 value_element/0,
                 range_limiter/0,
                 segment_limiter/0,
+                modified_limiter/0,
+                count_limiter/0,
                 rebuild_prompts/0]).
 
 
