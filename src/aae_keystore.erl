@@ -953,19 +953,20 @@ do_fold(leveled_nko, Store, Range, SegFilter, LMDRange, MaxObjects,
             all ->
                 false
         end,
-    ReformattedRange =
+    {ReformattedRange, CheckPresence} =
         case Range of
             {key_range, B0, SK, EK} ->
-                {range, B0, {SK, EK}};
+                {{range, B0, {SK, EK}}, ?NOCHECK_PRESENCE};
             {buckets, BucketList} ->
-                {bucket_list, BucketList};
+                {{bucket_list, BucketList}, ?NOCHECK_PRESENCE};
             all ->
-                all
+                % Rebuilds should check presence
+                {all, ?CHECK_NATIVE_PRESENCE}
         end,
     leveled_bookie:book_headfold(Store,
                                     ?RIAK_TAG, ReformattedRange,
                                     {FoldObjectsFun, InitAcc}, 
-                                    ?NOCHECK_PRESENCE, ?SNAP_PREFOLD, 
+                                    CheckPresence, ?SNAP_PREFOLD, 
                                     SegList, modify_modifiedrange(LMDRange),
                                     MaxObjects).
 
