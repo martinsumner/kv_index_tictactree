@@ -851,9 +851,11 @@ do_fetchclock(leveled_so, Store, Bucket, Key, Seg) ->
 do_fold(leveled_so, Store, Range, SegFilter, LMDRange, MoC,
                             FoldObjectsFun, InitAcc) when is_integer(MoC) ->
     aae_util:log("KS008", [], logs()),
-    do_fold(leveled_so, 
+    {async, Runner} = 
+        do_fold(leveled_so, 
                 Store, Range, SegFilter, LMDRange, false,
-                FoldObjectsFun, InitAcc);
+                FoldObjectsFun, InitAcc),
+    {async, fun() -> {-1, Runner()} end};
 do_fold(leveled_so, Store, Range, SegFilter, LMDRange, false,
                                                     FoldObjectsFun, InitAcc) ->
     FoldFun = 

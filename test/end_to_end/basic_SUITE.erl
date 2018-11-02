@@ -412,7 +412,8 @@ aae_fold_tester(ParallelStoreType, KeyCount) ->
         leveled_ko ->
             {0, {2000, 0}} = Runner5();
         leveled_so ->
-            true = {KeyCount div 5, KeyCount div 5} == Runner5()
+            true = 
+                {-1, {KeyCount div 5, KeyCount div 5}} == Runner5()
     end,
 
     {async, Runner6} = 
@@ -429,7 +430,8 @@ aae_fold_tester(ParallelStoreType, KeyCount) ->
         leveled_ko ->
             {0, {2000, 0}} = Runner6();
         leveled_so ->
-            true = {KeyCount div 5, KeyCount div 5} == Runner6()
+            true = 
+                {-1, {KeyCount div 5, KeyCount div 5}} == Runner6()
     end,
 
     ok = aae_controller:aae_close(Cntrl1),
