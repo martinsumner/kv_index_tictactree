@@ -293,8 +293,12 @@ handle_call({rebuild, true}, _From, State) ->
                     true, 
                         % SnapPreFold - don't want this to change before
                         % the worker starts 
-                    false 
+                    false,
                         % SegmentList - all segments required
+                    false,
+                        % Last Modified Range
+                    false
+                        % Max Objects
                     },
             {async, Runner} = 
                 leveled_bookie:book_returnfolder(State#state.vnode_store, Q),

@@ -49,10 +49,11 @@
             store_mput/2,
             store_mload/2,
             store_prompt/2,
-            store_fold/6,
+            store_fold/8,
             store_fetchclock/3]).
 
--export([define_objectspec/5,
+-export([define_addobjectspec/3,
+            define_delobjectspec/3,
             check_objectspec/3,
             generate_value/5,
             generate_treesegment/1,
@@ -82,6 +83,7 @@
                         segment_id :: integer(),
                         bucket :: binary(),
                         key :: binary(),
+                        last_mod_dates :: undefined|list(os:timestamp()),
                         value = null :: tuple()|null}).
 
 -include_lib("eunit/include/eunit.hrl").
@@ -100,7 +102,7 @@
     % file extension to be used once manifest write is complete
 -define(PENDING_EXT, ".pnd").
     % file extension to be used once manifest write is pending
--define(VALUE_VERSION, 1).
+-define(VALUE_VERSION, 2).
 -define(MAYBE_TRIM, 500).
 -define(NULL_SUBKEY, <<>>).
 -define(CHECK_NATIVE_PRESENCE, true). 
@@ -131,15 +133,41 @@
     % buckets (and otherwise state all).
 -type segment_limiter()
     :: all|{segments, list(integer()), small|medium|large}.
+-type modified_limiter()
+    :: all|{integer(), integer()}.
+    % A range of last modified dates to use in the fold
+-type count_limiter()
+    :: pos_integer()|false.
+    % A Limit on the count of objects returned.  If there is a leveled_so
+    % backend to the keystore it is not possible to continue if the count is
+    % reached
+    % The count will be ignored if it is a leveled_so backend (as no
+    % continuation is possible if too_many_results is hit)
 -type rebuild_prompts()
     :: rebuild_start|rebuild_complete.
     % Prompts to be used when rebuilding the key store (note this is rebuild
     % of the key store not just the aae trees)
+-type metadata() 
+    :: binary().
+    % Metadata should be a binary which can be unwrapped using term_to_binary
+-type value_v2()
+    :: {2, 
+        {tuple(), aae_controller:version_vector(), 
+            non_neg_integer(), non_neg_integer(), non_neg_integer(), 
+            non_neg_integer(), non_neg_integer(),
+            list(erlang:timestamp())|undefined, metadata()}}.
+-type value() ::
+    value_v2().
+    % Value v1 has been an dgone pre-release, so no backwards compatability has
+    % been maintained
+
 -type value_element() 
-    :: {preflist|clock|hash|size|sibcount|indexhash|aae_segment, fun()|null}.
+    :: {preflist|clock|hash|size|sibcount|indexhash|aae_segment|lmd|md, 
+        fun()|null}.
     % A request for a value element to be returned from a value, and the
     % function to apply to the f(Bucket, Key) for elements where the item
     % needs to be calculated (like IndexN in native stores)
+
 
 -export_type([parallel_stores/0,
                 native_stores/0,
@@ -148,6 +176,8 @@
                 value_element/0,
                 range_limiter/0,
                 segment_limiter/0,
+                modified_limiter/0,
+                count_limiter/0,
                 rebuild_prompts/0]).
 
 
@@ -218,7 +248,7 @@ store_close(Pid) ->
 store_mput(Pid, ObjectSpecs) ->
     gen_fsm:send_event(Pid, {mput, ObjectSpecs}).
 
--spec store_mload(pid(), list()) -> ok.
+-spec store_mload(pid(), list(objectspec())) -> ok.
 %% @doc
 %% Put multiple objectspecs into the store.  The object specs should be of the
 %% form {ObjectOp, Segment, Bucket, Key, Value}.
@@ -248,16 +278,19 @@ store_prompt(Pid, Prompt) ->
 
 -spec store_fold(pid(), 
                     range_limiter(),
-                    segment_limiter(), 
+                    segment_limiter(),
+                    modified_limiter(),
+                    count_limiter(),
                     fun(), any(), 
                     list(value_element())) -> any()|{async, fun()}.
 %% @doc
 %% Return a fold function to asynchronously run a fold over a snapshot of the
 %% store
-store_fold(Pid, RLimiter, SLimiter, FoldObjectsFun, InitAcc, Elements) ->
+store_fold(Pid, RLimiter, SLimiter, LMDLimiter, MaxObjectCount, 
+            FoldObjectsFun, InitAcc, Elements) ->
     gen_fsm:sync_send_event(Pid, 
                             {fold, 
-                                RLimiter, SLimiter,
+                                RLimiter, SLimiter, LMDLimiter, MaxObjectCount,
                                 FoldObjectsFun, InitAcc,
                                 Elements},
                             infinity).
@@ -313,10 +346,11 @@ init([Opts]) ->
                         last_rebuild = Manifest0#manifest.last_rebuild}}
     end.
 
-loading({fold, Range, Segments, FoldFun, InitAcc, Elements}, _From, State) ->
+loading({fold, Range, Segments, LMD, Count, FoldFun, InitAcc, Elements},
+                                                            _From, State) ->
     FoldElementsFun = fold_elements_fun(FoldFun, Elements, parallel),
     Result = do_fold(State#state.store_type, State#state.store,
-                        Range, Segments, FoldElementsFun, InitAcc),
+                        Range, Segments, LMD, Count, FoldElementsFun, InitAcc),
     {reply, Result, loading, State};
 loading({fetch_clock, Bucket, Key}, _From, State) ->
     VV = do_fetchclock(State#state.store_type, State#state.store, Bucket, Key),
@@ -326,10 +360,11 @@ loading(close, _From, State) ->
     ok = close_store(State#state.store_type, State#state.store),
     {stop, normal, ok, State}.
 
-parallel({fold, Range, Segments, FoldFun, InitAcc, Elements}, _From, State) ->
+parallel({fold, Range, Segments, LMD, Count, FoldFun, InitAcc, Elements},
+                                                            _From, State) ->
     FoldElementsFun = fold_elements_fun(FoldFun, Elements, parallel),
     Result = do_fold(State#state.store_type, State#state.store,
-                        Range, Segments, FoldElementsFun, InitAcc),
+                        Range, Segments, LMD, Count, FoldElementsFun, InitAcc),
     {reply, Result, parallel, State};
 parallel({fetch_clock, Bucket, Key}, _From, State) ->
     VV = do_fetchclock(State#state.store_type, State#state.store, Bucket, Key),
@@ -344,7 +379,8 @@ parallel(startup_metadata, _From, State) ->
         parallel, 
         State}.
 
-native({fold, Range, Segments, FoldFun, InitAcc, Elements}, _From, State) ->
+native({fold, Range, Segments, LMD, Count, FoldFun, InitAcc, Elements},
+                                                            _From, State) ->
     FoldElementsFun = 
         case Segments of 
             {segments, SegList, TreeSize} ->
@@ -369,7 +405,7 @@ native({fold, Range, Segments, FoldFun, InitAcc, Elements}, _From, State) ->
                 fold_elements_fun(FoldFun, Elements, native)
         end,
     Result = do_fold(State#state.store_type, State#state.store,
-                        Range, Segments, FoldElementsFun, InitAcc),
+                        Range, Segments, LMD, Count, FoldElementsFun, InitAcc),
     {reply, Result, native, State};
 native(startup_metadata, _From, State) ->
     {reply, 
@@ -487,22 +523,34 @@ code_change(_OldVsn, StateName, State, _Extra) ->
 %%% Key Codec
 %%%============================================================================
 
--spec define_objectspec(add|remove, 
-                        integer(), binary(), binary(), tuple()|null) 
-                                                            -> objectspec().
+-spec define_addobjectspec(bucket(), key(), value()) -> objectspec().
 %% @doc
 %% Create an ObjectSpec for adding to the backend store
-define_objectspec(Op, SegTree_int, Bucket, Key, Value) ->
-    #objectspec{op = Op, 
-                segment_id = SegTree_int,
+define_addobjectspec(Bucket, Key, V) ->
+    #objectspec{op = add, 
+                segment_id = 
+                    value(parallel, {aae_segment, null}, {Bucket, Key, V}),
+                last_mod_dates =
+                    value(parallel, {lmd, null}, {Bucket, Key, V}),
                 bucket = Bucket, 
                 key = Key, 
-                value = Value}.
+                value = V}.
+
+-spec define_delobjectspec(bucket(), key(), non_neg_integer())
+                                                            -> objectspec().
+%% @doc
+%% Create an object spec to remove an object from the backend store
+define_delobjectspec(Bucket, Key, Segment) ->
+    #objectspec{op = remove, 
+                segment_id = Segment,
+                bucket = Bucket, 
+                key = Key, 
+                value = null}.
 
 -spec check_objectspec(binary(), binary(), objectspec()) 
                                                 -> {ok, tuple()|null}|false.
 %% @doc
-%% Check to see if an objetc sspec matches the bucket and key, and if so 
+%% Check to see if an objetc spec matches the bucket and key, and if so 
 %% return {ok, Value} (or false if not).
 check_objectspec(Bucket, Key, ObjSpec) ->
     case {ObjSpec#objectspec.bucket, ObjSpec#objectspec.key} of
@@ -522,10 +570,12 @@ generate_treesegment(SegmentID) ->
 
 -spec generate_value(tuple(), integer(), 
                         aae_controller:version_vector(), integer(), 
-                        {integer(), integer(), integer(), any()}) -> tuple().
+                        {integer(), integer(), integer(), 
+                            list(os:timestamp())|undefined, metadata()})
+                                                        -> value_v2().
 %% @doc
 %% Create a value based on the current active version number
-%% Currently the "head" is ignored.  This may eb changed to support other 
+%% Currently the "head" is ignored.  This may be changed to support other 
 %% coverage fold features in the future.  Other items
 %% PreflistID - {Partition, NVal} - although this is largeish, compression 
 %% should minimise the disk footprint
@@ -535,9 +585,10 @@ generate_treesegment(SegmentID) ->
 %% SibCount - the count of siblings for the object (on this vnode only)
 %% IndexHash - A Hash of all the index fields and terms for this object
 generate_value(PreflistID, SegTS_int, Clock, Hash, 
-                                        {Size, SibCount, IndexHash, _Head}) ->
+                            {Size, SibCount, IndexHash, SibLMD, SibMD}) ->
     {?VALUE_VERSION, 
-        {PreflistID, Clock, Hash, Size, SibCount, IndexHash, SegTS_int}}.
+        {PreflistID, Clock, Hash, Size, SibCount, IndexHash, SegTS_int,
+            SibLMD, SibMD}}.
 
 %% Some helper functions for accessing individual value elements by version, 
 %% intended to make it easier to uplift the version of the value format at a
@@ -546,27 +597,32 @@ generate_value(PreflistID, SegTS_int, Clock, Hash,
 %% These value functions will change between native and parallel stores
 
 
--spec value(parallel|native, {atom(), fun()|null}, tuple()) -> any().
+-spec value(parallel|native, {atom(), fun()|null}, {bucket(), key(), value()})
+                                                                    -> any().
 %% @doc
 %% Return the value referenced by the secend input from the tuple containing
 %% {Bucket, Key, Value}.  For the parallel store this should be a straight 
 %% element fetch.  For the native store this will require the binary to be 
 %% processed.  A function can be passed in to handle the scenario where this
 %% is not pre-defined
-value(parallel, {preflist, _F}, {_B, _K, {1, ValueItems}}) ->
+value(parallel, {preflist, _F}, {_B, _K, {2, ValueItems}}) ->
     element(1, ValueItems);
-value(parallel, {clock, _F}, {_B, _K, {1, ValueItems}}) ->
+value(parallel, {clock, _F}, {_B, _K, {2, ValueItems}}) ->
     element(2, ValueItems);
-value(parallel, {hash, _F}, {_B, _K, {1, ValueItems}}) ->
+value(parallel, {hash, _F}, {_B, _K, {2, ValueItems}}) ->
     element(3, ValueItems);
-value(parallel, {size, _F}, {_B, _K, {1, ValueItems}}) ->
+value(parallel, {size, _F}, {_B, _K, {2, ValueItems}}) ->
     element(4, ValueItems);
-value(parallel, {sibcount, _F}, {_B, _K, {1, ValueItems}}) ->
+value(parallel, {sibcount, _F}, {_B, _K, {2, ValueItems}}) ->
     element(5, ValueItems);
-value(parallel, {indexhash, _F}, {_B, _K, {1, ValueItems}}) ->
+value(parallel, {indexhash, _F}, {_B, _K, {2, ValueItems}}) ->
     element(6, ValueItems);
-value(parallel, {aae_segment, _F}, {_B, _K, {1, ValueItems}}) ->
+value(parallel, {aae_segment, _F}, {_B, _K, {2, ValueItems}}) ->
     element(7, ValueItems);
+value(parallel, {lmd, _F}, {_B, _K, {2, ValueItems}}) ->
+    element(8, ValueItems);
+value(parallel, {md, _F}, {_B, _K, {2, ValueItems}}) ->
+    element(9, ValueItems);
 value(native, {clock, _F}, {_B, _K, V}) ->
     element(1, summary_from_native(V));
 value(native, {hash, _F}, {_B, _K, V}) ->
@@ -707,14 +763,16 @@ dedup_map(leveled_so, ObjectSpecs) ->
     SegmentOrderedMapFun = 
         fun(ObjSpec) ->
             SegTS_int = ObjSpec#objectspec.segment_id,
-            {ObjSpec#objectspec.op, 
-                <<SegTS_int:24/integer>>, % needs to be binary not bitstring  
+            {ObjSpec#objectspec.op,
+                v1,
+                <<SegTS_int:24/integer>>, 
                 term_to_binary({ObjSpec#objectspec.bucket, 
                                 ObjSpec#objectspec.key}), 
                 ?NULL_SUBKEY,
+                ObjSpec#objectspec.last_mod_dates,
                 ObjSpec#objectspec.value}
         end,
-    lists:ukeysort(3, lists:map(SegmentOrderedMapFun, ObjectSpecs));
+    lists:ukeysort(4, lists:map(SegmentOrderedMapFun, ObjectSpecs));
 dedup_map(leveled_ko, ObjectSpecs) ->
     FoldFun =
         fun(ObjSpec, {Acc, Members}) ->
@@ -724,7 +782,10 @@ dedup_map(leveled_ko, ObjectSpecs) ->
                 true ->
                     {Acc, Members};
                 false ->
-                    UpdSpec = {ObjSpec#objectspec.op, B, K, ?NULL_SUBKEY, 
+                    UpdSpec = {ObjSpec#objectspec.op,
+                                v1,
+                                B, K, ?NULL_SUBKEY,
+                                ObjSpec#objectspec.last_mod_dates,
                                 ObjSpec#objectspec.value},
                     {[UpdSpec|Acc], [{B, K}|Members]}
             end
@@ -771,11 +832,13 @@ do_fetchclock(leveled_so, Store, Bucket, Key, Seg) ->
     {async, Folder} = 
         do_fold(leveled_so, Store, all,
                     {segments, [Seg], ?TREE_SIZE},
+                    all, false,
                     FoldFun, InitAcc),
     Folder().
 
 -spec do_fold(parallel_stores(), pid(), 
-                range_limiter(), segment_limiter(), 
+                range_limiter(), segment_limiter(),
+                modified_limiter(), count_limiter(),
                 fun(), any()) -> {async, fun()}.
 %% @doc
 %% Fold over the store applying FoldObjectsFun to each object and the 
@@ -787,7 +850,16 @@ do_fetchclock(leveled_so, Store, Bucket, Key, Seg) ->
 %% been taken prior to the fold, and should not happen as part of the fold.
 %% There should be no refresh of the iterator, the snapshot should last the
 %% duration of the fold.
-do_fold(leveled_so, Store, Range, SegFilter, FoldObjectsFun, InitAcc) ->
+do_fold(leveled_so, Store, Range, SegFilter, LMDRange, MoC,
+                            FoldObjectsFun, InitAcc) when is_integer(MoC) ->
+    aae_util:log("KS008", [], logs()),
+    {async, Runner} = 
+        do_fold(leveled_so, 
+                Store, Range, SegFilter, LMDRange, false,
+                FoldObjectsFun, InitAcc),
+    {async, fun() -> {-1, Runner()} end};
+do_fold(leveled_so, Store, Range, SegFilter, LMDRange, false,
+                                                    FoldObjectsFun, InitAcc) ->
     FoldFun = 
         fun(_S, {BKBin, _SK}, V, Acc) ->
             {B, K} = binary_to_term(BKBin),
@@ -802,9 +874,12 @@ do_fold(leveled_so, Store, Range, SegFilter, FoldObjectsFun, InitAcc) ->
         all ->
             leveled_bookie:book_headfold(Store, 
                                             ?HEAD_TAG,
+                                            all,
                                             {FoldFun, InitAcc}, 
                                             ?NOCHECK_PRESENCE, 
                                             ?SNAP_PREFOLD, 
+                                            false,
+                                            modify_modifiedrange(LMDRange),
                                             false);
         {segments, SegList, TreeSize} ->
             SegList0 = 
@@ -823,9 +898,12 @@ do_fold(leveled_so, Store, Range, SegFilter, FoldObjectsFun, InitAcc) ->
                                             {FoldFun, InitAcc}, 
                                             ?NOCHECK_PRESENCE, 
                                             ?SNAP_PREFOLD, 
+                                            false,
+                                            modify_modifiedrange(LMDRange),
                                             false)
     end;
-do_fold(leveled_ko, Store, Range, SegFilter, FoldObjectsFun, InitAcc) ->
+do_fold(leveled_ko, Store, Range, SegFilter, LMDRange, MaxObjects,
+                                                    FoldObjectsFun, InitAcc) ->
     {FoldFun, SegList} =
         case SegFilter of
             {segments, Segments, TreeSize} ->
@@ -851,35 +929,23 @@ do_fold(leveled_ko, Store, Range, SegFilter, FoldObjectsFun, InitAcc) ->
                     end,
                     false}
         end,
-    case Range of
-        all ->
-            leveled_bookie:book_headfold(Store, 
-                                            ?HEAD_TAG, 
-                                            {FoldFun, InitAcc}, 
-                                            ?NOCHECK_PRESENCE, 
-                                            ?SNAP_PREFOLD, 
-                                            SegList);
-        {buckets, BucketList} ->
-            leveled_bookie:book_headfold(Store, 
-                                            ?HEAD_TAG,
-                                            {bucket_list, BucketList}, 
-                                            {FoldFun, InitAcc}, 
-                                            ?NOCHECK_PRESENCE, 
-                                            ?SNAP_PREFOLD, 
-                                            SegList);
-        {key_range, B0, SK, EK} ->
-            leveled_bookie:book_headfold(Store, 
-                                            ?HEAD_TAG, 
-                                            {range, 
-                                                B0, 
-                                                {{SK, ?NULL_SUBKEY}, 
-                                                    {EK, ?NULL_SUBKEY}}},
-                                            {FoldFun, InitAcc}, 
-                                            ?NOCHECK_PRESENCE, 
-                                            ?SNAP_PREFOLD, 
-                                            SegList)
-    end;     
-do_fold(leveled_nko, Store, Range, SegFilter, FoldObjectsFun, InitAcc) ->
+    ReformattedRange =
+        case Range of
+            {key_range, B0, SK, EK} ->
+                {range, B0,  {{SK, ?NULL_SUBKEY}, {EK, ?NULL_SUBKEY}}};
+            {buckets, BucketList} ->
+                {bucket_list, BucketList};
+            all ->
+                all
+        end,
+    leveled_bookie:book_headfold(Store,
+                                    ?HEAD_TAG, ReformattedRange,
+                                    {FoldFun, InitAcc}, 
+                                    ?NOCHECK_PRESENCE, ?SNAP_PREFOLD, 
+                                    SegList, modify_modifiedrange(LMDRange),
+                                    MaxObjects);
+do_fold(leveled_nko, Store, Range, SegFilter, LMDRange, MaxObjects,
+                                                    FoldObjectsFun, InitAcc) ->
     SegList = 
         case SegFilter of
             {segments, Segments, _TreeSize} ->
@@ -887,32 +953,28 @@ do_fold(leveled_nko, Store, Range, SegFilter, FoldObjectsFun, InitAcc) ->
             all ->
                 false
         end,
-    case Range of
-        all ->
-            leveled_bookie:book_headfold(Store, 
-                                            ?RIAK_TAG, 
-                                            {FoldObjectsFun, InitAcc}, 
-                                            ?CHECK_NATIVE_PRESENCE, 
-                                            ?SNAP_PREFOLD, 
-                                            SegList);
-        {buckets, BucketList} ->
-            leveled_bookie:book_headfold(Store, 
-                                            ?RIAK_TAG, 
-                                            {bucket_list, BucketList}, 
-                                            {FoldObjectsFun, InitAcc}, 
-                                            ?NOCHECK_PRESENCE, 
-                                            ?SNAP_PREFOLD, 
-                                            SegList);
-        {key_range, B, SK, EK} ->
-            leveled_bookie:book_headfold(Store, 
-                                            ?RIAK_TAG, 
-                                            {range, B, {SK, EK}}, 
-                                            {FoldObjectsFun, InitAcc}, 
-                                            ?NOCHECK_PRESENCE, 
-                                            ?SNAP_PREFOLD, 
-                                            SegList)
-    end.
+    {ReformattedRange, CheckPresence} =
+        case Range of
+            {key_range, B0, SK, EK} ->
+                {{range, B0, {SK, EK}}, ?NOCHECK_PRESENCE};
+            {buckets, BucketList} ->
+                {{bucket_list, BucketList}, ?NOCHECK_PRESENCE};
+            all ->
+                % Rebuilds should check presence
+                {all, ?CHECK_NATIVE_PRESENCE}
+        end,
+    leveled_bookie:book_headfold(Store,
+                                    ?RIAK_TAG, ReformattedRange,
+                                    {FoldObjectsFun, InitAcc}, 
+                                    CheckPresence, ?SNAP_PREFOLD, 
+                                    SegList, modify_modifiedrange(LMDRange),
+                                    MaxObjects).
 
+
+modify_modifiedrange(all) ->
+    false;
+modify_modifiedrange({ST, ET}) ->
+    {ST, ET}.
 
 range_check(all, _B, _K) ->
     true;
@@ -1008,7 +1070,10 @@ logs() ->
         {"KS006",
             {warn, "Pending store is garbage and should be deleted at ~s"}},
         {"KS007",
-            {info, "Rebuild prompt ~w with GUID ~s"}}
+            {info, "Rebuild prompt ~w with GUID ~s"}},
+        {"KS008",
+            {warn, "Count Limit on fold to be ignored as segment-ordered" 
+                    ++ " backend so all results will be returned"}}
 
         ].
 
@@ -1019,6 +1084,10 @@ logs() ->
 
 -ifdef(TEST).
 
+
+store_fold(Pid, RLimiter, SLimiter, FoldObjectsFun, InitAcc, Elements) ->
+    store_fold(Pid, RLimiter, SLimiter, all, false, 
+                FoldObjectsFun, InitAcc, Elements).
 
 -spec store_currentstatus(pid()) -> {atom(), list()}.
 %% @doc
@@ -1240,14 +1309,16 @@ fetch_clock_test() ->
     % When fetching clocks we may have multiple matches on a segment ID
     % Want to prove that here.  Rather than trying to force a hash collision
     % on the segment ID, we will just generate false segment IDs
+    ObjSplitFun = fun(static) -> {0, 1, 0, null} end,
+    WrappedFun = aae_controller:wrapped_splitobjfun(ObjSplitFun),
     GenVal =
         fun(Clock) ->
-            generate_value({1, 3}, 1, Clock, 0, {0, 1, 0, null})
+            generate_value({1, 3}, 1, Clock, 0, WrappedFun(static))
         end,
-    Spc1 = define_objectspec(add, 1, <<"B1">>, <<"K2">>, GenVal([{"a", 1}])),
-    Spc2 = define_objectspec(add, 1, <<"B1">>, <<"K3">>, GenVal([{"b", 1}])),
-    Spc3 = define_objectspec(add, 1, <<"B2">>, <<"K1">>, GenVal([{"c", 1}])),
-    Spc4 = define_objectspec(add, 1, <<"B1">>, <<"K1">>, GenVal([{"d", 1}])),
+    Spc1 = define_addobjectspec(<<"B1">>, <<"K2">>, GenVal([{"a", 1}])),
+    Spc2 = define_addobjectspec(<<"B1">>, <<"K3">>, GenVal([{"b", 1}])),
+    Spc3 = define_addobjectspec(<<"B2">>, <<"K1">>, GenVal([{"c", 1}])),
+    Spc4 = define_addobjectspec(<<"B1">>, <<"K1">>, GenVal([{"d", 1}])),
 
     {ok, Store0} = open_store(leveled_so, 
                                 ?LEVELED_BACKEND_OPTS, 
@@ -1392,10 +1463,10 @@ coverage_cheat_test() ->
 
 dumb_value_test() ->
     V = generate_value({0, 3}, 0, [{a, 1}], erlang:phash2(<<>>), 
-                        {100, 1, 0, null}),
-    ?assertMatch(100, value(parallel, {size, null}, {null, null, V})),
-    ?assertMatch(1, value(parallel, {sibcount, null}, {null, null, V})),
-    ?assertMatch(0, value(parallel, {indexhash, null}, {null, null, V})).
+                        {100, 1, 0, undefined, term_to_binary([])}),
+    ?assertMatch(100, value(parallel, {size, null}, {<<"B">>, <<"K">>, V})),
+    ?assertMatch(1, value(parallel, {sibcount, null}, {<<"B">>, <<"K">>, V})),
+    ?assertMatch(0, value(parallel, {indexhash, null}, {<<"B">>, <<"K">>, V})).
 
 generate_objectspecs(Op, B, KeyList) ->
     FoldFun = 
@@ -1405,9 +1476,15 @@ generate_objectspecs(Op, B, KeyList) ->
                 leveled_tictac:keyto_segment48(aae_util:make_binarykey(B, K)),
             Seg0 = generate_treesegment(Seg),
             Value = generate_value({0, 0}, Seg0, Clock, Hash, 
-                                    {Size, SibCount, 0, null}),
+                                    {Size, SibCount, 0, 
+                                        undefined, term_to_binary([])}),
             
-            define_objectspec(Op, Seg0, B, K, Value)
+            case Op of
+                add ->
+                    define_addobjectspec(B, K, Value);
+                remove ->
+                    define_delobjectspec(B, K, Seg0)
+            end
         end,
     lists:map(FoldFun, KeyList).
             

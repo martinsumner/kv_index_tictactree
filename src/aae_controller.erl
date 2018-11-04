@@ -34,10 +34,12 @@
             aae_fetchclocks/5,
             aae_rebuildtrees/5,
             aae_rebuildstore/2,
-            aae_fold/6]).
+            aae_fold/6,
+            aae_fold/8]).
 
 -export([foldobjects_buildtrees/1,
-            hash_clocks/2]).
+            hash_clocks/2,
+            wrapped_splitobjfun/1]).
 
 -export([rebuild_worker/1]).
 
@@ -49,6 +51,7 @@
 -define(BATCH_LENGTH, 128).
 -define(DEFAULT_REBUILD_SCHEDULE, {1, 300}).
 -define(EMPTY, <<>>).
+-define(EMPTY_MD, term_to_binary([])).
 
 
 -record(state, {key_store :: pid()|undefined,
@@ -107,7 +110,7 @@
         % `undefined` is speficially resrved for the case that an object may 
         % be being replaced but the vnode does not know if it is being 
         % replaced.  In this case, it is the responsiblity of the controller 
-        % to best determine what the previous version was. 
+        % to best determine what the previous version was.
 
 
 -export_type([responsible_preflist/0,
@@ -130,15 +133,17 @@
 %% @doc
 %% Start an AAE controller 
 %% The ObjectsplitFun must take a vnode object in a binary form and output 
-%% {Size, SibCount, IndexHash, _Head}
+%% {Size, SibCount, IndexHash, LMD, MD}.  If the SplitFun previously outputted
+%% {Size, SibCount, IndexHash, null} that output will be converted
 aae_start(KeyStoreT, IsEmpty, RebuildSch, Preflists, RootPath, ObjSplitFun) ->
+    WrapObjSplitFun = wrapped_splitobjfun(ObjSplitFun),
     AAEopts =
         #options{keystore_type = KeyStoreT,
                     store_isempty = IsEmpty,
                     rebuild_schedule = RebuildSch,
                     index_ns = Preflists,
                     root_path = RootPath,
-                    object_splitfun = ObjSplitFun},
+                    object_splitfun = WrapObjSplitFun},
     gen_server:start(?MODULE, [AAEopts], []).
 
 
@@ -241,16 +246,32 @@ aae_fetchclocks(Pid, IndexNs, SegmentIDs, ReturnFun, PrefLFun) ->
                     {fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PrefLFun}).
 
 -spec aae_fold(pid(), 
-                aae_keystore:range_limiter(), aae_keystore:segment_limiter(), 
+                aae_keystore:range_limiter(),
+                aae_keystore:segment_limiter(),
                 fun(), any(), 
                 list(aae_keystore:value_element())) -> {async, fun()}.
 %% @doc
 %% Return a folder to fold over the keys in the aae_keystore (or native 
 %% keystore if in native mode)
 aae_fold(Pid, RLimiter, SLimiter, FoldObjectsFun, InitAcc, Elements) ->
+    aae_fold(Pid, RLimiter, SLimiter, all, false, 
+                FoldObjectsFun, InitAcc, Elements).
+
+-spec aae_fold(pid(), 
+                aae_keystore:range_limiter(),
+                aae_keystore:segment_limiter(),
+                aae_keystore:modified_limiter(),
+                aae_keystore:count_limiter(),
+                fun(), any(), 
+                list(aae_keystore:value_element())) -> {async, fun()}.
+%% @doc
+%% Return a folder to fold over the keys in the aae_keystore (or native 
+%% keystore if in native mode)
+aae_fold(Pid, RLimiter, SLimiter, LMDLimiter, MaxObjectCount,
+            FoldObjectsFun, InitAcc, Elements) ->
     gen_server:call(Pid, 
                     {fold, 
-                        RLimiter, SLimiter, 
+                        RLimiter, SLimiter, LMDLimiter, MaxObjectCount,
                         FoldObjectsFun, InitAcc, 
                         Elements}).
 
@@ -416,6 +437,7 @@ handle_call({rebuild_trees, IndexNs, PreflistFun, WorkerFun, OnlyIfBroken},
             {async, Folder} = 
                 aae_keystore:store_fold(State#state.key_store, 
                                         all, all,
+                                        all, false,
                                         FoldFun, InitAcc, 
                                         [{preflist, PreflistFun}, 
                                             {hash, null}]),
@@ -523,14 +545,16 @@ handle_call({rebuild_store, SplitObjFun}, _From, State)->
                                             rebuild_complete),
             {reply, ok, State}
     end;
-handle_call({fold, RLimiter, SLimiter, FoldObjectsFun, InitAcc, Elements}, 
-                                                            _From, State) ->
+handle_call({fold, RLimiter, SLimiter, LMDLimiter, MaxObjectCount,
+                    FoldObjectsFun, InitAcc, Elements},  _From, State) ->
     ok = maybe_flush_puts(State#state.key_store, 
                             State#state.objectspecs_queue,
                             State#state.parallel_keystore),
     R = aae_keystore:store_fold(State#state.key_store, 
                                 RLimiter,
-                                SLimiter, 
+                                SLimiter,
+                                LMDLimiter,
+                                MaxObjectCount,
                                 FoldObjectsFun, 
                                 InitAcc,
                                 Elements),
@@ -596,7 +620,8 @@ handle_call({fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PreflFun},
     {async, Folder} = 
         aae_keystore:store_fold(State#state.key_store, 
                                 all,
-                                {segments, SegmentIDs, ?TREE_SIZE}, 
+                                {segments, SegmentIDs, ?TREE_SIZE},
+                                all, false, 
                                 FoldObjFun, 
                                 {[], InitMap},
                                 [{preflist, PreflFun}, 
@@ -757,7 +782,20 @@ foldobjects_buildtrees(IndexNs) ->
     
     {FoldObjectsFun, InitAcc}.
     
-
+wrapped_splitobjfun(ObjectSplitFun) ->
+    fun(Obj) ->
+        case ObjectSplitFun(Obj) of
+            {Size, SibCount, IndexHash, Val} ->
+                Val0 =
+                    case Val of
+                        null -> ?EMPTY_MD;
+                        ValB when is_binary(ValB) -> ValB
+                    end,
+                {Size, SibCount, IndexHash, undefined, Val0};
+            T ->
+                T
+        end
+    end.
 
 %%%============================================================================
 %%% Internal functions
@@ -867,17 +905,17 @@ generate_objectspec(Bucket, Key, SegmentID, _IndexN,
                         _BinaryObj, none, _CurrentHash, 
                         _SplitFun) ->
     SegTree_int = aae_keystore:generate_treesegment(SegmentID),
-    aae_keystore:define_objectspec(remove, SegTree_int, Bucket, Key, null);
+    aae_keystore:define_delobjectspec(Bucket, Key, SegTree_int);
 generate_objectspec(Bucket, Key, SegmentID, IndexN,
                         BinaryObj, CurrentVV, CurrentHash, 
                         SplitFun) ->
     SegTree_int = aae_keystore:generate_treesegment(SegmentID),
-    KSV = aae_keystore:generate_value(IndexN, 
+    Value = aae_keystore:generate_value(IndexN, 
                                         SegTree_int,
                                         CurrentVV, 
                                         CurrentHash, 
                                         SplitFun(BinaryObj)),
-    aae_keystore:define_objectspec(add, SegTree_int, Bucket, Key, KSV).
+    aae_keystore:define_addobjectspec(Bucket, Key, Value).
 
 
 -spec handle_unexpected_key(binary(), binary(), tuple(), list(tuple())) -> ok.
