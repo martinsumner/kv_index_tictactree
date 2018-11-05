@@ -102,7 +102,7 @@ get_opt(Key, Opts, Default) ->
     end.
 
 
--spec make_binarykey(binary()| {binary(), binary()}, binary()) -> binary().
+-spec make_binarykey(aae_keystore:bucket(), aae_keystore:key()) -> binary().
 %% @doc
 %% Convert Bucket and Key into a single binary 
 make_binarykey({Type, Bucket}, Key)
