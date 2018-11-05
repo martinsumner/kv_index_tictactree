@@ -5,26 +5,31 @@
             dual_store_compare_medium_ko/1,
             dual_store_compare_large_so/1,
             dual_store_compare_large_ko/1,
+            mock_vnode_loadexchangeandrebuild_stbucket/1,
+            mock_vnode_loadexchangeandrebuild_tuplebucket/1,
             aae_fold_keyorder/1,
             aae_fold_segmentorder/1,
-            mock_vnode_loadexchangeandrebuild/1,
             mock_vnode_coveragefold_nativemedium/1,
             mock_vnode_coveragefold_nativesmall/1,
-            mock_vnode_coveragefold_parallelmedium/1]).
+            mock_vnode_coveragefold_parallelmedium/1,
+            mock_vnode_coveragefold_parallelsmall/1]).
 
 all() -> [dual_store_compare_medium_so,
             dual_store_compare_medium_ko,
             dual_store_compare_large_so,
             dual_store_compare_large_ko,
+            mock_vnode_loadexchangeandrebuild_stbucket,
+            mock_vnode_loadexchangeandrebuild_tuplebucket,
             aae_fold_keyorder,
             aae_fold_segmentorder,
-            mock_vnode_loadexchangeandrebuild,
             mock_vnode_coveragefold_nativemedium,
             mock_vnode_coveragefold_nativesmall,
-            mock_vnode_coveragefold_parallelmedium
+            mock_vnode_coveragefold_parallelmedium,
+            mock_vnode_coveragefold_parallelsmall
         ].
 
 -define(ROOT_PATH, "test/").
+-define(BUCKET_TYPE, <<"BucketType">>).
 
 -record(r_content, {
                     metadata,
@@ -305,6 +310,7 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
     ok = aae_controller:aae_close(Cntrl2),
     RootPath = reset_filestructure().
 
+
 aae_fold_keyorder(_Config) ->
     aae_fold_tester(leveled_ko, 50000).
 
@@ -438,7 +444,13 @@ aae_fold_tester(ParallelStoreType, KeyCount) ->
     RootPath = reset_filestructure().
 
 
-mock_vnode_loadexchangeandrebuild(_Config) ->
+mock_vnode_loadexchangeandrebuild_stbucket(_Config) ->
+    mock_vnode_loadexchangeandrebuild_tester(false).
+
+mock_vnode_loadexchangeandrebuild_tuplebucket(_Config) ->
+    mock_vnode_loadexchangeandrebuild_tester(true).
+
+mock_vnode_loadexchangeandrebuild_tester(TupleBuckets) ->
     % Load up two vnodes with same data, with the data in each node split 
     % across 3 partitions (n=1).
     %
@@ -468,9 +480,8 @@ mock_vnode_loadexchangeandrebuild(_Config) ->
     RepairFun = 
         fun(KL) -> 
             lists:foreach(fun({{B, K}, _VCCompare}) -> 
-                                io:format("Delta found in ~s ~s~n", 
-                                            [binary_to_list(B), 
-                                                binary_to_list(K)])
+                                io:format("Delta found in ~w ~s~n", 
+                                            [B, binary_to_list(K)])
                             end,
                             KL) 
         end,  
@@ -486,8 +497,8 @@ mock_vnode_loadexchangeandrebuild(_Config) ->
     {ExchangeState0, 0} = start_receiver(),
     true = ExchangeState0 == root_compare,
 
-    ObjList = gen_riakobjects(InitialKeyCount, []),
-    ReplaceList = gen_riakobjects(100, []), 
+    ObjList = gen_riakobjects(InitialKeyCount, [], TupleBuckets),
+    ReplaceList = gen_riakobjects(100, [], TupleBuckets), 
         % some objects to replace the first 100 objects
     DeleteList1 = lists:sublist(ObjList, 200, 100),
     DeleteList2 = 
@@ -569,7 +580,13 @@ mock_vnode_loadexchangeandrebuild(_Config) ->
 
     % Compare the two stores using an AAE fold - and prove that AAE fold is
     % working as expected
-    Bucket = integer_to_binary(3),  
+    Bucket = 
+        case TupleBuckets of
+            true ->
+                {?BUCKET_TYPE, integer_to_binary(3)};
+            false ->
+                 integer_to_binary(3)
+        end,
     StartKey = list_to_binary(string:right(integer_to_list(10), 6, $0)),
     EndKey = list_to_binary(string:right(integer_to_list(50), 6, $0)),
     Elements = [{sibcount, null}, {clock, null}, {hash, null}],
@@ -813,21 +830,24 @@ wait_for_rebuild(Vnode) ->
 
 
 mock_vnode_coveragefold_nativemedium(_Config) ->
-    mock_vnode_coveragefolder(native, 50000).
+    mock_vnode_coveragefolder(native, 50000, true).
 
 mock_vnode_coveragefold_nativesmall(_Config) ->
-    mock_vnode_coveragefolder(native, 1000).
+    mock_vnode_coveragefolder(native, 5000, false).
+
+mock_vnode_coveragefold_parallelsmall(_Config) ->
+    mock_vnode_coveragefolder(parallel, 5000, true).
 
 mock_vnode_coveragefold_parallelmedium(_Config) ->
-    mock_vnode_coveragefolder(parallel, 50000).
+    mock_vnode_coveragefolder(parallel, 50000, false).
 
 
 
-mock_vnode_coveragefolder(Type, InitialKeyCount) ->
+mock_vnode_coveragefolder(Type, InitialKeyCount, TupleBuckets) ->
     % This should load a set of 4 vnodes, with the data partitioned across the
     % vnodes n=2 to provide for 2 different coverage plans.
     %
-    % After the load, an exchange cna confirm consistency between the coverage 
+    % After the load, an exchange can confirm consistency between the coverage 
     % plans.  Then run some folds to make sure that the folds produce the 
     % expected results 
     RootPath = reset_filestructure(),
@@ -871,7 +891,7 @@ mock_vnode_coveragefolder(Type, InitialKeyCount) ->
             end
         end,
 
-    ObjList = gen_riakobjects(InitialKeyCount, []),
+    ObjList = gen_riakobjects(InitialKeyCount, [], TupleBuckets),
     ok = lists:foreach(PutFun(RingN), ObjList),
 
     % Provide two coverage plans, equivalent to normal ring coverage plans
@@ -922,7 +942,14 @@ mock_vnode_coveragefolder(Type, InitialKeyCount) ->
     true = [] == SibL1,
 
     SWF2 = os:timestamp(),
-    BucketListA = [integer_to_binary(0), integer_to_binary(1)],
+    BucketListA = 
+        case TupleBuckets of
+            true ->
+                [{?BUCKET_TYPE, integer_to_binary(0)},
+                    {?BUCKET_TYPE, integer_to_binary(1)}];
+            false ->
+                [integer_to_binary(0), integer_to_binary(1)]
+        end,
     {async, Folder2} = 
         mock_kv_vnode:fold_aae(VNN2, 
                                 {buckets, BucketListA}, all, 
@@ -1050,16 +1077,22 @@ remove_keys(Cntrl, Nval, [{Bucket, Key, _VV}|Tail]) ->
     remove_keys(Cntrl, Nval, Tail).
 
 
-gen_riakobjects(0, ObjectList) ->
+gen_riakobjects(0, ObjectList, _TupleBuckets) ->
     ObjectList;
-gen_riakobjects(Count, ObjectList) ->
-    Bucket = integer_to_binary(Count rem 5),  
+gen_riakobjects(Count, ObjectList, TupleBuckets) ->
+    Bucket = 
+        case TupleBuckets of
+            true ->
+                {?BUCKET_TYPE, integer_to_binary(Count rem 5)};
+            false ->
+                integer_to_binary(Count rem 5)
+        end,
     Key = list_to_binary(string:right(integer_to_list(Count), 6, $0)),
     Value = leveled_rand:rand_bytes(512),
     Obj = #r_object{bucket = Bucket,
                     key = Key,
                     contents = [#r_content{value = Value}]},
-    gen_riakobjects(Count - 1, [Obj|ObjectList]).
+    gen_riakobjects(Count - 1, [Obj|ObjectList], TupleBuckets).
 
 
 
