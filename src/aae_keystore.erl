@@ -178,7 +178,9 @@
                 segment_limiter/0,
                 modified_limiter/0,
                 count_limiter/0,
-                rebuild_prompts/0]).
+                rebuild_prompts/0,
+                bucket/0,
+                key/0]).
 
 
 %%%============================================================================
