@@ -342,9 +342,8 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets) ->
     RepairFun = 
         fun(KL) -> 
             lists:foreach(fun({{B, K}, _VCCompare}) -> 
-                                io:format("Delta found in ~s ~s~n", 
-                                            [binary_to_list(B), 
-                                                binary_to_list(K)])
+                                io:format("Delta found in ~w ~s~n", 
+                                            [B, binary_to_list(K)])
                             end,
                             KL) 
         end,  

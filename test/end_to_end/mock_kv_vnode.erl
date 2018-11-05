@@ -280,24 +280,11 @@ handle_call({rebuild, true}, _From, State) ->
             % the object fold fun which should load the parallel store, and
             % the finish fun which should tell the controller the fold is 
             % complete and prompt the finishing of the rebuild activity
-            Q = {foldheads_allkeys, 
-                    % In this case the backend has the vector clock held
-                    % separately in the head so we can accelerate this by
-                    % folding over heads not objects
-                    ?RIAK_TAG, 
-                    FoldFun, 
-                    true, 
-                        % JournalCheck - this will cause a random sample 
-                        % to be checked for presence in the Journal - to 
-                        % detect object loss form the value store 
-                    true, 
-                        % SnapPreFold - don't want this to change before
-                        % the worker starts 
-                    false 
-                        % SegmentList - all segments required
-                    },
             {async, Runner} = 
-                leveled_bookie:book_returnfolder(State#state.vnode_store, Q),
+                leveled_bookie:book_headfold(State#state.vnode_store,
+                                                ?RIAK_TAG, 
+                                                {FoldFun, []}, 
+                                                true, true, false),
             Worker(Runner, FinishFun) % dispatch the work to the worker
     end,
     {reply, {NRT, true}, State#state{aae_rebuild = true}};
