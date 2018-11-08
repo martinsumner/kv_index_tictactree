@@ -267,6 +267,12 @@ aae_fold(Pid, RLimiter, SLimiter, FoldObjectsFun, InitAcc, Elements) ->
 %% @doc
 %% Return a folder to fold over the keys in the aae_keystore (or native 
 %% keystore if in native mode)
+%%
+%% The fold function will need to be of form fun(B, K, EL, Acc), where EL is
+%% a list of elements in the object.  Extra elements may be present other than
+%% the request elements, so fold functions should use lists:keyfind/3 to fetch
+%% specifically requested elements rather than assuming the structure of the
+%% ElementList
 aae_fold(Pid, RLimiter, SLimiter, LMDLimiter, MaxObjectCount,
             FoldObjectsFun, InitAcc, Elements) ->
     gen_server:call(Pid, 
