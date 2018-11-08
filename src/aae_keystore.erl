@@ -116,6 +116,7 @@
     % Allow for the snapshot to be taken before the fold function is returned
     % so the fold will represent the state of the store when the request was
     % processed, and not when the fold was run
+-define(USE_SET_FOR_SPEED, 64).
 
 -type bucket() :: binary()|{binary(),binary()}.
 -type key() :: binary().
@@ -143,6 +144,11 @@
     % reached
     % The count will be ignored if it is a leveled_so backend (as no
     % continuation is possible if too_many_results is hit)
+-type segment_checker() ::
+    all|{list, list(non_neg_integer())}|{sets, sets:set(non_neg_integer())}.
+    %% After expanding the segment list, convert into a refined checker which
+    %% may be a set if the segment_limiter is beyond a size optimal for lists
+    %% membership checks
 -type rebuild_prompts()
     :: rebuild_start|rebuild_complete.
     % Prompts to be used when rebuilding the key store (note this is rebuild
@@ -298,7 +304,8 @@ store_fold(Pid, RLimiter, SLimiter, LMDLimiter, MaxObjectCount,
                             infinity).
 
 
--spec store_fetchclock(pid(), binary(), binary()) -> aae_controller:version().
+-spec store_fetchclock(pid(), binary(), binary())
+                                            -> aae_controller:version_vector().
 %% @doc
 %% Return the clock of a given Bucket and Key
 store_fetchclock(Pid, Bucket, Key) ->
@@ -350,9 +357,9 @@ init([Opts]) ->
 
 loading({fold, Range, Segments, LMD, Count, FoldFun, InitAcc, Elements},
                                                             _From, State) ->
-    FoldElementsFun = fold_elements_fun(FoldFun, Elements, parallel),
     Result = do_fold(State#state.store_type, State#state.store,
-                        Range, Segments, LMD, Count, FoldElementsFun, InitAcc),
+                        Range, Segments, LMD, Count,
+                        FoldFun, InitAcc, Elements),
     {reply, Result, loading, State};
 loading({fetch_clock, Bucket, Key}, _From, State) ->
     VV = do_fetchclock(State#state.store_type, State#state.store, Bucket, Key),
@@ -364,9 +371,8 @@ loading(close, _From, State) ->
 
 parallel({fold, Range, Segments, LMD, Count, FoldFun, InitAcc, Elements},
                                                             _From, State) ->
-    FoldElementsFun = fold_elements_fun(FoldFun, Elements, parallel),
     Result = do_fold(State#state.store_type, State#state.store,
-                        Range, Segments, LMD, Count, FoldElementsFun, InitAcc),
+                    Range, Segments, LMD, Count, FoldFun, InitAcc, Elements),
     {reply, Result, parallel, State};
 parallel({fetch_clock, Bucket, Key}, _From, State) ->
     VV = do_fetchclock(State#state.store_type, State#state.store, Bucket, Key),
@@ -381,33 +387,11 @@ parallel(startup_metadata, _From, State) ->
         parallel, 
         State}.
 
-native({fold, Range, Segments, LMD, Count, FoldFun, InitAcc, Elements},
+native({fold, Range, SegFilter, LMD, Count, FoldFun, InitAcc, Elements},
                                                             _From, State) ->
-    FoldElementsFun = 
-        case Segments of 
-            {segments, SegList, TreeSize} ->
-                Elements0 = lists:ukeysort(1, [{aae_segment, null}|Elements]),
-                SegList0 = 
-                    leveled_tictac:adjust_segmentmatch_list(SegList, 
-                                                            TreeSize,
-                                                            ?TREE_SIZE),
-                FoldObjectsFun0 =
-                    fun(B, K, V, Acc) ->
-                        {aae_segment, SegID} = 
-                            lists:keyfind(aae_segment, 1, V),
-                        case lists:member(SegID, SegList0) of
-                            true ->
-                                FoldFun(B, K, V, Acc);
-                            false ->
-                                Acc
-                        end
-                    end,
-                fold_elements_fun(FoldObjectsFun0, Elements0, native);
-            _ ->
-                fold_elements_fun(FoldFun, Elements, native)
-        end,
     Result = do_fold(State#state.store_type, State#state.store,
-                        Range, Segments, LMD, Count, FoldElementsFun, InitAcc),
+                            Range, SegFilter, LMD, Count,
+                            FoldFun, InitAcc, Elements),
     {reply, Result, native, State};
 native(startup_metadata, _From, State) ->
     {reply, 
@@ -667,6 +651,34 @@ summary_from_native(ObjBin, ObjSize) ->
     {binary_to_term(VclockBin), ObjSize, SibCount}.
 
 
+-spec convert_segmentlimiter(segment_limiter()) ->
+                            {segment_checker(), false|list(non_neg_integer())}.
+%% @doc
+%% Convert the passed in segment list to something that us usable by
+%% member_check/2
+convert_segmentlimiter(all) ->
+    {all, false};
+convert_segmentlimiter({segments, SegList, TreeSize}) ->
+    SegList0 =
+        leveled_tictac:adjust_segmentmatch_list(SegList, TreeSize, ?TREE_SIZE),
+    case length(SegList0) > ?USE_SET_FOR_SPEED of
+        true ->
+            {{sets, sets:from_list(SegList0)}, SegList};
+        false ->
+            {{list, SegList0}, SegList}
+    end.
+
+-spec member_check(non_neg_integer(), segment_checker()) -> boolean().
+%% @doc
+%% Check to see if a segment is a member of a segment list (post conversion)
+member_check(_Hash, all) ->
+    true;
+member_check(Hash, {list, HashList}) ->
+    lists:member(Hash, HashList);
+member_check(Hash, {sets, HashSet}) ->
+    sets:is_element(Hash, HashSet).
+
+
 %%%============================================================================
 %%% Store functions
 %%%============================================================================
@@ -825,7 +837,8 @@ do_fetchclock(leveled_so, Store, Bucket, Key, Seg) ->
         fun(B, K, V, Acc) ->
             case {B, K} of 
                 {Bucket, Key} ->
-                    value(parallel, {clock, null}, {Bucket, Key, V});
+                    {clock, Clock} = lists:keyfind(clock, 1, V),
+                    Clock;
                 _ ->
                     Acc
             end
@@ -833,15 +846,16 @@ do_fetchclock(leveled_so, Store, Bucket, Key, Seg) ->
     InitAcc = none,
     {async, Folder} = 
         do_fold(leveled_so, Store, all,
-                    {segments, [Seg], ?TREE_SIZE},
-                    all, false,
-                    FoldFun, InitAcc),
+                        {segments, [Seg], ?TREE_SIZE},
+                        all, false,
+                        FoldFun, InitAcc, [{clock, null}]),
     Folder().
 
 -spec do_fold(parallel_stores(), pid(), 
-                range_limiter(), segment_limiter(),
-                modified_limiter(), count_limiter(),
-                fun(), any()) -> {async, fun()}.
+                        range_limiter(), segment_limiter(),
+                        modified_limiter(), count_limiter(),
+                        fun(), any(),
+                        list(value_element())) -> {async, fun()}.
 %% @doc
 %% Fold over the store applying FoldObjectsFun to each object and the 
 %% accumulator.  The store can be limited by a list of segments or a list
@@ -853,31 +867,33 @@ do_fetchclock(leveled_so, Store, Bucket, Key, Seg) ->
 %% There should be no refresh of the iterator, the snapshot should last the
 %% duration of the fold.
 do_fold(leveled_so, Store, Range, SegFilter, LMDRange, MoC,
-                            FoldObjectsFun, InitAcc) when is_integer(MoC) ->
+                                            FoldObjectsFun, InitAcc, Elements)
+                                                        when is_integer(MoC) ->
     aae_util:log("KS008", [], logs()),
     {async, Runner} = 
         do_fold(leveled_so, 
                 Store, Range, SegFilter, LMDRange, false,
-                FoldObjectsFun, InitAcc),
+                FoldObjectsFun, InitAcc, Elements),
     {async, fun() -> {-1, Runner()} end};
 do_fold(leveled_so, Store, Range, SegFilter, LMDRange, false,
-                                                    FoldObjectsFun, InitAcc) ->
-    FoldFun = 
+                                            FoldFun, InitAcc, Elements) ->
+    FoldFun0 = 
         fun(_S, {BKBin, _SK}, V, Acc) ->
             {B, K} = binary_to_term(BKBin),
             case range_check(Range, B, K) of
                 true ->
-                    FoldObjectsFun(B, K, V, Acc);
+                    FoldFun(B, K, V, Acc);
                 false ->
                     Acc
             end
         end,
+    FoldElementsFun = fold_elements_fun(FoldFun0, Elements, parallel),
     case SegFilter of
         all ->
             leveled_bookie:book_headfold(Store, 
                                             ?HEAD_TAG,
                                             all,
-                                            {FoldFun, InitAcc}, 
+                                            {FoldElementsFun, InitAcc}, 
                                             ?NOCHECK_PRESENCE, 
                                             ?SNAP_PREFOLD, 
                                             false,
@@ -897,7 +913,7 @@ do_fold(leveled_so, Store, Range, SegFilter, LMDRange, false,
             leveled_bookie:book_headfold(Store, 
                                             ?HEAD_TAG,
                                             {bucket_list, SegList1},
-                                            {FoldFun, InitAcc}, 
+                                            {FoldElementsFun, InitAcc}, 
                                             ?NOCHECK_PRESENCE, 
                                             ?SNAP_PREFOLD, 
                                             false,
@@ -905,32 +921,20 @@ do_fold(leveled_so, Store, Range, SegFilter, LMDRange, false,
                                             false)
     end;
 do_fold(leveled_ko, Store, Range, SegFilter, LMDRange, MaxObjects,
-                                                    FoldObjectsFun, InitAcc) ->
-    {FoldFun, SegList} =
-        case SegFilter of
-            {segments, Segments, TreeSize} ->
-                SegList0 = 
-                    leveled_tictac:adjust_segmentmatch_list(Segments,
-                                                            TreeSize,
-                                                            ?TREE_SIZE),
-                SegFoldFun = 
-                    fun(B, {K, ?NULL_SUBKEY}, V, Acc) ->
-                        SegTree_int = 
-                            value(parallel, {aae_segment, null}, {B, K, V}),
-                        case lists:member(SegTree_int, SegList0) of 
-                            true ->
-                                FoldObjectsFun(B, K, V, Acc);
-                            false ->
-                                Acc 
-                        end
-                    end,
-                {SegFoldFun, Segments};
-            all ->
-                {fun(B, {K, ?NULL_SUBKEY}, V, Acc) -> 
-                        FoldObjectsFun(B, K, V, Acc)
-                    end,
-                    false}
+                                                FoldFun, InitAcc, Elements) ->
+    {SegChecker, SegList} = convert_segmentlimiter(SegFilter),
+    Elements0 = lists:ukeysort(1, [{aae_segment, null}|Elements]),
+    FoldFun0 =
+        fun(B, {K, ?NULL_SUBKEY}, V, Acc) ->
+            {aae_segment, SegID} = lists:keyfind(aae_segment, 1, V),
+            case member_check(SegID, SegChecker) of
+                true ->
+                    FoldFun(B, K, V, Acc);
+                false ->
+                    Acc
+            end
         end,
+    FoldElementsFun = fold_elements_fun(FoldFun0, Elements0, parallel),
     ReformattedRange =
         case Range of
             {key_range, B0, SK, EK} ->
@@ -942,19 +946,25 @@ do_fold(leveled_ko, Store, Range, SegFilter, LMDRange, MaxObjects,
         end,
     leveled_bookie:book_headfold(Store,
                                     ?HEAD_TAG, ReformattedRange,
-                                    {FoldFun, InitAcc}, 
+                                    {FoldElementsFun, InitAcc}, 
                                     ?NOCHECK_PRESENCE, ?SNAP_PREFOLD, 
                                     SegList, modify_modifiedrange(LMDRange),
                                     MaxObjects);
 do_fold(leveled_nko, Store, Range, SegFilter, LMDRange, MaxObjects,
-                                                    FoldObjectsFun, InitAcc) ->
-    SegList = 
-        case SegFilter of
-            {segments, Segments, _TreeSize} ->
-                Segments;
-            all ->
-                false
+                                        FoldFun, InitAcc, Elements) ->
+    {SegChecker, SegList} = convert_segmentlimiter(SegFilter),
+    Elements0 = lists:ukeysort(1, [{aae_segment, null}|Elements]),
+    FoldFun0 =
+        fun(B, K, V, Acc) ->
+            {aae_segment, Seg} = lists:keyfind(aae_segment, 1, V),
+            case member_check(Seg, SegChecker) of
+                true ->
+                    FoldFun(B, K, V, Acc);
+                false ->
+                    Acc
+            end
         end,
+    FoldElementsFun = fold_elements_fun(FoldFun0, Elements0, native),
     {ReformattedRange, CheckPresence} =
         case Range of
             {key_range, B0, SK, EK} ->
@@ -967,7 +977,7 @@ do_fold(leveled_nko, Store, Range, SegFilter, LMDRange, MaxObjects,
         end,
     leveled_bookie:book_headfold(Store,
                                     ?RIAK_TAG, ReformattedRange,
-                                    {FoldObjectsFun, InitAcc}, 
+                                    {FoldElementsFun, InitAcc}, 
                                     CheckPresence, ?SNAP_PREFOLD, 
                                     SegList, modify_modifiedrange(LMDRange),
                                     MaxObjects).

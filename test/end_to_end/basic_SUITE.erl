@@ -161,7 +161,8 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
     EndKey = list_to_binary(string:right(integer_to_list(50), 6, $0)),
     Elements = [{sibcount, null}],
     SCFoldFun = 
-        fun(FB, FK, [{sibcount, FSc}], {FAccKL, FAccSc}) ->
+        fun(FB, FK, FV, {FAccKL, FAccSc}) ->
+            {sibcount, FSc} = lists:keyfind(sibcount, 1, FV),
             true = FB == Bucket,
             true = FK >= StartKey,
             true = FK < EndKey,
@@ -439,6 +440,44 @@ aae_fold_tester(ParallelStoreType, KeyCount) ->
             true = 
                 {-1, {KeyCount div 5, KeyCount div 5}} == Runner6()
     end,
+
+    BKVSL = lists:sublist(BKVListXS, KeyCount - 1000, 128),
+    SegMapFun =
+        fun ({B, K, _VV}) ->
+            BinK = aae_util:make_binarykey(B, K),
+            Seg32 = leveled_tictac:keyto_segment32(BinK),
+            leveled_tictac:get_segment(Seg32, small)
+        end,
+    SegList = lists:map(SegMapFun, BKVSL),
+    BKVSL_ByBL =
+        lists:filter(fun({B, _K, _V}) -> lists:member(B, BucketList) end,
+                        BKVSL),
+    FoldClocksElements = [{clock, null}],
+    FoldClocksFun =
+        fun(B, K, ElementList, Acc) ->
+            {clock, FoldClock} = lists:keyfind(clock, 1, ElementList),
+            [{B, K, FoldClock}|Acc]
+        end,
+
+    {async, Runner7} = 
+        aae_controller:aae_fold(Cntrl1, 
+                                {buckets, BucketList},
+                                {segments, SegList, small},
+                                all,
+                                false,
+                                FoldClocksFun,
+                                [],
+                                FoldClocksElements),
+    
+    FetchedClocks = Runner7(),
+    io:format("Fetched ~w clocks with segment filter~n",
+                [length(FetchedClocks)]),
+    true = 
+        [] == lists:subtract(BKVSL_ByBL, FetchedClocks),
+        % Found all the Keys and clocks in the list
+    true =
+        (KeyCount div 64) > length(lists:subtract(FetchedClocks, BKVSL_ByBL)),
+        % Didn't find "too many" others due to collisions on segment
 
     ok = aae_controller:aae_close(Cntrl1),
     RootPath = reset_filestructure().
