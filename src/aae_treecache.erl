@@ -382,7 +382,9 @@ binary_extractfun(Key, {CurrentHash, OldHash}) ->
             _ ->
                 % Alter - need to account for hashing with key
                 % to remove the original
-                OldHash bxor leveled_tictac:keyto_segment32(Key)
+                {_SegmentHash, AltHash}
+                    = leveled_tictac:keyto_doublesegment32(Key),
+                OldHash bxor AltHash
         end,
     {Key, {is_hash, CurrentHash bxor RemoveH}}.
 
