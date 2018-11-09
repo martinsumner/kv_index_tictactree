@@ -1,10 +1,29 @@
 %% -------- Overview ---------
 %%
-%% The exchange should have the following states
+%% There are two primary types of exchange sorted
+%% - a multipart exchange aimed at implementations with cached trees
+%% - a tree exchange where it is expected that the tree will be dynamically
+%% calculated
+%%
+%% The multipart exchange assumes access to cached trees, with a low cost of
+%% repeated access, and a relatively high proportion fo the overall cost in
+%% network bandwitdh.  These exchanges go through the following process:
+%%
 %% - Root Compare
 %% - Root Confirm
 %% - Branch Compare
 %% - Branch Confirm
+%% - Clock Compare
+%% - Repair
+%%
+%% The dynamic tree exchange is based on dynamically produced trees, where a
+%% relatively high proportion of the cost is in the production of the trees.
+%% In a tree exchange, whole trees are compared (potentially reduced by use
+%% of a segment filter), until the delta stops decreasing at a significant
+%% rate and a Clock Compare is run.  So these exchanges for through the
+%% following process:
+%%
+%% - Tree Compare (x n)
 %% - Clock Compare
 %% - Repair
 %%
@@ -13,7 +32,7 @@
 %% to be compared being the merging of all the trees referenced by the list.
 %%
 %% The lists can be a single item each (for a pairwise exchange), or a 
-%% ring-size number of partitions for a coverage query exchange.
+%% ring-size number of partitions for a coverage query exchange.  
 %%
 %% -------- Root Compare ---------
 %%
@@ -141,12 +160,20 @@
     % Results to branch queries are a list mapping Branch ID to the binary for
     % that branch
 -type exchange_state() :: #state{}.
+-type exchange_type() :: multipart|tree.
 
 %%%============================================================================
 %%% API
 %%%============================================================================
 
--spec start(input_list(), input_list(), fun(), fun()) -> {ok, pid(), list()}.
+
+start(BlueList, PinkList, RepairFun, ReplyFun) ->
+    % API for backwards compatability
+    start(multipart, BlueList, PinkList, RepairFun, ReplyFun).
+
+
+-spec start(exchange_type(), input_list(), input_list(), fun(), fun())
+                                                        -> {ok, pid(), list()}.
 %% @doc
 %% Start an FSM to manage an exchange and comapre the preflsist in the 
 %% BlueList with those in the PinkList, using the RepairFun to repair any
@@ -154,7 +181,7 @@
 %% to calling client the StateName at termination.
 %%
 %% The ReplyFun should be a 1 arity function t
-start(BlueList, PinkList, RepairFun, ReplyFun) ->
+start(_ExchangeType, BlueList, PinkList, RepairFun, ReplyFun) ->
     ExchangeID = leveled_util:generate_uuid(),
     {ok, ExPID} = gen_fsm:start(?MODULE, 
                                 [BlueList, PinkList, RepairFun, ReplyFun, 
