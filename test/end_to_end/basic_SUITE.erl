@@ -95,30 +95,8 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
                                     VnodePath2, 
                                     SplitF),
     
-    SW0 = os:timestamp(),
+    initial_load(InitialKeyCount, Cntrl1, Cntrl2),
 
-    BKVListXS = gen_keys([], InitialKeyCount),
-    {BKVList, _Discard} = lists:split(20, BKVListXS),
-        % The first 20 keys discarded to create an overlap between the add
-        % replace list
-    ok = put_keys(Cntrl1, 2, BKVList, none),
-    ok = put_keys(Cntrl2, 3, lists:reverse(BKVList), none),
-
-    {BKVListRem, _Ignore} = lists:split(10, BKVList),
-    ok = remove_keys(Cntrl1, 2, BKVListRem),
-    ok = remove_keys(Cntrl2, 3, BKVListRem),
-
-    % Change all of the keys - cheat by using undefined rather than replace 
-    % properly
-
-    BKVListR = gen_keys([], 100),
-        % As 100 > 20 expect 20 of these keys to be new, so no clock will be
-        % returned from fetch_clock, and 80 of these will be updates
-    ok = put_keys(Cntrl1, 2, BKVListR, undefined),
-    ok = put_keys(Cntrl2, 3, BKVListR, undefined),
-    
-    io:format("Initial put complete in ~w ms~n", 
-                [timer:now_diff(os:timestamp(), SW0)/1000]),
     SW1 = os:timestamp(),
 
     ok = aae_controller:aae_mergeroot(Cntrl1, 
@@ -236,22 +214,7 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
     {ExchangeState4, 0} = start_receiver(),
     true = ExchangeState4 == root_compare,
 
-
-    % Create a discrepancy and discover it through exchange
-    BKVListN = gen_keys([], InitialKeyCount + 10, InitialKeyCount),
-    _SL = lists:foldl(fun({B, K, _V}, Acc) -> 
-                            BK = aae_util:make_binarykey(B, K),
-                            Seg = leveled_tictac:keyto_segment48(BK),
-                            Seg0 = aae_keystore:generate_treesegment(Seg),
-                            io:format("Generate new key B ~w K ~w " ++ 
-                                        "for Segment ~w ~w ~w partition ~w ~w~n",
-                                        [B, K, Seg0,  Seg0 bsr 8, Seg0 band 255, 
-                                        calc_preflist(K, 2), calc_preflist(K, 3)]),
-                            [Seg0|Acc]
-                        end,
-                        [],
-                        BKVListN),
-    ok = put_keys(Cntrl1, 2, BKVListN),
+    BKVListN = create_discrepancy(Cntrl1, InitialKeyCount),
 
     {ok, _P6, GUID6} = 
         aae_exchange:start([{exchange_sendfun(Cntrl1), [{2,0}]}, 
@@ -535,6 +498,22 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets) ->
     io:format("Exchange id ~s~n", [GUID0]),
     {ExchangeState0, 0} = start_receiver(),
     true = ExchangeState0 == root_compare,
+
+    % Same exchange - now using tree compare
+    Filters =
+        {filter, 
+            {?BUCKET_TYPE, integer_to_binary(1)},
+            all, small, all, all, prehash},
+    {ok, _TC_P0, TC_GUID0} = 
+        aae_exchange:start(partial,
+                                [{exchange_vnodesendfun(VNN), IndexNs}],
+                                [{exchange_vnodesendfun(VNP), IndexNs}],
+                                RepairFun,
+                                ReturnFun,
+                                Filters),
+    io:format("Exchange id for tree compare ~s~n", [TC_GUID0]),
+    {ExchangeStateTC0, 0} = start_receiver(),
+    true = ExchangeStateTC0 == tree_compare,
 
     ObjList = gen_riakobjects(InitialKeyCount, [], TupleBuckets),
     ReplaceList = gen_riakobjects(100, [], TupleBuckets), 
@@ -1134,6 +1113,51 @@ gen_riakobjects(Count, ObjectList, TupleBuckets) ->
     gen_riakobjects(Count - 1, [Obj|ObjectList], TupleBuckets).
 
 
+initial_load(InitialKeyCount, Cntrl1, Cntrl2) ->
+
+    SW0 = os:timestamp(),
+
+    BKVListXS = gen_keys([], InitialKeyCount),
+    {BKVList, _Discard} = lists:split(20, BKVListXS),
+        % The first 20 keys discarded to create an overlap between the add
+        % replace list
+    ok = put_keys(Cntrl1, 2, BKVList, none),
+    ok = put_keys(Cntrl2, 3, lists:reverse(BKVList), none),
+
+    {BKVListRem, _Ignore} = lists:split(10, BKVList),
+    ok = remove_keys(Cntrl1, 2, BKVListRem),
+    ok = remove_keys(Cntrl2, 3, BKVListRem),
+
+    % Change all of the keys - cheat by using undefined rather than replace 
+    % properly
+
+    BKVListR = gen_keys([], 100),
+        % As 100 > 20 expect 20 of these keys to be new, so no clock will be
+        % returned from fetch_clock, and 80 of these will be updates
+    ok = put_keys(Cntrl1, 2, BKVListR, undefined),
+    ok = put_keys(Cntrl2, 3, BKVListR, undefined),
+    
+    io:format("Initial put complete in ~w ms~n", 
+                [timer:now_diff(os:timestamp(), SW0)/1000]).
+    
+
+create_discrepancy(Cntrl, InitialKeyCount) ->
+    % Create a discrepancy and discover it through exchange
+    BKVListN = gen_keys([], InitialKeyCount + 10, InitialKeyCount),
+    _SL = lists:foldl(fun({B, K, _V}, Acc) -> 
+                            BK = aae_util:make_binarykey(B, K),
+                            Seg = leveled_tictac:keyto_segment48(BK),
+                            Seg0 = aae_keystore:generate_treesegment(Seg),
+                            io:format("Generate new key B ~w K ~w " ++ 
+                                        "for Segment ~w ~w ~w partition ~w ~w~n",
+                                        [B, K, Seg0,  Seg0 bsr 8, Seg0 band 255, 
+                                        calc_preflist(K, 2), calc_preflist(K, 3)]),
+                            [Seg0|Acc]
+                        end,
+                        [],
+                        BKVListN),
+    ok = put_keys(Cntrl, 2, BKVListN),
+    BKVListN.
 
 add_randomincrement(Clock) ->
     RandIncr = leveled_rand:uniform(100),

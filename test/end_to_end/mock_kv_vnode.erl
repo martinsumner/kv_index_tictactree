@@ -29,7 +29,8 @@
             from_aae_binary/1,
             new_v1/2,
             workerfun/1,
-            rebuild_worker/1]).
+            rebuild_worker/1,
+            fold_worker/0]).
 
 -record(r_content, {
                     metadata,
@@ -274,7 +275,7 @@ handle_call({rebuild, true}, _From, State) ->
             % do here other than prompt the status change
             ReturnFun(ok);
         {ok, FoldFun, FinishFun} ->
-            Worker = workerfun(ReturnFun),
+            Worker = workerfun({rebuild_worker, [ReturnFun]}),
             % Now need to get a fold query to run over the vnode store to 
             % rebuild the parallel store.  The aae_controller has provided 
             % the object fold fun which should load the parallel store, and
@@ -328,7 +329,49 @@ handle_call({aae, Msg, IndexNs, ReturnFun}, _From, State) ->
                                                 IndexNs,
                                                 SegmentIDs,
                                                 ReturnFun,
-                                                State#state.preflist_fun)
+                                                State#state.preflist_fun);
+        {merge_tree_range, Filters} ->
+            {filter, B, KR, TS, SF, MR, HM} = Filters,
+            NullExtractFun = 
+                fun({B0, K0}, V0) -> 
+                    {aae_util:make_binarykey(B0, K0), V0} 
+                end,
+            {FoldFun, Elements} = 
+                case HM of
+                    prehash ->
+                        {fun(BF, KF, EFs, TreeAcc) ->
+                                {hash, CH} = lists:keyfind(hash, 1, EFs),
+                                leveled_tictac:add_kv(TreeAcc, 
+                                                        {BF, KF},
+                                                        {is_hash, CH}, 
+                                                        NullExtractFun)
+                            end,
+                            [{hash, null}]};
+                    {rehash, IV} ->
+                        {fun(BF, KF, EFs, TreeAcc) ->
+                                {clock, VC} = lists:keyfind(clock, 1, EFs),
+                                CH = erlang:phash2({IV, lists:sort(VC)}),
+                                leveled_tictac:add_kv(TreeAcc, 
+                                                        {BF, KF},
+                                                        {is_hash, CH}, 
+                                                        NullExtractFun)
+                            end,
+                            [{clock, null}]}
+                end,
+            InitAcc = leveled_tictac:new_tree(State#state.vnode_id, TS),
+            RangeLimiter = aaefold_setrangelimiter(B, KR),
+            ModifiedLimiter = aaefold_setmodifiedlimiter(MR),
+            {async, Folder} = 
+                aae_controller:aae_fold(State#state.aae_controller, 
+                                        RangeLimiter,
+                                        SF,
+                                        ModifiedLimiter,
+                                        false,
+                                        FoldFun,
+                                        InitAcc, 
+                                        Elements),
+            Worker = workerfun({fold_worker, []}),
+            Worker(Folder, ReturnFun)
     end,
     {reply, ok, State};
 handle_call({fold_aae, Range, Segments, FoldFun, InitAcc, Elements}, 
@@ -377,7 +420,7 @@ handle_cast({rebuild_complete, store}, State) ->
             ok = rebuild_complete(Vnode, tree)
         end,
     
-    Worker = workerfun(ReturnFun),
+    Worker = workerfun({rebuild_worker, [ReturnFun]}),
 
     ok = aae_controller:aae_rebuildtrees(State#state.aae_controller, 
                                             State#state.index_ns,
@@ -465,8 +508,8 @@ meta_bin(MetaData) ->
       Deleted:1/binary-unit:8, RestBin/binary>>.
 
 
-workerfun(ReturnFun) ->
-    WorkerPid = spawn(?MODULE, rebuild_worker, [ReturnFun]),
+workerfun({WorkerFun, Args}) ->
+    WorkerPid = spawn(?MODULE, WorkerFun, Args),
     fun(FoldFun, FinishFun) ->
         WorkerPid! {fold, FoldFun, FinishFun}
     end.
@@ -478,6 +521,13 @@ rebuild_worker(ReturnFun) ->
             ReturnFun(ok)
     end.
 
+fold_worker() ->
+    receive
+        {fold, FoldFun, ReturnFun} ->
+            ReturnFun(FoldFun())
+    end.
+
+
 from_aae_binary(AAEBin) ->
     <<ObjectSize:32/integer, SibCount:32/integer, IndexHash:32/integer, 
         HeadOnly/binary>> = AAEBin,
@@ -487,6 +537,22 @@ from_aae_binary(AAEBin) ->
 %%%============================================================================
 %%% Internal functions
 %%%============================================================================
+
+
+%% @doc
+%% Convert the format of the range limiter to one compatible with the aae store
+aaefold_setrangelimiter(Bucket, all) ->
+    {buckets, [Bucket]};
+aaefold_setrangelimiter(Bucket, {StartKey, EndKey}) ->
+    {key_range, Bucket, StartKey, EndKey}.
+
+%% @doc
+%% Convert the format of the date limiter to one compatible with the aae store
+aaefold_setmodifiedlimiter({date, LowModDate, HighModDate}) 
+                        when is_integer(LowModDate), is_integer(HighModDate) ->
+    {LowModDate, HighModDate};
+aaefold_setmodifiedlimiter(_) ->
+    all.
 
 to_aae_binary(ObjectBin) ->
     ObjectSize = byte_size(ObjectBin),
