@@ -16,6 +16,7 @@
 
 -export([open/4,
             put/4,
+            read_repair/4,
             push/6,
             backend_delete/4,
             exchange_message/4,
@@ -93,6 +94,13 @@ open(Path, AAEType, IndexNs, PreflistFun) ->
 %% Put a new object in the store, updating AAE - and co-ordinating
 put(Vnode, Object, IndexN, OtherVnodes) ->
     gen_server:call(Vnode, {put, Object, IndexN, OtherVnodes}).
+
+-spec read_repair(pid(), r_object(), tuple(), list(pid())) -> ok.
+%% @doc
+%% Fetch the version vector from this store, and push the completed object
+%% to another 
+read_repair(Vnode, Object, IndexN, OtherVnodes) ->
+    gen_server:call(Vnode, {read_repair, Object, IndexN, OtherVnodes}).
 
 -spec push(pid(), binary(), binary(), list(tuple()), binary(), tuple()) -> ok.
 %% @doc
@@ -189,6 +197,23 @@ init([Opts]) ->
                 vnode_id = list_to_binary(leveled_util:generate_uuid()),
                 preflist_fun = Opts#options.preflist_fun}}.
 
+handle_call({read_repair, Object, IndexN, OtherVnodes}, _From, State) ->
+    Bucket = Object#r_object.bucket,
+    Key = Object#r_object.key,
+    case leveled_bookie:book_head(State#state.vnode_store, 
+                                        Bucket, Key, ?RIAK_TAG) of
+        not_found ->
+            {reply, ok, State};
+        {ok, Head} ->
+            Clock = extractclock_from_riakhead(Head),
+            ObjectBin = new_v1(Clock, Object#r_object.contents),
+            PushFun = 
+                fun(VN) -> 
+                    push(VN, Bucket, Key, Clock, ObjectBin, IndexN)
+                end,
+            lists:foreach(PushFun, OtherVnodes),
+            {reply, ok, State}
+    end;
 handle_call({put, Object, IndexN, OtherVnodes}, _From, State) ->
     % Get Bucket and Key from object
     % Do head request
@@ -330,8 +355,7 @@ handle_call({aae, Msg, IndexNs, ReturnFun}, _From, State) ->
                                                 SegmentIDs,
                                                 ReturnFun,
                                                 State#state.preflist_fun);
-        {merge_tree_range, Filters} ->
-            {filter, B, KR, TS, SF, MR, HM} = Filters,
+        {merge_tree_range, B, KR, TS, SF, MR, HM} ->
             NullExtractFun = 
                 fun({B0, K0}, V0) -> 
                     {aae_util:make_binarykey(B0, K0), V0} 
@@ -370,6 +394,25 @@ handle_call({aae, Msg, IndexNs, ReturnFun}, _From, State) ->
                                         FoldFun,
                                         InitAcc, 
                                         Elements),
+            Worker = workerfun({fold_worker, []}),
+            Worker(Folder, ReturnFun);
+        {fetch_clocks_range, B, KR, SF, MR} ->
+            FoldFun =
+                fun(BF, KF, EFs, KeyClockAcc) ->
+                    {clock, VV} = lists:keyfind(clock, 1, EFs),
+                    [{BF, KF, VV}|KeyClockAcc]
+                end,
+            RangeLimiter = aaefold_setrangelimiter(B, KR),
+            ModifiedLimiter = aaefold_setmodifiedlimiter(MR),
+            {async, Folder} = 
+                aae_controller:aae_fold(State#state.aae_controller, 
+                                        RangeLimiter,
+                                        SF,
+                                        ModifiedLimiter,
+                                        false,
+                                        FoldFun, 
+                                        [], 
+                                        [{clock, null}]),
             Worker = workerfun({fold_worker, []}),
             Worker(Folder, ReturnFun)
     end,

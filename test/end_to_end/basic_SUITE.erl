@@ -500,20 +500,42 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets) ->
     true = ExchangeState0 == root_compare,
 
     % Same exchange - now using tree compare
-    Filters =
-        {filter, 
-            {?BUCKET_TYPE, integer_to_binary(1)},
-            all, small, all, all, prehash},
+    GetBucketFun = 
+        fun(I) ->
+            case TupleBuckets of
+                true ->
+                    {?BUCKET_TYPE, integer_to_binary(I)};
+                false ->
+                    integer_to_binary(I)
+            end
+        end,
+    Bucket1 = GetBucketFun(1),
+    Bucket2 = GetBucketFun(2),
+    Bucket3 = GetBucketFun(3), 
+    Bucket4 = GetBucketFun(4),
+
     {ok, _TC_P0, TC_GUID0} = 
         aae_exchange:start(partial,
                                 [{exchange_vnodesendfun(VNN), IndexNs}],
                                 [{exchange_vnodesendfun(VNP), IndexNs}],
                                 RepairFun,
                                 ReturnFun,
-                                Filters),
+                                {filter, Bucket3, all, 
+                                    small, all, all, prehash}),
     io:format("Exchange id for tree compare ~s~n", [TC_GUID0]),
     {ExchangeStateTC0, 0} = start_receiver(),
     true = ExchangeStateTC0 == tree_compare,
+    {ok, _TC_P1, TC_GUID1} = 
+        aae_exchange:start(partial,
+                                [{exchange_vnodesendfun(VNP), IndexNs}],
+                                [{exchange_vnodesendfun(VNN), IndexNs}],
+                                RepairFun,
+                                ReturnFun,
+                                {filter, Bucket3, all, 
+                                    small, all, all, prehash}),
+    io:format("Exchange id for tree compare ~s~n", [TC_GUID1]),
+    {ExchangeStateTC1, 0} = start_receiver(),
+    true = ExchangeStateTC1 == tree_compare,
 
     ObjList = gen_riakobjects(InitialKeyCount, [], TupleBuckets),
     ReplaceList = gen_riakobjects(100, [], TupleBuckets), 
@@ -566,9 +588,11 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets) ->
     PutFun1 = PutFun(VNN, VNP),
     PutFun2 = PutFun(VNP, VNN),
     {OL1, OL2A} = lists:split(InitialKeyCount div 2, ObjList),
-    {[RogueObj1, RogueObj2], OL2} = lists:split(2, OL2A),
+    {[RogueObjC1, RogueObjC2], OL2} = lists:split(2, OL2A),
         % Keep some rogue objects to cause failures, by not putting them
         % correctly into both vnodes.  These aren't loaded yet
+    RogueObj1 = RogueObjC1#r_object{bucket = Bucket1},
+    RogueObj2 = RogueObjC2#r_object{bucket = Bucket2},
     ok = lists:foreach(PutFun1, OL1),
     ok = lists:foreach(PutFun2, OL2),
     ok = lists:foreach(PutFun1, ReplaceList),
@@ -817,6 +841,130 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets) ->
     io:format("Exchange id ~s~n", [GUID4b]),
     {ExchangeState4b, 2} = start_receiver(),
     true = ExchangeState4b == clock_compare,
+
+    % Same exchange - now using tree compare
+    CheckBucketList = [Bucket1, Bucket2],
+    CheckBucketFun = 
+        fun(CheckBucket, Acc) ->
+            CBFilters = {filter, CheckBucket, all, small, all, all, prehash},
+            {ok, _TCCB_P, TCCB_GUID} = 
+                aae_exchange:start(partial,
+                                    [{exchange_vnodesendfun(VNNa), IndexNs}],
+                                    [{exchange_vnodesendfun(VNPa), IndexNs}],
+                                    RepairFun,
+                                    ReturnFun,
+                                    CBFilters),
+            io:format("Exchange id for tree compare ~s~n", [TCCB_GUID]),
+            {ExchangeStateTCCB, CBN} = start_receiver(),
+            true = ExchangeStateTCCB == clock_compare,
+            io:format("~w differences found in bucket ~w~n", 
+                        [CBN, CheckBucket]),
+            Acc + CBN
+        end,
+    true = 2 == lists:foldl(CheckBucketFun, 0, CheckBucketList),
+
+    %
+    %
+
+    true = InitialKeyCount > 2000,
+    RplObjListTC = gen_riakobjects(2000, [], TupleBuckets),
+    FilterBucket3Fun = fun(RObj) -> RObj#r_object.bucket == Bucket3 end,
+    FilterBucket4Fun = fun(RObj) -> RObj#r_object.bucket == Bucket4 end,
+    RplObjListTC3 = lists:filter(FilterBucket3Fun, RplObjListTC),
+        % Only have changes in Bucket 3
+    RplObjListTC4 = lists:filter(FilterBucket4Fun, RplObjListTC),
+        % Only have changes in Bucket 4
+
+    SingleSidedPutFun =
+        fun(MVN) ->
+            fun(RObj) ->
+                PL = PreflistFun(null, RObj#r_object.key),
+                mock_kv_vnode:put(MVN, RObj, PL, [])
+            end
+        end,
+    lists:foreach(SingleSidedPutFun(VNNa), RplObjListTC3),
+    lists:foreach(SingleSidedPutFun(VNPa), RplObjListTC4),
+
+    NoRepairCheckB3 = CheckBucketFun(Bucket3, 0),
+    NoRepairCheckB4 = CheckBucketFun(Bucket4, 0),
+    true = length(RplObjListTC3) > NoRepairCheckB3,
+    true = length(RplObjListTC4) > NoRepairCheckB4,
+        % this should be less than, as a subset of mismatched segments will
+        % be passed to fetch clocks
+    true = 0 < NoRepairCheckB3,
+    true = 0 < NoRepairCheckB4,
+       
+    RepairListMapFun = fun(RObj) -> {RObj#r_object.key, RObj} end,
+    RepairListTC3 = lists:map(RepairListMapFun, RplObjListTC3),
+    RepairListTC4 = lists:map(RepairListMapFun, RplObjListTC4),
+    GenuineRepairFun =
+        fun(SourceVnode, TargetVnode, RepairList) ->
+            fun(KL) -> 
+                SubRepairFun = 
+                    fun({{RepB, K}, _VCCompare}, Acc) -> 
+                        case lists:keyfind(K, 1, RepairList) of
+                            {K, RObj} ->
+                                PL = PreflistFun(null, K),
+                                ok = mock_kv_vnode:read_repair(SourceVnode,
+                                                                RObj,
+                                                                PL,
+                                                                [TargetVnode]),
+                                Acc + 1;
+                            false ->
+                                io:format("Missing from repair list ~w ~w~n",
+                                            [RepB, K]),
+                                Acc
+                        end
+                    end,
+                Repaired = lists:foldl(SubRepairFun, 0, KL),
+                io:format("~w keys repaired to vnode ~w~n",
+                    [Repaired, TargetVnode]) 
+            end
+        end,
+    RepairFunTC3 = GenuineRepairFun(VNNa, VNPa, RepairListTC3),
+    RepairFunTC4 = GenuineRepairFun(VNPa, VNNa, RepairListTC4),
+
+    RepairBucketFun = 
+        fun(CheckBucket, TargettedRepairFun, Hash) ->
+            CBFilters = {filter, CheckBucket, all, small, all, all, Hash},
+            {ok, _TCCB_P, TCCB_GUID} = 
+                aae_exchange:start(partial,
+                                    [{exchange_vnodesendfun(VNNa), IndexNs}],
+                                    [{exchange_vnodesendfun(VNPa), IndexNs}],
+                                    TargettedRepairFun,
+                                    ReturnFun,
+                                    CBFilters),
+            io:format("Exchange id for tree compare ~s~n", [TCCB_GUID]),
+            start_receiver()
+        end,
+    
+    FoldRepair3Fun = 
+        fun(_I, Acc) ->
+            case RepairBucketFun(Bucket3, RepairFunTC3, prehash) of
+                {clock_compare, Count3} ->
+                    Acc + Count3;
+                {tree_compare, 0} ->
+                    Acc
+            end
+        end,
+    TotalRepairs3 = lists:foldl(FoldRepair3Fun, 0, lists:seq(1, 6)),
+    io:format("Repaired ~w from list of length ~w~n",
+                [TotalRepairs3, length(RepairListTC3)]),
+    true = length(RepairListTC3) =< TotalRepairs3,
+
+    FoldRepair4Fun = 
+        fun(_I, Acc) ->
+            case RepairBucketFun(Bucket4, RepairFunTC4, {rehash, 5000}) of
+                {clock_compare, Count4} ->
+                    Acc + Count4;
+                {tree_compare, 0} ->
+                    Acc
+            end
+        end,
+    TotalRepairs4 = lists:foldl(FoldRepair4Fun, 0, lists:seq(1, 6)),
+    io:format("Repaired ~w from list of length ~w~n",
+                [TotalRepairs4, length(RepairListTC4)]),
+    true = length(RepairListTC4) =< TotalRepairs4,
 
     % Shutdown and clear down files
     ok = mock_kv_vnode:close(VNNa),

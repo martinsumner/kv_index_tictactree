@@ -342,13 +342,13 @@ tree_compare(timeout, State) ->
     % timing differences.  Ideally the natural deltas will be small enough so
     % that there should be no more than 2 tree compares before a segment filter
     % can be applied to accelerate the process.
+    Filters = State#state.exchange_filters,
+    TreeSize = element(?FILTERIDX_TRS, Filters),
     case ((length(StillDirtyLeaves) > 0)
             and (Reduction > ?WORTHWHILE_REDUCTION)) of
         true ->
             % Keep comparing trees, this is reducing the segments we will
             % eventually need to compare
-            Filters = State#state.exchange_filters,
-            TreeSize = element(?FILTERIDX_TRS, Filters),
             Filters0 =
                 case length(StillDirtyLeaves) < ?WORTHWHILE_FILTER of
                     true ->
@@ -374,7 +374,12 @@ tree_compare(timeout, State) ->
                                     ?MAX_RESULTS,
                                     tree_compare, 
                                     State#state.exchange_id),
-            trigger_next({fetch_clocks, SegmentIDs}, 
+            % TODO - select_ids doesn't account for TreeSize
+            Filters0 =
+                setelement(?FILTERIDX_SEG,
+                            Filters,
+                            {segments, SegmentIDs, TreeSize}),
+            trigger_next({fetch_clocks_range, Filters0}, 
                             clock_compare, 
                             fun merge_clocks/2, 
                             [],
@@ -613,6 +618,16 @@ set_timeout(StartTime, Timeout) ->
                                             always_blue|always_pink) -> ok.
 %% @doc
 %% Alternate between sending requests to items on the blue and pink list
+send_requests({merge_tree_range, {filter, B, KR, TS, SF, MR, HM}},
+                BlueList, PinkList, Always) ->
+    % unpack the filter into a single tuple msg or merge_tree_range
+    send_requests({merge_tree_range, B, KR, TS, SF, MR, HM},
+                    BlueList, PinkList, Always);
+send_requests({fetch_clocks_range, {filter, B, KR, _TS, SF, MR, _HM}},
+                    BlueList, PinkList, Always) ->
+    % unpack the filter into a single tuple msg or merge_tree_range
+    send_requests({fetch_clocks_range, B, KR, SF, MR},
+                    BlueList, PinkList, Always);
 send_requests(_Msg, [], [], _Always) ->
     ok;
 send_requests(Msg, [{SendFun, Preflists}|Rest], PinkList, always_blue) ->
