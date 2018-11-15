@@ -699,7 +699,7 @@ compare_clocks(BlueList, PinkList) ->
         % Want to subtract out from the Pink and Blue Sets any example where 
         % both pink and blue are the same
         %
-        % This should spped up the foling and key finding to provide the 
+        % This should speed up the folding and key finding to provide the 
         % joined list
 
     BlueDeltaList = 

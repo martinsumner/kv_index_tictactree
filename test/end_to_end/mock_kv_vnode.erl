@@ -57,6 +57,7 @@
                 aae_controller :: pid(),
                 vnode_store :: pid(),
                 vnode_id :: binary(),
+                aae_type :: parallel|native,
                 vnode_sqn = 1 :: integer(),
                 preflist_fun = null :: preflist_fun(),
                 aae_rebuild = false :: boolean()}).
@@ -191,6 +192,7 @@ init([Opts]) ->
                                     RP, 
                                     fun from_aae_binary/1),
     {ok, #state{root_path = RP,
+                aae_type = KeyStoreType,
                 vnode_store = VnSt,
                 index_ns = Opts#options.index_ns,
                 aae_controller = AAECntrl,
