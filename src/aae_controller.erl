@@ -1455,6 +1455,15 @@ rebuild_worker(ReturnFun) ->
             ReturnFun(ok)
     end.
 
+wrap_splitfun_test() ->
+    SplitObjFun = 
+        fun(_Obj) -> {1000, 2, 0, term_to_binary(null)} end,
+    WrappedFun = wrapped_splitobjfun(SplitObjFun),
+    SplitObj = WrappedFun(null),
+    ?assertMatch(true, is_tuple(SplitObj)),
+    ?assertMatch(5, tuple_size(SplitObj)),
+    ?assertMatch(undefined, element(4, SplitObj)). 
+
 -endif.
 
 

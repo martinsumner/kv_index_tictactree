@@ -16,6 +16,7 @@
 
 -export([open/4,
             put/4,
+            read_repair/4,
             push/6,
             backend_delete/4,
             exchange_message/4,
@@ -29,7 +30,8 @@
             from_aae_binary/1,
             new_v1/2,
             workerfun/1,
-            rebuild_worker/1]).
+            rebuild_worker/1,
+            fold_worker/0]).
 
 -record(r_content, {
                     metadata,
@@ -55,6 +57,7 @@
                 aae_controller :: pid(),
                 vnode_store :: pid(),
                 vnode_id :: binary(),
+                aae_type :: parallel|native,
                 vnode_sqn = 1 :: integer(),
                 preflist_fun = null :: preflist_fun(),
                 aae_rebuild = false :: boolean()}).
@@ -67,6 +70,7 @@
 -define(V1_VERS, 1).
 -define(MAGIC, 53).  
 -define(EMPTY_VTAG_BIN, <<"e">>).
+-define(MAGIC_KEYS, [<<48,48,48,52,57,51>>]).
 
 
 -type r_object() :: #r_object{}.
@@ -92,6 +96,13 @@ open(Path, AAEType, IndexNs, PreflistFun) ->
 %% Put a new object in the store, updating AAE - and co-ordinating
 put(Vnode, Object, IndexN, OtherVnodes) ->
     gen_server:call(Vnode, {put, Object, IndexN, OtherVnodes}).
+
+-spec read_repair(pid(), r_object(), tuple(), list(pid())) -> ok.
+%% @doc
+%% Fetch the version vector from this store, and push the completed object
+%% to another 
+read_repair(Vnode, Object, IndexN, OtherVnodes) ->
+    gen_server:call(Vnode, {read_repair, Object, IndexN, OtherVnodes}).
 
 -spec push(pid(), binary(), binary(), list(tuple()), binary(), tuple()) -> ok.
 %% @doc
@@ -171,8 +182,10 @@ init([Opts]) ->
         case Opts#options.aae of 
             native ->
                 {native, leveled_nko, VnSt};
-            parallel ->
-                {parallel, leveled_so}
+            parallel_so ->
+                {parallel, leveled_so};
+            parallel_ko ->
+                {parallel, leveled_ko}
         end,
     {ok, AAECntrl} = 
         aae_controller:aae_start(KeyStoreType, 
@@ -182,12 +195,30 @@ init([Opts]) ->
                                     RP, 
                                     fun from_aae_binary/1),
     {ok, #state{root_path = RP,
+                aae_type = KeyStoreType,
                 vnode_store = VnSt,
                 index_ns = Opts#options.index_ns,
                 aae_controller = AAECntrl,
                 vnode_id = list_to_binary(leveled_util:generate_uuid()),
                 preflist_fun = Opts#options.preflist_fun}}.
 
+handle_call({read_repair, Object, IndexN, OtherVnodes}, _From, State) ->
+    Bucket = Object#r_object.bucket,
+    Key = Object#r_object.key,
+    case leveled_bookie:book_head(State#state.vnode_store, 
+                                        Bucket, Key, ?RIAK_TAG) of
+        not_found ->
+            {reply, ok, State};
+        {ok, Head} ->
+            Clock = extractclock_from_riakhead(Head),
+            ObjectBin = new_v1(Clock, Object#r_object.contents),
+            PushFun = 
+                fun(VN) -> 
+                    push(VN, Bucket, Key, Clock, ObjectBin, IndexN)
+                end,
+            lists:foreach(PushFun, OtherVnodes),
+            {reply, ok, State}
+    end;
 handle_call({put, Object, IndexN, OtherVnodes}, _From, State) ->
     % Get Bucket and Key from object
     % Do head request
@@ -274,7 +305,7 @@ handle_call({rebuild, true}, _From, State) ->
             % do here other than prompt the status change
             ReturnFun(ok);
         {ok, FoldFun, FinishFun} ->
-            Worker = workerfun(ReturnFun),
+            Worker = workerfun({rebuild_worker, [ReturnFun]}),
             % Now need to get a fold query to run over the vnode store to 
             % rebuild the parallel store.  The aae_controller has provided 
             % the object fold fun which should load the parallel store, and
@@ -328,7 +359,68 @@ handle_call({aae, Msg, IndexNs, ReturnFun}, _From, State) ->
                                                 IndexNs,
                                                 SegmentIDs,
                                                 ReturnFun,
-                                                State#state.preflist_fun)
+                                                State#state.preflist_fun);
+        {merge_tree_range, B, KR, TS, SF, MR, HM} ->
+            NullExtractFun = 
+                fun({B0, K0}, V0) -> 
+                    {aae_util:make_binarykey(B0, K0), V0} 
+                end,
+            {FoldFun, Elements} = 
+                case HM of
+                    prehash ->
+                        {fun(BF, KF, EFs, TreeAcc) ->
+                                {hash, CH} = lists:keyfind(hash, 1, EFs),
+                                leveled_tictac:add_kv(TreeAcc, 
+                                                        {BF, KF},
+                                                        {is_hash, CH}, 
+                                                        NullExtractFun)
+                            end,
+                            [{hash, null}]};
+                    {rehash, IV} ->
+                        {fun(BF, KF, EFs, TreeAcc) ->
+                                {clock, VC} = lists:keyfind(clock, 1, EFs),
+                                CH = erlang:phash2({IV, lists:sort(VC)}),
+                                leveled_tictac:add_kv(TreeAcc, 
+                                                        {BF, KF},
+                                                        {is_hash, CH}, 
+                                                        NullExtractFun)
+                            end,
+                            [{clock, null}]}
+                end,
+            InitAcc = leveled_tictac:new_tree(State#state.vnode_id, TS),
+            RangeLimiter = aaefold_setrangelimiter(B, KR),
+            ModifiedLimiter = aaefold_setmodifiedlimiter(MR),
+            {async, Folder} = 
+                aae_controller:aae_fold(State#state.aae_controller, 
+                                        RangeLimiter,
+                                        SF,
+                                        ModifiedLimiter,
+                                        false,
+                                        FoldFun,
+                                        InitAcc, 
+                                        Elements),
+            Worker = workerfun({fold_worker, []}),
+            Worker(Folder, ReturnFun);
+        {fetch_clocks_range, B, KR, SF, MR} ->
+            FoldFun =
+                fun(BF, KF, EFs, KeyClockAcc) ->
+                    magickey_check(KF, State#state.aae_type),
+                    {clock, VV} = lists:keyfind(clock, 1, EFs),
+                    [{BF, KF, VV}|KeyClockAcc]
+                end,
+            RangeLimiter = aaefold_setrangelimiter(B, KR),
+            ModifiedLimiter = aaefold_setmodifiedlimiter(MR),
+            {async, Folder} = 
+                aae_controller:aae_fold(State#state.aae_controller, 
+                                        RangeLimiter,
+                                        SF,
+                                        ModifiedLimiter,
+                                        false,
+                                        FoldFun, 
+                                        [], 
+                                        [{clock, null}]),
+            Worker = workerfun({fold_worker, []}),
+            Worker(Folder, ReturnFun)
     end,
     {reply, ok, State};
 handle_call({fold_aae, Range, Segments, FoldFun, InitAcc, Elements}, 
@@ -377,7 +469,7 @@ handle_cast({rebuild_complete, store}, State) ->
             ok = rebuild_complete(Vnode, tree)
         end,
     
-    Worker = workerfun(ReturnFun),
+    Worker = workerfun({rebuild_worker, [ReturnFun]}),
 
     ok = aae_controller:aae_rebuildtrees(State#state.aae_controller, 
                                             State#state.index_ns,
@@ -455,7 +547,8 @@ bin_contents(Contents) ->
     lists:foldl(F, <<>>, Contents).
 
 meta_bin(MetaData) ->
-    {Mega,Secs,Micro} = os:timestamp(),
+    {last_modified_date, {Mega,Secs,Micro}} =
+        lists:keyfind(last_modified_date, 1, MetaData),
     LastModBin = <<Mega:32/integer, Secs:32/integer, Micro:32/integer>>,
     Deleted = <<0>>,
     RestBin = term_to_binary(MetaData),
@@ -465,8 +558,8 @@ meta_bin(MetaData) ->
       Deleted:1/binary-unit:8, RestBin/binary>>.
 
 
-workerfun(ReturnFun) ->
-    WorkerPid = spawn(?MODULE, rebuild_worker, [ReturnFun]),
+workerfun({WorkerFun, Args}) ->
+    WorkerPid = spawn(?MODULE, WorkerFun, Args),
     fun(FoldFun, FinishFun) ->
         WorkerPid! {fold, FoldFun, FinishFun}
     end.
@@ -478,15 +571,39 @@ rebuild_worker(ReturnFun) ->
             ReturnFun(ok)
     end.
 
+fold_worker() ->
+    receive
+        {fold, FoldFun, ReturnFun} ->
+            ReturnFun(FoldFun())
+    end.
+
+
 from_aae_binary(AAEBin) ->
-    <<ObjectSize:32/integer, SibCount:32/integer, IndexHash:32/integer, 
-        HeadOnly/binary>> = AAEBin,
-    {ObjectSize, SibCount, IndexHash, HeadOnly}.
+    <<ObjectSize:32/integer, SibCount:32/integer, IndexHash:32/integer,
+        LMDmeg:32/integer, LMDsec:32/integer, LMDmcr:32/integer,
+        MDOnly/binary>> = AAEBin,
+    {ObjectSize, SibCount, IndexHash, [{LMDmeg, LMDsec, LMDmcr}], MDOnly}.
 
 
 %%%============================================================================
 %%% Internal functions
 %%%============================================================================
+
+
+%% @doc
+%% Convert the format of the range limiter to one compatible with the aae store
+aaefold_setrangelimiter(Bucket, all) ->
+    {buckets, [Bucket]};
+aaefold_setrangelimiter(Bucket, {StartKey, EndKey}) ->
+    {key_range, Bucket, StartKey, EndKey}.
+
+%% @doc
+%% Convert the format of the date limiter to one compatible with the aae store
+aaefold_setmodifiedlimiter({date, LowModDate, HighModDate}) 
+                        when is_integer(LowModDate), is_integer(HighModDate) ->
+    {LowModDate, HighModDate};
+aaefold_setmodifiedlimiter(_) ->
+    all.
 
 to_aae_binary(ObjectBin) ->
     ObjectSize = byte_size(ObjectBin),
@@ -496,22 +613,37 @@ to_aae_binary(ObjectBin) ->
 
     IndexHash = erlang:phash2([]), % faking here
 
-    HeadOnly = strip_metabinary(SibCount, SibsBin, <<>>),
+    {{LMDmeg, LMDsec, LMDmcr}, MD} =
+        strip_metabinary(SibCount, SibsBin, {0, 0, 0}, <<>>),
+    
     <<ObjectSize:32/integer, SibCount:32/integer, IndexHash:32/integer, 
-        HeadOnly/binary>>.
+        LMDmeg:32/integer, LMDsec:32/integer, LMDmcr:32/integer, 
+        MD/binary>>.
 
 
-strip_metabinary(0, <<>>, MetaBinAcc) ->
-    MetaBinAcc;
-strip_metabinary(SibCount, SibBin, MetaBinAcc) ->
+strip_metabinary(0, <<>>, LMD, MetaBinAcc) ->
+    {LMD, MetaBinAcc};
+strip_metabinary(SibCount, SibBin, LMD, MetaBinAcc) ->
     <<ValLen:32/integer, _ValBin:ValLen/binary, 
         MetaLen:32/integer, MetaBin:MetaLen/binary, Rest/binary>> = SibBin,
+        <<LMDmega:32/integer, LMDsec:32/integer, LMDmicro:32/integer,
+            _RestMeta/binary>> = MetaBin,
+        LMD0 = max({LMDmega, LMDsec, LMDmicro}, LMD),
     strip_metabinary(SibCount - 1, 
-                        Rest, 
+                        Rest,
+                        LMD0,
                         <<MetaBinAcc/binary, 
                             MetaLen:32/integer, 
                             MetaBin:MetaLen/binary>>).
 
+
+magickey_check(Key, VnodeType) ->
+    case lists:member(Key, ?MAGIC_KEYS) of
+        true ->
+            io:format("Magic key ~w at VnodeType ~w~n", [Key, VnodeType]);
+        false ->
+            ok
+    end.
 
 %%%============================================================================
 %%% Test

@@ -1,10 +1,31 @@
 %% -------- Overview ---------
 %%
-%% The exchange should have the following states
+%% There are two primary types of exchange sorted
+%% - a full exchange aimed at implementations with cached trees, where the
+%% cached trees represent all the data in the location, and the comparion is
+%% between two complete data sets
+%% - a partial exchange where it is expected that trees will be dynamically
+%% created covering a subset of data within the location
+%%
+%% The full exchange assumes access to cached trees, with a low cost of
+%% repeated access, and a relatively high proportion fo the overall cost in
+%% network bandwitdh.  These exchanges go through the following process:
+%%
 %% - Root Compare
 %% - Root Confirm
 %% - Branch Compare
 %% - Branch Confirm
+%% - Clock Compare
+%% - Repair
+%%
+%% The partial, dynamic tree exchange is based on dynamically produced trees,
+%% where a relatively high proportion of the cost is in the production of the
+%% trees. In a tree exchange, whole trees are compared (potentially reduced by
+%% use of a segment filter), until the delta stops decreasing at a significant
+%% rate and a Clock Compare is run.  So these exchanges for through the
+%% following process:
+%%
+%% - Tree Compare (x n)
 %% - Clock Compare
 %% - Repair
 %%
@@ -13,7 +34,7 @@
 %% to be compared being the merging of all the trees referenced by the list.
 %%
 %% The lists can be a single item each (for a pairwise exchange), or a 
-%% ring-size number of partitions for a coverage query exchange.
+%% ring-size number of partitions for a coverage query exchange.  
 %%
 %% -------- Root Compare ---------
 %%
@@ -85,8 +106,21 @@
     % 60 seconds (used in fetch root/branches)
 -define(SCAN_TIMEOUT_MS, 600000). 
     % 10 minutes (used in fetch clocks)
+-define(UNFILTERED_SCAN_TIMEOUT_MS, 3600000).
+    % 60 minutes (used in fetch trees with no filters)
 -define(MAX_RESULTS, 128). 
-    % Maximum number of results to request in one round of 
+    % Maximum number of results to request in one round of
+-define(WORTHWHILE_REDUCTION, 0.3).
+    % If the last comparison of trees has reduced the size of the dirty leaves
+    % by 30%, probably worth comparing again before a clock fetch is run. 
+    % Number a suck-teeth estimate, not even a fag-packet calculation involved.
+-define(WORTHWHILE_FILTER, 256).
+    % If the number of segment IDs to pass into a filter is too large, the
+    % filter is probably not worthwhile - more effort checking the filter, than
+    % time saved in the accumulator.  Another suck-teeth estimate here as to
+    % what this value is, at this level with a small tree it will save opening
+    % all but one block in most slots (with the sst file).  I suspect the
+    % optimal number is more likely to be higher than lower.
 
 -export([init/1,
             handle_sync_event/4,
@@ -96,16 +130,19 @@
             code_change/4]).
 
 -export([waiting_all_results/2,
-            prepare/2,
+            prepare_full_exchange/2,
+            prepare_partial_exchange/2,
             root_compare/2,
             root_confirm/2,
             branch_compare/2,
             branch_confirm/2,
             clock_compare/2,
+            tree_compare/2,
             merge_root/2,
             merge_branches/2]).
 
 -export([start/4,
+            start/6,
             reply/3]).
 
 -include_lib("eunit/include/eunit.hrl").
@@ -114,6 +151,7 @@
                 root_confirm_deltas = [] :: list(),
                 branch_compare_deltas = [] :: list(),
                 branch_confirm_deltas = [] :: list(),
+                tree_compare_deltas = [] :: list(),
                 key_deltas = [] :: list(),
                 repair_fun,
                 reply_fun,
@@ -127,26 +165,61 @@
                 merge_fun,
                 start_time = os:timestamp() :: erlang:timestamp(),
                 pending_state :: atom(),
-                reply_timeout = 0 :: integer()
+                reply_timeout = 0 :: integer(),
+                exchange_type :: exchange_type(),
+                exchange_filters = none :: filters(),
+                last_tree_compare = none :: list(non_neg_integer())|none,
+                tree_compares = 0 :: integer()
                 }).
 
--type input_list() :: [{fun(), list(tuple())}].
+-type input_list() :: [{fun(), list(tuple())|all}].
     % The Blue List and the Pink List are made up of:
     % - a SendFun, which should  be a 3-arity function, taking a preflist, 
     % a message and a colour to be used to flag the reply;
     % - a list of preflists, to be used in the SendFun to be filtered by the
     % target.  The Preflist might be {Index, Node} for remote requests or 
     % {Index, Pid} for local requests
+    % For partial exchanges only, the preflist can and must be set to 'all'
 -type branch_results() :: list({integer(), binary()}).
     % Results to branch queries are a list mapping Branch ID to the binary for
     % that branch
 -type exchange_state() :: #state{}.
+-type exchange_type() :: full|partial.
+
+-type bucket() :: 
+    {binary(), binary()}|binary().
+-type key_range() :: 
+    {binary(), binary()}|all.
+-type modified_range() :: 
+    {non_neg_integer(), non_neg_integer()}|all.
+-type segment_filter() :: 
+    {segments, list(non_neg_integer()), leveled_tictac:tree_size()}|all.
+-type hash_method() ::
+    pre_hash|{rehash, non_neg_integer()}.
+-type filters() :: 
+    {filter,
+        bucket(), key_range(),
+        leveled_tictac:tree_size(),
+        segment_filter(), modified_range(),
+        hash_method()}|none.
+    % filter to be used in partial exchanges
+
+-define(FILTERIDX_SEG, 5).
+-define(FILTERIDX_TRS, 4).
 
 %%%============================================================================
 %%% API
 %%%============================================================================
 
--spec start(input_list(), input_list(), fun(), fun()) -> {ok, pid(), list()}.
+
+start(BlueList, PinkList, RepairFun, ReplyFun) ->
+    % API for backwards compatability
+    start(full, BlueList, PinkList, RepairFun, ReplyFun, none).
+
+
+-spec start(exchange_type(),
+            input_list(), input_list(), fun(), fun(),
+            filters()) -> {ok, pid(), list()}.
 %% @doc
 %% Start an FSM to manage an exchange and comapre the preflsist in the 
 %% BlueList with those in the PinkList, using the RepairFun to repair any
@@ -154,13 +227,23 @@
 %% to calling client the StateName at termination.
 %%
 %% The ReplyFun should be a 1 arity function t
-start(BlueList, PinkList, RepairFun, ReplyFun) ->
+start(full, BlueList, PinkList, RepairFun, ReplyFun, none) ->
     ExchangeID = leveled_util:generate_uuid(),
     {ok, ExPID} = gen_fsm:start(?MODULE, 
-                                [BlueList, PinkList, RepairFun, ReplyFun, 
+                                [{full, none}, 
+                                    BlueList, PinkList, RepairFun, ReplyFun,
+                                    ExchangeID], 
+                                []),
+    {ok, ExPID, ExchangeID};
+start(partial, BlueList, PinkList, RepairFun, ReplyFun, Filters) ->
+    ExchangeID = leveled_util:generate_uuid(),
+    {ok, ExPID} = gen_fsm:start(?MODULE, 
+                                [{partial, Filters}, 
+                                    BlueList, PinkList, RepairFun, ReplyFun,
                                     ExchangeID], 
                                 []),
     {ok, ExPID, ExchangeID}.
+
 
 -spec reply(pid(), any(), pink|blue) -> ok.
 %% @doc
@@ -172,7 +255,7 @@ reply(Exchange, Result, Colour) ->
 %%% gen_fsm callbacks
 %%%============================================================================
 
-init([BlueList, PinkList, RepairFun, ReplyFun, ExchangeID]) ->
+init([{full, none}, BlueList, PinkList, RepairFun, ReplyFun, ExChID]) ->
     leveled_rand:seed(),
     PinkTarget = length(PinkList),
     BlueTarget = length(BlueList),
@@ -180,20 +263,54 @@ init([BlueList, PinkList, RepairFun, ReplyFun, ExchangeID]) ->
                     pink_list = PinkList,
                     repair_fun = RepairFun,
                     reply_fun = ReplyFun,
-                    exchange_id = ExchangeID,
+                    exchange_id = ExChID,
                     pink_returns = {PinkTarget, PinkTarget},
-                    blue_returns = {BlueTarget, BlueTarget}},
-    aae_util:log("EX001", [ExchangeID, PinkTarget + BlueTarget], logs()),
-    {ok, prepare, State, 0}.
+                    blue_returns = {BlueTarget, BlueTarget},
+                    exchange_type = full},
+    aae_util:log("EX001", [ExChID, PinkTarget + BlueTarget], logs()),
+    {ok, prepare_full_exchange, State, 0};
+init([{partial, Filters}, BlueList, PinkList, RepairFun, ReplyFun, ExChID]) ->
+    leveled_rand:seed(),
+    PinkTarget = length(PinkList),
+    BlueTarget = length(BlueList),
+    State = #state{blue_list = BlueList, 
+                    pink_list = PinkList,
+                    repair_fun = RepairFun,
+                    reply_fun = ReplyFun,
+                    exchange_id = ExChID,
+                    pink_returns = {PinkTarget, PinkTarget},
+                    blue_returns = {BlueTarget, BlueTarget},
+                    exchange_type = partial,
+                    exchange_filters = Filters},
+    aae_util:log("EX001", [ExChID, PinkTarget + BlueTarget], logs()),
+    {ok, prepare_partial_exchange, State, 0}.
 
-prepare(timeout, State) ->
-    aae_util:log("EX006", [prepare, State#state.exchange_id], logs()),
+
+prepare_full_exchange(timeout, State) ->
+    aae_util:log("EX006",
+                    [prepare_tree_exchange, State#state.exchange_id],
+                    logs()),
     trigger_next(fetch_root, 
                     root_compare, 
                     fun merge_root/2, 
                     <<>>, 
                     false, 
                     ?CACHE_TIMEOUT_MS, 
+                    State).
+
+prepare_partial_exchange(timeout, State) ->
+    aae_util:log("EX006",
+                    [prepare_partial_exchange, State#state.exchange_id],
+                    logs()),
+    Filters = State#state.exchange_filters,
+    ScanTimeout = filtered_timeout(Filters),
+    TreeSize = element(?FILTERIDX_TRS, Filters),
+    trigger_next({merge_tree_range, Filters},
+                    tree_compare,
+                    fun merge_tree/2,
+                    leveled_tictac:new_tree(empty_tree, TreeSize),
+                    false,
+                    ScanTimeout,
                     State).
 
 root_compare(timeout, State) ->
@@ -206,6 +323,71 @@ root_compare(timeout, State) ->
                     length(BranchIDs) == 0, 
                     ?CACHE_TIMEOUT_MS, 
                     State#state{root_compare_deltas = BranchIDs}).
+
+tree_compare(timeout, State) ->
+    aae_util:log("EX006", [root_compare, State#state.exchange_id], logs()),
+    DirtyLeaves = compare_trees(State#state.blue_acc, State#state.pink_acc),
+    TreeCompares = State#state.tree_compares + 1,
+    {StillDirtyLeaves, Reduction} = 
+        case State#state.last_tree_compare of
+            none ->
+                {DirtyLeaves, 1.0};
+            PreviouslyDirtyLeaves ->
+                SDL = intersect_ids(PreviouslyDirtyLeaves, DirtyLeaves),
+                {SDL, 1.0 - length(SDL) / length(PreviouslyDirtyLeaves)}
+        end,
+    % We want to keep comparing trees until the number of deltas stops reducing
+    % significantly.  Then there should be a clock comparison.
+    % It is expected there will be natural deltas with tree compare because of
+    % timing differences.  Ideally the natural deltas will be small enough so
+    % that there should be no more than 2 tree compares before a segment filter
+    % can be applied to accelerate the process.
+    Filters = State#state.exchange_filters,
+    TreeSize = element(?FILTERIDX_TRS, Filters),
+    case ((length(StillDirtyLeaves) > 0)
+            and (Reduction > ?WORTHWHILE_REDUCTION)) of
+        true ->
+            % Keep comparing trees, this is reducing the segments we will
+            % eventually need to compare
+            Filters0 =
+                case length(StillDirtyLeaves) < ?WORTHWHILE_FILTER of
+                    true ->
+                        Segments =
+                            {segments, StillDirtyLeaves, TreeSize},
+                        setelement(?FILTERIDX_SEG, Filters, Segments);
+                    false ->
+                        Filters
+                end,
+            ScanTimeout = filtered_timeout(Filters0),
+            trigger_next({merge_tree_range, Filters0},
+                            tree_compare,
+                            fun merge_tree/2,
+                            leveled_tictac:new_tree(empty_tree, TreeSize),
+                            false,
+                            ScanTimeout,
+                            State#state{last_tree_compare = StillDirtyLeaves,
+                                        tree_compares = TreeCompares});
+        false ->
+            % Compare clocks.  Note if there are no Mismatched segment IDs the
+            % stop condition in trigger_next will be met
+            SegmentIDs = select_ids(StillDirtyLeaves, 
+                                    ?MAX_RESULTS,
+                                    tree_compare, 
+                                    State#state.exchange_id),
+            % TODO - select_ids doesn't account for TreeSize
+            Filters0 =
+                setelement(?FILTERIDX_SEG,
+                            Filters,
+                            {segments, SegmentIDs, TreeSize}),
+            trigger_next({fetch_clocks_range, Filters0}, 
+                            clock_compare, 
+                            fun merge_clocks/2, 
+                            [],
+                            length(SegmentIDs) == 0, 
+                            ?SCAN_TIMEOUT_MS, 
+                            State#state{tree_compare_deltas = StillDirtyLeaves,
+                                        tree_compares = TreeCompares})
+    end.
 
 root_confirm(timeout, State) ->
     aae_util:log("EX006", [root_confirm, State#state.exchange_id], logs()),
@@ -314,14 +496,26 @@ handle_info(_Msg, StateName, State) ->
     {next_state, StateName, State}.
 
 terminate(normal, StateName, State) ->
-    aae_util:log("EX003", 
-                    [StateName, State#state.exchange_id,
-                        length(State#state.root_compare_deltas),
-                        length(State#state.root_confirm_deltas),
-                        length(State#state.branch_compare_deltas),
-                        length(State#state.branch_confirm_deltas),
-                        length(State#state.key_deltas)], 
-                    logs()),
+    case State#state.exchange_type of
+        full ->
+            aae_util:log("EX003", 
+                            [StateName,
+                                State#state.exchange_id,
+                                length(State#state.root_compare_deltas),
+                                length(State#state.root_confirm_deltas),
+                                length(State#state.branch_compare_deltas),
+                                length(State#state.branch_confirm_deltas),
+                                length(State#state.key_deltas)], 
+                            logs());
+        partial ->
+            aae_util:log("EX009", 
+                            [StateName,
+                                State#state.exchange_id,
+                                length(State#state.tree_compare_deltas),
+                                State#state.tree_compares,
+                                length(State#state.key_deltas)], 
+                            logs())
+    end,
     ReplyFun = State#state.reply_fun,
     ReplyFun({StateName, length(State#state.key_deltas)}).
 
@@ -373,6 +567,13 @@ merge_branches([{BranchID, BranchBin}|Rest], BranchAccL) ->
 merge_root(Root, RootAcc) ->
     merge_binary(Root, RootAcc).
 
+-spec merge_tree(leveled_tictac:tictactree(), leveled_tictac:tictactree())
+                                                -> leveled_tictac:tictactree().
+%% @doc
+%% Merge two trees into an XOR'd tree representing the total result set
+merge_tree(Tree0, Tree1) ->
+    leveled_tictac:merge_trees(Tree0, Tree1).
+
 %%%============================================================================
 %%% Internal Functions
 %%%============================================================================
@@ -417,6 +618,16 @@ set_timeout(StartTime, Timeout) ->
                                             always_blue|always_pink) -> ok.
 %% @doc
 %% Alternate between sending requests to items on the blue and pink list
+send_requests({merge_tree_range, {filter, B, KR, TS, SF, MR, HM}},
+                BlueList, PinkList, Always) ->
+    % unpack the filter into a single tuple msg or merge_tree_range
+    send_requests({merge_tree_range, B, KR, TS, SF, MR, HM},
+                    BlueList, PinkList, Always);
+send_requests({fetch_clocks_range, {filter, B, KR, _TS, SF, MR, _HM}},
+                    BlueList, PinkList, Always) ->
+    % unpack the filter into a single tuple msg or merge_tree_range
+    send_requests({fetch_clocks_range, B, KR, SF, MR},
+                    BlueList, PinkList, Always);
 send_requests(_Msg, [], [], _Always) ->
     ok;
 send_requests(Msg, [{SendFun, Preflists}|Rest], PinkList, always_blue) ->
@@ -488,7 +699,7 @@ compare_clocks(BlueList, PinkList) ->
         % Want to subtract out from the Pink and Blue Sets any example where 
         % both pink and blue are the same
         %
-        % This should spped up the foling and key finding to provide the 
+        % This should speed up the folding and key finding to provide the 
         % joined list
 
     BlueDeltaList = 
@@ -528,6 +739,13 @@ compare_clocks(BlueList, PinkList) ->
     
     AllDeltaList.
 
+
+-spec compare_trees(leveled_tictac:tictactree(),
+                    leveled_tictac:tictactree()) -> list(non_neg_integer()).
+%% @doc
+%% Compare the trees - get list of dirty leaves (Segment IDs)
+compare_trees(Tree0, Tree1) ->
+    leveled_tictac:find_dirtyleaves(Tree0, Tree1).
 
 -spec intersect_ids(list(integer()), list(integer())) -> list(integer()).
 %% @doc
@@ -584,6 +802,18 @@ jitter_pause(Timeout) ->
 %% Rest the count back to 0
 reset({Target, Target}) -> {0, Target}. 
 
+-spec filtered_timeout(filters()) -> pos_integer().
+%% @doc
+%% Has a filter been applied to the scan (true), or are we scanning the whole
+%% bucket (false)
+filtered_timeout({filter, _B, KeyRange, _TS, SegFilter, ModRange, _HM}) ->
+    case ((KeyRange == all) and (SegFilter == all) and (ModRange == all)) of
+        true ->
+            ?UNFILTERED_SCAN_TIMEOUT_MS;
+        false ->
+            ?SCAN_TIMEOUT_MS
+    end.
+
 %%%============================================================================
 %%% log definitions
 %%%============================================================================
@@ -598,7 +828,8 @@ logs() ->
             {error, "Timeout with pending_state=~w and missing_count=~w" 
                         ++ " for exchange id=~s"}},
         {"EX003",
-            {info, "Normal exit at pending_state=~w for exchange id=~s"
+            {info, "Normal exit for full exchange at"
+                        ++ " pending_state=~w for exchange_id=~s"
                         ++ " root_compare_deltas=~w root_confirm_deltas=~w"
                         ++ " branch_compare_deltas=~w branch_confirm_deltas=~w"
                         ++ " key_deltas=~w"}},
@@ -611,7 +842,12 @@ logs() ->
         {"EX007", 
             {debug, "Reply received for colour=~w in exchange id=~s"}},
         {"EX008", 
-            {debug, "Comparison between BlueList ~w and PinkList ~w"}}
+            {debug, "Comparison between BlueList ~w and PinkList ~w"}},
+        {"EX009",
+            {info, "Normal exit for partial (dynamic) exchange at"
+                        ++ " pending_state=~w for exchange_id=~s"
+                        ++ " tree_compare_deltas=~w after tree_compares=~w"
+                        ++ " key_deltas=~w"}}
         ].
 
 
@@ -660,16 +896,21 @@ compare_clocks_test() ->
                     compare_clocks(BL1, PL2)).
 
 clean_exit_ontimeout_test() ->
-    State0 = #state{pink_returns={4, 5}, blue_returns={8, 8}},
+    State0 = #state{pink_returns={4, 5}, blue_returns={8, 8},
+                    exchange_type = full},
     State1 = State0#state{pending_state = timeout},
     {stop, normal, State1} = waiting_all_results(timeout, State0).
 
 
 coverage_cheat_test() ->
-    {next_state, prepare, _State0} = handle_event(null, prepare, #state{}),
-    {reply, ok, prepare, _State1} = handle_sync_event(null, nobody, prepare, #state{}),
-    {next_state, prepare, _State2} = handle_info(null, prepare, #state{}),
-    {ok, prepare, _State3} = code_change(null, prepare, #state{}, null).
+    {next_state, prepare, _State0} =
+        handle_event(null, prepare, #state{exchange_type = full}),
+    {reply, ok, prepare, _State1} =
+        handle_sync_event(null, nobody, prepare, #state{exchange_type = full}),
+    {next_state, prepare, _State2} =
+        handle_info(null, prepare, #state{exchange_type = full}),
+    {ok, prepare, _State3} =
+        code_change(null, prepare, #state{exchange_type = full}, null).
 
 
 -endif.

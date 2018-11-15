@@ -4,46 +4,14 @@
 -export([dual_store_compare_medium_so/1,
             dual_store_compare_medium_ko/1,
             dual_store_compare_large_so/1,
-            dual_store_compare_large_ko/1,
-            mock_vnode_loadexchangeandrebuild_stbucket/1,
-            mock_vnode_loadexchangeandrebuild_tuplebucket/1,
-            aae_fold_keyorder/1,
-            aae_fold_segmentorder/1,
-            mock_vnode_coveragefold_nativemedium/1,
-            mock_vnode_coveragefold_nativesmall/1,
-            mock_vnode_coveragefold_parallelmedium/1,
-            mock_vnode_coveragefold_parallelsmall/1]).
+            dual_store_compare_large_ko/1]).
 
 all() -> [dual_store_compare_medium_so,
             dual_store_compare_medium_ko,
             dual_store_compare_large_so,
-            dual_store_compare_large_ko,
-            mock_vnode_loadexchangeandrebuild_stbucket,
-            mock_vnode_loadexchangeandrebuild_tuplebucket,
-            aae_fold_keyorder,
-            aae_fold_segmentorder,
-            mock_vnode_coveragefold_nativemedium,
-            mock_vnode_coveragefold_nativesmall,
-            mock_vnode_coveragefold_parallelmedium,
-            mock_vnode_coveragefold_parallelsmall
+            dual_store_compare_large_ko
         ].
-
--define(ROOT_PATH, "test/").
--define(BUCKET_TYPE, <<"BucketType">>).
-
--record(r_content, {
-                    metadata,
-                    value :: term()
-                    }).
-
--record(r_object, {
-                    bucket,
-                    key,
-                    contents :: [#r_content{}],
-                    vclock = [],
-                    updatemetadata=dict:store(clean, true, dict:new()),
-                    updatevalue :: term()}).
-
+    
 
 dual_store_compare_medium_so(_Config) ->
     dual_store_compare_tester(10000, leveled_so).
@@ -72,7 +40,7 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
     % Don't rtry and make sense of this in term of a ring - the 
     % mock_vnode_coverage_fold tests have a more Riak ring-like setup.
 
-    RootPath = reset_filestructure(),
+    RootPath = testutil:reset_filestructure(),
     VnodePath1 = filename:join(RootPath, "vnode1/"),
     VnodePath2 = filename:join(RootPath, "vnode2/"),
     SplitF = fun(_X) -> {leveled_rand:uniform(1000), 1, 0, null} end,
@@ -95,60 +63,38 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
                                     VnodePath2, 
                                     SplitF),
     
-    SW0 = os:timestamp(),
+    initial_load(InitialKeyCount, Cntrl1, Cntrl2),
 
-    BKVListXS = gen_keys([], InitialKeyCount),
-    {BKVList, _Discard} = lists:split(20, BKVListXS),
-        % The first 20 keys discarded to create an overlap between the add
-        % replace list
-    ok = put_keys(Cntrl1, 2, BKVList, none),
-    ok = put_keys(Cntrl2, 3, lists:reverse(BKVList), none),
-
-    {BKVListRem, _Ignore} = lists:split(10, BKVList),
-    ok = remove_keys(Cntrl1, 2, BKVListRem),
-    ok = remove_keys(Cntrl2, 3, BKVListRem),
-
-    % Change all of the keys - cheat by using undefined rather than replace 
-    % properly
-
-    BKVListR = gen_keys([], 100),
-        % As 100 > 20 expect 20 of these keys to be new, so no clock will be
-        % returned from fetch_clock, and 80 of these will be updates
-    ok = put_keys(Cntrl1, 2, BKVListR, undefined),
-    ok = put_keys(Cntrl2, 3, BKVListR, undefined),
-    
-    io:format("Initial put complete in ~w ms~n", 
-                [timer:now_diff(os:timestamp(), SW0)/1000]),
     SW1 = os:timestamp(),
 
     ok = aae_controller:aae_mergeroot(Cntrl1, 
                                         [{2, 0}, {2, 1}], 
                                         ReturnFun),
-    Root1A = start_receiver(),
+    Root1A = testutil:start_receiver(),
     ok = aae_controller:aae_mergeroot(Cntrl2, 
                                         [{3, 0}, {3, 1}, {3, 2}], 
                                         ReturnFun),
-    Root2A = start_receiver(),
+    Root2A = testutil:start_receiver(),
     true = Root1A == Root2A,
 
     ok = aae_controller:aae_fetchroot(Cntrl1, 
                                         [{2, 0}], 
                                         ReturnFun),
-    [{{2, 0}, Root1B}] = start_receiver(),
+    [{{2, 0}, Root1B}] = testutil:start_receiver(),
     ok = aae_controller:aae_fetchroot(Cntrl2, 
                                         [{3, 0}], 
                                         ReturnFun),
-    [{{3, 0}, Root2B}] = start_receiver(),
+    [{{3, 0}, Root2B}] = testutil:start_receiver(),
     true = Root1B == Root2B,
 
     ok = aae_controller:aae_mergeroot(Cntrl1, 
                                         [{2, 1}], 
                                         ReturnFun),
-    Root1C = start_receiver(),
+    Root1C = testutil:start_receiver(),
     ok = aae_controller:aae_mergeroot(Cntrl2, 
                                         [{3, 1}, {3, 2}], 
                                         ReturnFun),
-    Root2C = start_receiver(),
+    Root2C = testutil:start_receiver(),
     true = Root1C == Root2C,
     
     io:format("Direct partition compare complete in ~w ms~n", 
@@ -203,7 +149,7 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
                                 RepairFun,
                                 ReturnFun),
     io:format("Exchange id ~s~n", [GUID1]),
-    {ExchangeState1, 0} = start_receiver(),
+    {ExchangeState1, 0} = testutil:start_receiver(),
     true = ExchangeState1 == root_compare,
 
     {ok, _P2, GUID2} = 
@@ -212,7 +158,7 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
                                 RepairFun,
                                 ReturnFun),
     io:format("Exchange id ~s~n", [GUID2]),
-    {ExchangeState2, 0} = start_receiver(),
+    {ExchangeState2, 0} = testutil:start_receiver(),
     true = ExchangeState2 == root_compare,
 
     {ok, _P3, GUID3} = 
@@ -222,7 +168,7 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
                                 RepairFun,
                                 ReturnFun),
     io:format("Exchange id ~s~n", [GUID3]),
-    {ExchangeState3, 0} = start_receiver(),
+    {ExchangeState3, 0} = testutil:start_receiver(),
     true = ExchangeState3 == root_compare,
 
     {ok, _P4, GUID4} = 
@@ -233,25 +179,10 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
                                 RepairFun,
                                 ReturnFun),
     io:format("Exchange id ~s~n", [GUID4]),
-    {ExchangeState4, 0} = start_receiver(),
+    {ExchangeState4, 0} = testutil:start_receiver(),
     true = ExchangeState4 == root_compare,
 
-
-    % Create a discrepancy and discover it through exchange
-    BKVListN = gen_keys([], InitialKeyCount + 10, InitialKeyCount),
-    _SL = lists:foldl(fun({B, K, _V}, Acc) -> 
-                            BK = aae_util:make_binarykey(B, K),
-                            Seg = leveled_tictac:keyto_segment48(BK),
-                            Seg0 = aae_keystore:generate_treesegment(Seg),
-                            io:format("Generate new key B ~w K ~w " ++ 
-                                        "for Segment ~w ~w ~w partition ~w ~w~n",
-                                        [B, K, Seg0,  Seg0 bsr 8, Seg0 band 255, 
-                                        calc_preflist(K, 2), calc_preflist(K, 3)]),
-                            [Seg0|Acc]
-                        end,
-                        [],
-                        BKVListN),
-    ok = put_keys(Cntrl1, 2, BKVListN),
+    BKVListN = create_discrepancy(Cntrl1, InitialKeyCount),
 
     {ok, _P6, GUID6} = 
         aae_exchange:start([{exchange_sendfun(Cntrl1), [{2,0}]}, 
@@ -261,7 +192,7 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
                                 RepairFun,
                                 ReturnFun),
     io:format("Exchange id ~s~n", [GUID6]),
-    {ExchangeState6, 10} = start_receiver(),
+    {ExchangeState6, 10} = testutil:start_receiver(),
     true = ExchangeState6 == clock_compare,
 
     % Same again, but request a missing partition, and should get same result
@@ -274,13 +205,13 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
                                 RepairFun,
                                 ReturnFun),
     io:format("Exchange id ~s~n", [GUID6a]),
-    {ExchangeState6a, 10} = start_receiver(),
+    {ExchangeState6a, 10} = testutil:start_receiver(),
     true = ExchangeState6a == clock_compare,
 
     % Nothing repaired last time.  The deltas are all new keys though, so
     % We can repair by adding them in to the other vnode
 
-    RepairFun0 = repair_fun(BKVListN, Cntrl2, 3),
+    RepairFun0 = testutil:repair_fun(BKVListN, Cntrl2, 3),
     {ok, _P7, GUID7} = 
         aae_exchange:start([{exchange_sendfun(Cntrl1), [{2,0}]}, 
                                     {exchange_sendfun(Cntrl1), [{2,1}]}],
@@ -289,7 +220,7 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
                                 RepairFun0,
                                 ReturnFun),
     io:format("Exchange id ~s~n", [GUID7]),
-    {ExchangeState7, 10} = start_receiver(),
+    {ExchangeState7, 10} = testutil:start_receiver(),
     true = ExchangeState7 == clock_compare,
     
     {ok, _P8, GUID8} = 
@@ -300,7 +231,7 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
                                 RepairFun,
                                 ReturnFun),
     io:format("Exchange id ~s~n", [GUID8]),
-    {ExchangeState8, 0} = start_receiver(),
+    {ExchangeState8, 0} = testutil:start_receiver(),
     true = ExchangeState8 == root_compare,
 
     io:format("Comparison through exchange complete in ~w ms~n", 
@@ -309,922 +240,55 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
     % Shutdown and tidy up
     ok = aae_controller:aae_close(Cntrl1),
     ok = aae_controller:aae_close(Cntrl2),
-    RootPath = reset_filestructure().
+    RootPath = testutil:reset_filestructure().
 
 
-aae_fold_keyorder(_Config) ->
-    aae_fold_tester(leveled_ko, 50000).
+initial_load(InitialKeyCount, Cntrl1, Cntrl2) ->
 
-aae_fold_segmentorder(_Config) ->
-    aae_fold_tester(leveled_so, 50000).
+    SW0 = os:timestamp(),
 
+    BKVListXS = testutil:gen_keys([], InitialKeyCount),
+    {BKVList, _Discard} = lists:split(20, BKVListXS),
+        % The first 20 keys discarded to create an overlap between the add
+        % replace list
+    ok = testutil:put_keys(Cntrl1, 2, BKVList, none),
+    ok = testutil:put_keys(Cntrl2, 3, lists:reverse(BKVList), none),
 
-aae_fold_tester(ParallelStoreType, KeyCount) ->
-    RootPath = reset_filestructure(),
-    FoldPath1 = filename:join(RootPath, "folder1/"),
-    SplitF = 
-        fun(X) -> 
-            {leveled_rand:uniform(1000), 1, 0, element(1, X), element(2, X)}
-        end,
+    {BKVListRem, _Ignore} = lists:split(10, BKVList),
+    ok = testutil:remove_keys(Cntrl1, 2, BKVListRem),
+    ok = testutil:remove_keys(Cntrl2, 3, BKVListRem),
+
+    % Change all of the keys - cheat by using undefined rather than replace 
+    % properly
+
+    BKVListR = testutil:gen_keys([], 100),
+        % As 100 > 20 expect 20 of these keys to be new, so no clock will be
+        % returned from fetch_clock, and 80 of these will be updates
+    ok = testutil:put_keys(Cntrl1, 2, BKVListR, undefined),
+    ok = testutil:put_keys(Cntrl2, 3, BKVListR, undefined),
     
-    {ok, Cntrl1} = 
-        aae_controller:aae_start({parallel, ParallelStoreType}, 
-                                    true, 
-                                    {1, 300}, 
-                                    [{2, 0}, {2, 1}], 
-                                    FoldPath1, 
-                                    SplitF),
-
-    BKVListXS = gen_keys([], KeyCount),
+    io:format("Initial put complete in ~w ms~n", 
+                [timer:now_diff(os:timestamp(), SW0)/1000]).
     
-    {SWLowMegaS, SWLowS, _SWLowMicroS} = os:timestamp(),
-    timer:sleep(1000),
-    ok = put_keys(Cntrl1, 2, BKVListXS, none),
-    timer:sleep(1000),
-    {SWHighMegaS, SWHighS, _SWHighMicroS} = os:timestamp(),
-    BucketList = [integer_to_binary(1), integer_to_binary(3)],
-    FoldElements = [{clock, null}, {md, null}],
-    FoldFun =
-        fun(B, _K, ElementList, {B1Count, B3Count}) ->
-            {clock, FoldClock} = lists:keyfind(clock, 1, ElementList),
-            {md, FoldMD} = lists:keyfind(md, 1, ElementList),
-            case binary_to_term(FoldMD) of
-                [{clock, FoldClock}] ->
-                    case B of
-                        <<"1">> ->
-                            {B1Count + 1, B3Count};
-                        <<"3">> ->
-                            {B1Count, B3Count + 1}
-                    end
-            end
-        end,
-    InitAcc = {0, 0},
-    {async, Runner1} = 
-        aae_controller:aae_fold(Cntrl1, 
-                                {buckets, BucketList},
-                                all,
-                                all,
-                                false,
-                                FoldFun,
-                                InitAcc,
-                                FoldElements),
-    true = {KeyCount div 5, KeyCount div 5} == Runner1(),
 
-    {async, Runner2} = 
-        aae_controller:aae_fold(Cntrl1, 
-                                {buckets, BucketList},
-                                all,
-                                {SWLowMegaS * 1000000 + SWLowS,
-                                    SWHighMegaS * 1000000 + SWHighS},
-                                false,
-                                FoldFun,
-                                InitAcc,
-                                FoldElements),
-    true = {KeyCount div 5, KeyCount div 5} == Runner2(),
-
-    {async, Runner3} = 
-        aae_controller:aae_fold(Cntrl1, 
-                                {buckets, BucketList},
-                                all,
-                                {0, SWLowMegaS * 1000000 + SWLowS},
-                                false,
-                                FoldFun,
-                                InitAcc,
-                                FoldElements),
-    
-    {0, 0} = Runner3(),
-
-    {async, Runner4} = 
-        aae_controller:aae_fold(Cntrl1, 
-                                {buckets, BucketList},
-                                all,
-                                {SWHighMegaS * 1000000 + SWHighS, 
-                                    infinity},
-                                false,
-                                FoldFun,
-                                InitAcc,
-                                FoldElements),
-    {0, 0} = Runner4(),
-    
-    {async, Runner5} = 
-        aae_controller:aae_fold(Cntrl1, 
-                                {buckets, BucketList},
-                                all,
-                                all,
-                                2000,
-                                FoldFun,
-                                InitAcc,
-                                FoldElements),
-    case ParallelStoreType of
-        leveled_ko ->
-            {0, {2000, 0}} = Runner5();
-        leveled_so ->
-            true = 
-                {-1, {KeyCount div 5, KeyCount div 5}} == Runner5()
-    end,
-
-    {async, Runner6} = 
-        aae_controller:aae_fold(Cntrl1, 
-                                {buckets, BucketList},
-                                all,
-                                {SWLowMegaS * 1000000 + SWLowS,
-                                    SWHighMegaS * 1000000 + SWHighS},
-                                2000,
-                                FoldFun,
-                                InitAcc,
-                                FoldElements),
-    case ParallelStoreType of
-        leveled_ko ->
-            {0, {2000, 0}} = Runner6();
-        leveled_so ->
-            true = 
-                {-1, {KeyCount div 5, KeyCount div 5}} == Runner6()
-    end,
-
-    BKVSL = lists:sublist(BKVListXS, KeyCount - 1000, 128),
-    SegMapFun =
-        fun ({B, K, _VV}) ->
-            BinK = aae_util:make_binarykey(B, K),
-            Seg32 = leveled_tictac:keyto_segment32(BinK),
-            leveled_tictac:get_segment(Seg32, small)
-        end,
-    SegList = lists:map(SegMapFun, BKVSL),
-    BKVSL_ByBL =
-        lists:filter(fun({B, _K, _V}) -> lists:member(B, BucketList) end,
-                        BKVSL),
-    FoldClocksElements = [{clock, null}],
-    FoldClocksFun =
-        fun(B, K, ElementList, Acc) ->
-            {clock, FoldClock} = lists:keyfind(clock, 1, ElementList),
-            [{B, K, FoldClock}|Acc]
-        end,
-
-    {async, Runner7} = 
-        aae_controller:aae_fold(Cntrl1, 
-                                {buckets, BucketList},
-                                {segments, SegList, small},
-                                all,
-                                false,
-                                FoldClocksFun,
-                                [],
-                                FoldClocksElements),
-    
-    FetchedClocks = Runner7(),
-    io:format("Fetched ~w clocks with segment filter~n",
-                [length(FetchedClocks)]),
-    true = 
-        [] == lists:subtract(BKVSL_ByBL, FetchedClocks),
-        % Found all the Keys and clocks in the list
-    true =
-        (KeyCount div 64) > length(lists:subtract(FetchedClocks, BKVSL_ByBL)),
-        % Didn't find "too many" others due to collisions on segment
-
-    ok = aae_controller:aae_close(Cntrl1),
-    RootPath = reset_filestructure().
-
-
-mock_vnode_loadexchangeandrebuild_stbucket(_Config) ->
-    mock_vnode_loadexchangeandrebuild_tester(false).
-
-mock_vnode_loadexchangeandrebuild_tuplebucket(_Config) ->
-    mock_vnode_loadexchangeandrebuild_tester(true).
-
-mock_vnode_loadexchangeandrebuild_tester(TupleBuckets) ->
-    % Load up two vnodes with same data, with the data in each node split 
-    % across 3 partitions (n=1).
-    %
-    % The purpose if to perform exchanges to first highlight no differences, 
-    % and then once a difference is created, discover any difference 
-    InitialKeyCount = 50000,
-    RootPath = reset_filestructure(),
-    MockPathN = filename:join(RootPath, "mock_native/"),
-    MockPathP = filename:join(RootPath, "mock_parallel/"),
-
-    IndexNs = [{1, 3}, {2, 3}, {3, 3}],
-    PreflistFun = 
-        fun(_B, K) ->
-            Idx = erlang:phash2(K) rem length(IndexNs),
-            lists:nth(Idx + 1, IndexNs)
-        end,
-
-    % Start up to two mock vnodes
-    % - VNN is a native vnode (where the AAE process will not keep a parallel
-    % key store)
-    % - VNP is a parallel vnode (where a separate AAE key store is required 
-    % to be kept in parallel)
-    {ok, VNN} = mock_kv_vnode:open(MockPathN, native, IndexNs, PreflistFun),
-    {ok, VNP} = mock_kv_vnode:open(MockPathP, parallel, IndexNs, PreflistFun),
-
-    RPid = self(),
-    RepairFun = 
-        fun(KL) -> 
-            lists:foreach(fun({{B, K}, _VCCompare}) -> 
-                                io:format("Delta found in ~w ~s~n", 
-                                            [B, binary_to_list(K)])
-                            end,
-                            KL) 
-        end,  
-    ReturnFun = fun(R) -> RPid ! {result, R} end,
-
-    % Exchange between empty vnodes
-    {ok, _P0, GUID0} = 
-        aae_exchange:start([{exchange_vnodesendfun(VNN), IndexNs}],
-                                [{exchange_vnodesendfun(VNP), IndexNs}],
-                                RepairFun,
-                                ReturnFun),
-    io:format("Exchange id ~s~n", [GUID0]),
-    {ExchangeState0, 0} = start_receiver(),
-    true = ExchangeState0 == root_compare,
-
-    ObjList = gen_riakobjects(InitialKeyCount, [], TupleBuckets),
-    ReplaceList = gen_riakobjects(100, [], TupleBuckets), 
-        % some objects to replace the first 100 objects
-    DeleteList1 = lists:sublist(ObjList, 200, 100),
-    DeleteList2 = 
-        lists:sublist(ObjList, 400, 10) ++ 
-        lists:sublist(ObjList, 500, 10) ++ 
-        lists:sublist(ObjList, 600, 10),
-
-    RehashList = lists:sublist(ObjList, 700, 10),
-
-    PutFun = 
-        fun(Store1, Store2) ->
-            fun(Object) ->
-                PL = PreflistFun(null, Object#r_object.key),
-                mock_kv_vnode:put(Store1, Object, PL, [Store2])
-            end
-        end,
-    DeleteFun =
-        fun(Stores) ->
-            fun(Object) ->
-                PL = PreflistFun(null, Object#r_object.key),
-                lists:foreach(
-                    fun(Store) -> 
-                        mock_kv_vnode:backend_delete(Store, 
-                                                        Object#r_object.bucket,
-                                                        Object#r_object.key,
-                                                        PL)
-                    end,
-                    Stores)
-            end
-        end,
-    RehashFun =
-        fun(Stores) ->
-            fun(Object) ->
-                PL = PreflistFun(null, Object#r_object.key),
-                lists:foreach(
-                    fun(Store) -> 
-                        mock_kv_vnode:rehash(Store, 
-                                                Object#r_object.bucket,
-                                                Object#r_object.key,
-                                                PL)
-                    end,
-                    Stores)
-            end
-        end,
-    
-    % Load objects into both stores
-    PutFun1 = PutFun(VNN, VNP),
-    PutFun2 = PutFun(VNP, VNN),
-    {OL1, OL2A} = lists:split(InitialKeyCount div 2, ObjList),
-    {[RogueObj1, RogueObj2], OL2} = lists:split(2, OL2A),
-        % Keep some rogue objects to cause failures, by not putting them
-        % correctly into both vnodes.  These aren't loaded yet
-    ok = lists:foreach(PutFun1, OL1),
-    ok = lists:foreach(PutFun2, OL2),
-    ok = lists:foreach(PutFun1, ReplaceList),
-    ok = lists:foreach(DeleteFun([VNN, VNP]), DeleteList1),
-    
-    % Exchange between equivalent vnodes
-    {ok, _P1, GUID1} = 
-        aae_exchange:start([{exchange_vnodesendfun(VNN), IndexNs}],
-                                [{exchange_vnodesendfun(VNP), IndexNs}],
-                                RepairFun,
-                                ReturnFun),
-    io:format("Exchange id ~s~n", [GUID1]),
-    {ExchangeState1, 0} = start_receiver(),
-    true = ExchangeState1 == root_compare,
-
-    % Rehash some entries and confirm root_compare still matches, as 
-    % rehash doesn't do anything
-    ok = lists:foreach(RehashFun([VNN, VNP]), RehashList),
-    {ok, _P1a, GUID1a} = 
-        aae_exchange:start([{exchange_vnodesendfun(VNN), IndexNs}],
-                                [{exchange_vnodesendfun(VNP), IndexNs}],
-                                RepairFun,
-                                ReturnFun),
-    io:format("Exchange id ~s~n", [GUID1a]),
-    {ExchangeState1a, 0} = start_receiver(),
-    true = ExchangeState1a == root_compare,
-
-    % Compare the two stores using an AAE fold - and prove that AAE fold is
-    % working as expected
-    Bucket = 
-        case TupleBuckets of
-            true ->
-                {?BUCKET_TYPE, integer_to_binary(3)};
-            false ->
-                 integer_to_binary(3)
-        end,
-    StartKey = list_to_binary(string:right(integer_to_list(10), 6, $0)),
-    EndKey = list_to_binary(string:right(integer_to_list(50), 6, $0)),
-    Elements = [{sibcount, null}, {clock, null}, {hash, null}],
-    InitAcc = {[], 0},
-    FoldKRFun = 
-        fun(FB, FK, FEs, {KCHAcc, SCAcc}) ->
-            true = FB == Bucket,
-            true = FK >= StartKey,
-            true = FK < EndKey,
-            {clock, FC} = lists:keyfind(clock, 1, FEs),
-            {hash, FH} = lists:keyfind(hash, 1, FEs),
-            {sibcount, FSC} = lists:keyfind(sibcount, 1, FEs),
-            {lists:usort([{FK, FC, FH}|KCHAcc]), SCAcc + FSC}
-        end,
-    
-    {async, VNNF} = 
-        mock_kv_vnode:fold_aae(VNN, 
-                                {key_range, Bucket, StartKey, EndKey},
-                                all,
-                                FoldKRFun, 
-                                InitAcc,
-                                Elements),
-    {async, VNPF} = 
-        mock_kv_vnode:fold_aae(VNP, 
-                                {key_range, Bucket, StartKey, EndKey},
-                                all,
-                                FoldKRFun, 
-                                InitAcc,
-                                Elements),
-    
-    {VNNF_KL, VNNF_SC} = VNNF(),
-    {VNPF_KL, VNPF_SC} = VNPF(),
-    true = VNNF_SC == 8,
-    true = VNPF_SC == 8,
-    true = lists:usort(VNNF_KL) == lists:usort(VNPF_KL),
-    true = length(VNNF_KL) == 8,
-    true = length(VNPF_KL) == 8,
-    
-    [{K1, C1, H1}|Rest] = VNNF_KL,
-    [{K2, C2, H2}|_Rest] = Rest,
-    BinaryKey1 = aae_util:make_binarykey(Bucket, K1),
-    BinaryKey2 = aae_util:make_binarykey(Bucket, K2),
-    SegmentID1 = 
-        leveled_tictac:get_segment(
-            element(1, leveled_tictac:tictac_hash(BinaryKey1, <<>>)), 
-            small),
-    SegmentID2 = 
-        leveled_tictac:get_segment(
-            element(1, leveled_tictac:tictac_hash(BinaryKey2, <<>>)), 
-            small),
-    io:format("Looking for Segment IDs K1 ~w ~w K2 ~w ~w~n",
-                [K1, SegmentID1, K2, SegmentID2]),
-
-    {async, VNNF_SL} = 
-        mock_kv_vnode:fold_aae(VNN, 
-                                {key_range, Bucket, StartKey, EndKey},
-                                {segments, [SegmentID1, SegmentID2], small},
-                                FoldKRFun, 
-                                InitAcc,
-                                Elements),
-    {async, VNPF_SL} = 
-        mock_kv_vnode:fold_aae(VNP, 
-                                {key_range, Bucket, StartKey, EndKey},
-                                {segments, [SegmentID1, SegmentID2], small},
-                                FoldKRFun, 
-                                InitAcc,
-                                Elements),
-    {[{K1, C1, H1}, {K2, C2, H2}], 2} = VNNF_SL(),
-    {[{K1, C1, H1}, {K2, C2, H2}], 2} = VNPF_SL(),
-
-    % Make change to one vnode only (the parallel one)
-    Idx1 = erlang:phash2(RogueObj1#r_object.key) rem length(IndexNs),
-    mock_kv_vnode:put(VNP, RogueObj1, lists:nth(Idx1 + 1, IndexNs), []),
-
-    % Exchange between nodes to expose difference
-    {ok, _P2, GUID2} = 
-        aae_exchange:start([{exchange_vnodesendfun(VNN), IndexNs}],
-                                [{exchange_vnodesendfun(VNP), IndexNs}],
-                                RepairFun,
-                                ReturnFun),
-    io:format("Exchange id ~s~n", [GUID2]),
-    {ExchangeState2, 1} = start_receiver(),
-    true = ExchangeState2 == clock_compare,
-
-    % Make change to one vnode only (the native one)
-    Idx2 = erlang:phash2(RogueObj2#r_object.key) rem length(IndexNs),
-    mock_kv_vnode:put(VNN, RogueObj2, lists:nth(Idx2 + 1, IndexNs), []),
-
-    % Exchange between nodes to expose differences (one in VNN, one in VNP)
-    {ok, _P3, GUID3} = 
-        aae_exchange:start([{exchange_vnodesendfun(VNN), IndexNs}],
-                                [{exchange_vnodesendfun(VNP), IndexNs}],
-                                RepairFun,
-                                ReturnFun),
-    io:format("Exchange id ~s~n", [GUID3]),
-    {ExchangeState3, 2} = start_receiver(),
-    true = ExchangeState3 == clock_compare,
-
-    {RebuildN, false} = mock_kv_vnode:rebuild(VNN, false),
-    {RebuildP, false} = mock_kv_vnode:rebuild(VNP, false),
-    % Discover Next rebuild times - should be in the future as both stores
-    % were started empty, and hence without the need to rebuild
-    io:format("Next rebuild vnn ~w vnp ~w~n", [RebuildN, RebuildP]),
-    true = RebuildN > os:timestamp(),
-    true = RebuildP > os:timestamp(),
-
-    ok = mock_kv_vnode:close(VNN),
-    ok = mock_kv_vnode:close(VNP),
-
-    % Restart the vnodes, confirm next rebuilds are still in the future 
-    % between startup and shutdown the next_rebuild will be rescheduled to
-    % a different time, as the look at the last rebuild time and schedule 
-    % forward from there.
-    {ok, VNNa} = mock_kv_vnode:open(MockPathN, native, IndexNs, PreflistFun),
-    {ok, VNPa} = mock_kv_vnode:open(MockPathP, parallel, IndexNs, PreflistFun),
-    {RebuildNa, false} = mock_kv_vnode:rebuild(VNNa, false),
-    {RebuildPa, false} = mock_kv_vnode:rebuild(VNPa, false),
-    io:format("Next rebuild vnn ~w vnp ~w~n", [RebuildNa, RebuildPa]),
-    true = RebuildNa > os:timestamp(),
-    true = RebuildPa > os:timestamp(),
-
-    % Exchange between nodes to expose differences (one in VNN, one in VNP)
-    % Should still discover the same difference as when they were closed.
-    {ok, _P3a, GUID3a} = 
-        aae_exchange:start([{exchange_vnodesendfun(VNNa), IndexNs}],
-                                [{exchange_vnodesendfun(VNPa), IndexNs}],
-                                RepairFun,
-                                ReturnFun),
-    io:format("Exchange id ~s~n", [GUID3a]),
-    {ExchangeState3a, 2} = start_receiver(),
-    true = ExchangeState3a == clock_compare,
-
-    % Prompts for a rebuild of both stores.  The rebuild is a rebuild of both
-    % the store and the tree in the case of the parallel vnode, and just the
-    % tree in the case of the native rebuild
-    {RebuildNb, true} = mock_kv_vnode:rebuild(VNNa, true),
-    
-    true = RebuildNb > os:timestamp(), 
-        % next rebuild was in the future, and is still scheduled as such
-        % key thing that the ongoing rebuild status is now true (the second 
-        % element of the rebuild response)
-
-    % Now poll to check to see when the rebuild is complete
-    wait_for_rebuild(VNNa),
-
-    % Next rebuild times should now still be in the future
-    {RebuildNc, false} = mock_kv_vnode:rebuild(VNNa, false),
-    {RebuildPc, false} = mock_kv_vnode:rebuild(VNPa, false),
-    true = RebuildPc == RebuildPa, % Should not have changed
-
-    % Following a completed rebuild - the exchange should still work as 
-    % before, spotting two differences
-    {ok, _P3b, GUID3b} = 
-        aae_exchange:start([{exchange_vnodesendfun(VNNa), IndexNs}],
-                                [{exchange_vnodesendfun(VNPa), IndexNs}],
-                                RepairFun,
-                                ReturnFun),
-    io:format("Exchange id ~s~n", [GUID3b]),
-    {ExchangeState3b, 2} = start_receiver(),
-    true = ExchangeState3b == clock_compare,
-
-    {RebuildPb, true} = mock_kv_vnode:rebuild(VNPa, true),
-    true = RebuildPb > os:timestamp(),
-
-    % There should now be a rebuild in progress - but immediately check that 
-    % an exchange will still work (spotting the same two differences as before
-    % following a clock_compare)
-    {ok, _P3c, GUID3c} = 
-        aae_exchange:start([{exchange_vnodesendfun(VNNa), IndexNs}],
-                                [{exchange_vnodesendfun(VNPa), IndexNs}],
-                                RepairFun,
-                                ReturnFun),
-    io:format("Exchange id ~s~n", [GUID3c]),
-    {ExchangeState3c, 2} = start_receiver(),
-    true = ExchangeState3c == clock_compare,
-
-    wait_for_rebuild(VNPa),
-    {RebuildNd, false} = mock_kv_vnode:rebuild(VNNa, false),
-    {RebuildPd, false} = mock_kv_vnode:rebuild(VNPa, false),
-    true = RebuildNd == RebuildNc,
-    true = RebuildPd > os:timestamp(),
-    
-    % Rebuild now complete - should get the same result for an exchange
-    {ok, _P3d, GUID3d} = 
-        aae_exchange:start([{exchange_vnodesendfun(VNNa), IndexNs}],
-                                [{exchange_vnodesendfun(VNPa), IndexNs}],
-                                RepairFun,
-                                ReturnFun),
-    io:format("Exchange id ~s~n", [GUID3d]),
-    {ExchangeState3d, 2} = start_receiver(),
-    true = ExchangeState3d == clock_compare,
-
-    % Delete some keys - and see the size of the delta increase
-    ok = lists:foreach(DeleteFun([VNPa]), DeleteList2),
-    {ok, _P4a, GUID4a} = 
-        aae_exchange:start([{exchange_vnodesendfun(VNNa), IndexNs}],
-                                [{exchange_vnodesendfun(VNPa), IndexNs}],
-                                RepairFun,
-                                ReturnFun),
-    io:format("Exchange id ~s~n", [GUID4a]),
-    {ExchangeState4a, 32} = start_receiver(),
-    true = ExchangeState4a == clock_compare,
-    % Balance the deletions
-    ok = lists:foreach(DeleteFun([VNNa]), DeleteList2),
-    {ok, _P4b, GUID4b} = 
-        aae_exchange:start([{exchange_vnodesendfun(VNNa), IndexNs}],
-                                [{exchange_vnodesendfun(VNPa), IndexNs}],
-                                RepairFun,
-                                ReturnFun),
-    io:format("Exchange id ~s~n", [GUID4b]),
-    {ExchangeState4b, 2} = start_receiver(),
-    true = ExchangeState4b == clock_compare,
-
-    % Shutdown and clear down files
-    ok = mock_kv_vnode:close(VNNa),
-    ok = mock_kv_vnode:close(VNPa),
-    RootPath = reset_filestructure().
-
-
-wait_for_rebuild(Vnode) ->
-    RebuildComplete = 
-        lists:foldl(fun(Wait, Complete) ->
-                            case Complete of 
-                                true ->
-                                    true;
-                                false ->
-                                    timer:sleep(Wait),
-                                    {_TSN, RSN} = 
-                                        mock_kv_vnode:rebuild(Vnode, false),
-                                    % Waiting for rebuild status to be false 
-                                    % on both vnodes, which would indicate
-                                    % that both rebuilds have completed
-                                    (not RSN)
-                            end
+create_discrepancy(Cntrl, InitialKeyCount) ->
+    % Create a discrepancy and discover it through exchange
+    BKVListN = testutil:gen_keys([], InitialKeyCount + 10, InitialKeyCount),
+    _SL = lists:foldl(fun({B, K, _V}, Acc) -> 
+                            BK = aae_util:make_binarykey(B, K),
+                            Seg = leveled_tictac:keyto_segment48(BK),
+                            Seg0 = aae_keystore:generate_treesegment(Seg),
+                            io:format("Generate new key B ~w K ~w " ++ 
+                                    "for Segment ~w ~w ~w partition ~w ~w~n",
+                                    [B, K, Seg0,  Seg0 bsr 8, Seg0 band 255, 
+                                        testutil:calc_preflist(K, 2), 
+                                        testutil:calc_preflist(K, 3)]),
+                            [Seg0|Acc]
                         end,
-                        false,
-                        [1000, 2000, 3000, 5000, 8000, 13000, 21000]),
-    
-    % Both rebuilds have completed
-    true = RebuildComplete == true.
+                        [],
+                        BKVListN),
+    ok = testutil:put_keys(Cntrl, 2, BKVListN),
+    BKVListN.
 
 
-mock_vnode_coveragefold_nativemedium(_Config) ->
-    mock_vnode_coveragefolder(native, 50000, true).
-
-mock_vnode_coveragefold_nativesmall(_Config) ->
-    mock_vnode_coveragefolder(native, 5000, false).
-
-mock_vnode_coveragefold_parallelsmall(_Config) ->
-    mock_vnode_coveragefolder(parallel, 5000, true).
-
-mock_vnode_coveragefold_parallelmedium(_Config) ->
-    mock_vnode_coveragefolder(parallel, 50000, false).
-
-
-
-mock_vnode_coveragefolder(Type, InitialKeyCount, TupleBuckets) ->
-    % This should load a set of 4 vnodes, with the data partitioned across the
-    % vnodes n=2 to provide for 2 different coverage plans.
-    %
-    % After the load, an exchange can confirm consistency between the coverage 
-    % plans.  Then run some folds to make sure that the folds produce the 
-    % expected results 
-    RootPath = reset_filestructure(),
-    MockPathN1 = filename:join(RootPath, "mock_native1/"),
-    MockPathN2 = filename:join(RootPath, "mock_native2/"),
-    MockPathN3 = filename:join(RootPath, "mock_native3/"),
-    MockPathN4 = filename:join(RootPath, "mock_native4/"),
-    
-    IndexNs = 
-        [{1, 2}, {2, 2}, {3, 2}, {0, 2}],
-    PreflistFun = 
-        fun(_B, K) ->
-            Idx = erlang:phash2(K) rem length(IndexNs),
-            lists:nth(Idx + 1, IndexNs)
-        end,
-
-    % Open four vnodes to take two of the rpeflists each
-    % - this isintended to replicate a ring-size=4, n-val=2 ring 
-    {ok, VNN1} = 
-        mock_kv_vnode:open(MockPathN1, Type, [{1, 2}, {0, 2}], PreflistFun),
-    {ok, VNN2} = 
-        mock_kv_vnode:open(MockPathN2, Type, [{2, 2}, {1, 2}], PreflistFun),
-    {ok, VNN3} = 
-        mock_kv_vnode:open(MockPathN3, Type, [{3, 2}, {2, 2}], PreflistFun),
-    {ok, VNN4} = 
-        mock_kv_vnode:open(MockPathN4, Type, [{0, 2}, {3, 2}], PreflistFun),
-
-    % Mapping of preflists to [Primary, Secondary] vnodes
-    RingN =
-        [{{1, 2}, [VNN1, VNN2]}, {{2, 2}, [VNN2, VNN3]}, 
-            {{3, 2}, [VNN3, VNN4]}, {{0, 2}, [VNN4, VNN1]}],
-
-    % Add each key to the vnode at the head of the preflist, and then push the
-    % change to the one at the tail.  
-    PutFun = 
-        fun(Ring) ->
-            fun(Object) ->
-                PL = PreflistFun(null, Object#r_object.key),
-                {PL, [Primary, Secondary]} = lists:keyfind(PL, 1, Ring),
-                mock_kv_vnode:put(Primary, Object, PL, [Secondary])
-            end
-        end,
-
-    ObjList = gen_riakobjects(InitialKeyCount, [], TupleBuckets),
-    ok = lists:foreach(PutFun(RingN), ObjList),
-
-    % Provide two coverage plans, equivalent to normal ring coverage plans
-    % with offset=0 and offset=1
-    AllPrimariesMap =
-        fun({IndexN, [Pri, _FB]}) ->
-            {exchange_vnodesendfun(Pri), [IndexN]}
-        end,
-    AllSecondariesMap =
-        fun({IndexN, [_Pri, FB]}) ->
-            {exchange_vnodesendfun(FB), [IndexN]}
-        end,
-    AllPrimaries = lists:map(AllPrimariesMap, RingN),
-    AllSecondaries = lists:map(AllSecondariesMap, RingN),
-
-    RPid = self(),
-    RepairFun = fun(_KL) -> null end,  
-    ReturnFun = fun(R) -> RPid ! {result, R} end,
-
-    {ok, _P1, GUID1} = 
-        aae_exchange:start(AllPrimaries, AllSecondaries, RepairFun, ReturnFun),
-    io:format("Exchange id ~s~n", [GUID1]),
-    {ExchangeState1, 0} = start_receiver(),
-    true = ExchangeState1 == root_compare,
-
-
-    % Fold over a valid coverage plan to find siblings (there are none) 
-    SibCountFoldFun =
-        fun(B, K, V, {NoSibAcc, SibAcc}) ->
-            {sibcount, SC} = lists:keyfind(sibcount, 1, V),
-            case SC of 
-                1 -> {NoSibAcc + 1, SibAcc};
-                _ -> {NoSibAcc, [{B, K}|SibAcc]}
-            end
-        end,
-    
-    SWF1 = os:timestamp(),
-    {async, Folder1} = 
-        mock_kv_vnode:fold_aae(VNN1, all, all, SibCountFoldFun, 
-                                {0, []}, [{sibcount, null}]),
-    {async, Folder3} = 
-        mock_kv_vnode:fold_aae(VNN3, all, all, SibCountFoldFun, 
-                                Folder1(), [{sibcount, null}]),
-    {SC1, SibL1} = Folder3(),
-    io:format("Coverage fold took ~w with output ~w for store ~w~n", 
-                [timer:now_diff(os:timestamp(), SWF1),SC1, Type]),
-    true = SC1 == InitialKeyCount,
-    true = [] == SibL1,
-
-    SWF2 = os:timestamp(),
-    BucketListA = 
-        case TupleBuckets of
-            true ->
-                [{?BUCKET_TYPE, integer_to_binary(0)},
-                    {?BUCKET_TYPE, integer_to_binary(1)}];
-            false ->
-                [integer_to_binary(0), integer_to_binary(1)]
-        end,
-    {async, Folder2} = 
-        mock_kv_vnode:fold_aae(VNN2, 
-                                {buckets, BucketListA}, all, 
-                                SibCountFoldFun, {0, []},
-                                [{sibcount, null}]),
-    {async, Folder4} = 
-        mock_kv_vnode:fold_aae(VNN4, 
-                                {buckets, BucketListA}, all,
-                                SibCountFoldFun, Folder2(),
-                                [{sibcount, null}]),
-    {SC2, SibL2} = Folder4(),
-    io:format("Coverage fold took ~w with output ~w for store ~w~n", 
-                [timer:now_diff(os:timestamp(), SWF2),SC2, Type]),
-    true = SC2 == 2 * (InitialKeyCount div 5),
-    true = [] == SibL2,
-
-    % A fold over two coverage plans to compare the list of {B, K, H, Sz} 
-    % tuples found within the coverage plans
-    HashSizeFoldFun =
-        fun(B, K, V, Acc) ->
-            {hash, H} = lists:keyfind(hash, 1, V),
-            {size, Sz} = lists:keyfind(size, 1, V),
-            [{B, K, H, Sz}|Acc]
-        end,
-
-    {async, Folder1HS} = 
-        mock_kv_vnode:fold_aae(VNN1, all, all, HashSizeFoldFun, 
-                                [], [{hash, null}, {size, null}]),
-    {async, Folder3HS} = 
-        mock_kv_vnode:fold_aae(VNN3, all, all, HashSizeFoldFun, 
-                                Folder1HS(), [{hash, null}, {size, null}]),
-    BKHSzL1 = Folder3HS(),
-    true = length(BKHSzL1) == InitialKeyCount,
-
-    {async, Folder2HS} = 
-        mock_kv_vnode:fold_aae(VNN2, all, all, HashSizeFoldFun, 
-                                [], [{hash, null}, {size, null}]),
-    {async, Folder4HS} = 
-        mock_kv_vnode:fold_aae(VNN4, all, all, HashSizeFoldFun, 
-                                Folder2HS(), [{hash, null}, {size, null}]),
-    BKHSzL2 = Folder4HS(),
-    true = length(BKHSzL2) == InitialKeyCount,
-
-    true = lists:usort(BKHSzL2) == lists:usort(BKHSzL1),
-
-    ok = mock_kv_vnode:close(VNN1),
-    ok = mock_kv_vnode:close(VNN2),
-    ok = mock_kv_vnode:close(VNN3),
-    ok = mock_kv_vnode:close(VNN4),
-    RootPath = reset_filestructure().
-
-
-
-
-reset_filestructure() ->
-    reset_filestructure(0, ?ROOT_PATH).
-    
-reset_filestructure(Wait, RootPath) ->
-    io:format("Waiting ~w ms to give a chance for all file closes " ++
-                 "to complete~n", [Wait]),
-    timer:sleep(Wait),
-    clear_all(RootPath),
-    RootPath.
-
-clear_all(RootPath) ->
-    ok = filelib:ensure_dir(RootPath),
-    {ok, FNs} = file:list_dir(RootPath),
-    FoldFun =
-        fun(FN) ->
-            FFP = filename:join(RootPath, FN),
-            case filelib:is_dir(FFP) of 
-                true ->
-                    clear_all(FFP ++ "/");
-                false ->
-                    case filelib:is_file(FFP) of 
-                        true ->
-                            file:delete(FFP);
-                        false ->
-                            ok 
-                    end
-            end
-        end,
-    lists:foreach(FoldFun, FNs).
-
-
-gen_keys(KeyList, Count) ->
-    gen_keys(KeyList, Count, 0).
-
-gen_keys(KeyList, Count, Floor) when Count == Floor ->
-    KeyList;
-gen_keys(KeyList, Count, Floor) ->
-    Bucket = integer_to_binary(Count rem 5),  
-    Key = list_to_binary(string:right(integer_to_list(Count), 6, $0)),
-    VersionVector = add_randomincrement([]),
-    gen_keys([{Bucket, Key, VersionVector}|KeyList], 
-                Count - 1,
-                Floor).
-
-put_keys(Cntrl, NVal, KL) ->
-    put_keys(Cntrl, NVal, KL, none).
-
-put_keys(_Cntrl, _Nval, [], _PrevVV) ->
-    ok;
-put_keys(Cntrl, Nval, [{Bucket, Key, VersionVector}|Tail], PrevVV) ->
-    ok = aae_controller:aae_put(Cntrl, 
-                                calc_preflist(Key, Nval), 
-                                Bucket, 
-                                Key, 
-                                VersionVector, 
-                                PrevVV, 
-                                {[os:timestamp()],
-                                    term_to_binary([{clock, VersionVector}])}),
-    put_keys(Cntrl, Nval, Tail, PrevVV).
-
-remove_keys(_Cntrl, _Nval, []) ->
-    ok;
-remove_keys(Cntrl, Nval, [{Bucket, Key, _VV}|Tail]) ->
-    ok = aae_controller:aae_put(Cntrl, 
-                                calc_preflist(Key, Nval), 
-                                Bucket, 
-                                Key, 
-                                none, 
-                                undefined, 
-                                <<>>),
-    remove_keys(Cntrl, Nval, Tail).
-
-
-gen_riakobjects(0, ObjectList, _TupleBuckets) ->
-    ObjectList;
-gen_riakobjects(Count, ObjectList, TupleBuckets) ->
-    Bucket = 
-        case TupleBuckets of
-            true ->
-                {?BUCKET_TYPE, integer_to_binary(Count rem 5)};
-            false ->
-                integer_to_binary(Count rem 5)
-        end,
-    Key = list_to_binary(string:right(integer_to_list(Count), 6, $0)),
-    Value = leveled_rand:rand_bytes(512),
-    Obj = #r_object{bucket = Bucket,
-                    key = Key,
-                    contents = [#r_content{value = Value}]},
-    gen_riakobjects(Count - 1, [Obj|ObjectList], TupleBuckets).
-
-
-
-add_randomincrement(Clock) ->
-    RandIncr = leveled_rand:uniform(100),
-    RandNode = lists:nth(leveled_rand:uniform(9), 
-                            ["a", "b", "c", "d", "e", "f", "g", "h", "i"]),
-    UpdClock = 
-        case lists:keytake(RandNode, 1, Clock) of 
-            false ->
-                [{RandNode, RandIncr}|Clock];
-            {value, {RandNode, Incr0}, Rest} ->
-                [{RandNode, Incr0 + RandIncr}|Rest]
-        end,
-    lists:usort(UpdClock).
-
-calc_preflist(Key, 2) ->
-    case erlang:phash2(Key) band 3 of 
-        0 ->
-            {2, 0};
-        _ ->
-            {2, 1}
-    end;
-calc_preflist(Key, 3) ->
-    case erlang:phash2(Key) band 3 of 
-        0 ->
-            {3, 0};
-        1 ->
-            {3, 1};
-        _ ->
-            {3, 2}
-    end.
-
-start_receiver() ->
-    receive
-        {result, Reply} ->
-            Reply 
-    end.
-
-
-exchange_sendfun(Cntrl) ->
-    SendFun = 
-        fun(Msg, Preflists, Colour) ->
-            RPid = self(),
-            ReturnFun = 
-                fun(R) -> 
-                    io:format("Preparing reply to ~w for msg ~w colour ~w~n", 
-                                [RPid, Msg, Colour]),
-                    aae_exchange:reply(RPid, R, Colour)
-                end,
-            case Msg of 
-                fetch_root ->
-                    aae_controller:aae_mergeroot(Cntrl, 
-                                                    Preflists, 
-                                                    ReturnFun);
-                {fetch_branches, BranchIDs} ->
-                    aae_controller:aae_mergebranches(Cntrl, 
-                                                        Preflists, 
-                                                        BranchIDs, 
-                                                        ReturnFun);
-                {fetch_clocks, SegmentIDs} ->
-                    aae_controller:aae_fetchclocks(Cntrl,
-                                                        Preflists,
-                                                        SegmentIDs,
-                                                        ReturnFun,
-                                                        null)
-            end
-        end,
-    SendFun.
-
-exchange_vnodesendfun(VN) ->
-    fun(Msg, Preflists, Colour) ->
-        RPid = self(),
-        ReturnFun = 
-            fun(R) -> 
-                io:format("Preparing reply to ~w for msg ~w colour ~w~n", 
-                            [RPid, Msg, Colour]),
-                aae_exchange:reply(RPid, R, Colour)
-            end,
-        mock_kv_vnode:exchange_message(VN, Msg, Preflists, ReturnFun)
-    end.
-
-
-repair_fun(SourceList, Cntrl, NVal) ->
-    Lookup = lists:map(fun({B, K, V}) -> {{B, K}, V} end, SourceList),
-    RepairFun = 
-        fun(BucketKeyL) ->
-            FoldFun =
-                fun({{B0, K0}, _VCDelta}, Acc) -> 
-                    {{B0, K0}, V0} = lists:keyfind({B0, K0}, 1, Lookup),
-                    [{B0, K0, V0}|Acc]
-                end,
-            KVL = lists:foldl(FoldFun, [], BucketKeyL),
-            ok = put_keys(Cntrl, NVal, KVL)
-        end,
-    RepairFun.
+exchange_sendfun(Cntrl) -> testutil:exchange_sendfun(Cntrl).
