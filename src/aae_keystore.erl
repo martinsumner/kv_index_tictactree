@@ -993,7 +993,7 @@ range_check(all, _B, _K) ->
 range_check({buckets, BucketList}, Bucket, _K) ->
     lists:member(Bucket, BucketList);
 range_check({key_range, Bucket, StartKey, EndKey}, Bucket, Key) ->
-    case {Key >= StartKey, Key < EndKey} of
+    case {Key >= StartKey, Key =< EndKey} of
         {true, true} ->
             true;
         _ ->

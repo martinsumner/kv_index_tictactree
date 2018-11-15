@@ -1,33 +1,45 @@
 -module(mockvnode_SUITE).
 -include_lib("common_test/include/ct.hrl").
 -export([all/0]).
--export([mock_vnode_coveragefold_nativemedium/1,
-            mock_vnode_coveragefold_nativesmall/1,
-            mock_vnode_coveragefold_parallelmedium/1,
-            mock_vnode_coveragefold_parallelsmall/1,
-            mock_vnode_loadexchangeandrebuild_stbucket/1,
-            mock_vnode_loadexchangeandrebuild_tuplebucket/1]).
+-export([coveragefold_nativemedium/1,
+            coveragefold_nativesmall/1,
+            coveragefold_parallelmedium/1,
+            coveragefold_parallelmediumko/1,
+            coveragefold_parallelsmall/1,
+            loadexchangeandrebuild_stbucketko/1,
+            loadexchangeandrebuild_tuplebucketko/1,
+            loadexchangeandrebuild_stbucketso/1,
+            loadexchangeandrebuild_tuplebucketso/1]).
 
 all() -> [
-            mock_vnode_coveragefold_nativemedium,
-            mock_vnode_coveragefold_nativesmall,
-            mock_vnode_coveragefold_parallelmedium,
-            mock_vnode_coveragefold_parallelsmall,
-            mock_vnode_loadexchangeandrebuild_stbucket,
-            mock_vnode_loadexchangeandrebuild_tuplebucket
+            coveragefold_nativemedium,
+            coveragefold_nativesmall,
+            coveragefold_parallelmedium,
+            coveragefold_parallelmediumko,
+            coveragefold_parallelsmall,
+            loadexchangeandrebuild_stbucketso,
+            loadexchangeandrebuild_tuplebucketso,
+            loadexchangeandrebuild_stbucketko,
+            loadexchangeandrebuild_tuplebucketko
         ].
 
 
 -include("testutil.hrl").
 
 
-mock_vnode_loadexchangeandrebuild_stbucket(_Config) ->
-    mock_vnode_loadexchangeandrebuild_tester(false).
+loadexchangeandrebuild_stbucketko(_Config) ->
+    mock_vnode_loadexchangeandrebuild_tester(false, parallel_ko).
 
-mock_vnode_loadexchangeandrebuild_tuplebucket(_Config) ->
-    mock_vnode_loadexchangeandrebuild_tester(true).
+loadexchangeandrebuild_stbucketso(_Config) ->
+    mock_vnode_loadexchangeandrebuild_tester(false, parallel_so).
 
-mock_vnode_loadexchangeandrebuild_tester(TupleBuckets) ->
+loadexchangeandrebuild_tuplebucketko(_Config) ->
+    mock_vnode_loadexchangeandrebuild_tester(true, parallel_ko).
+
+loadexchangeandrebuild_tuplebucketso(_Config) ->
+    mock_vnode_loadexchangeandrebuild_tester(true, parallel_so).
+
+mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     % Load up two vnodes with same data, with the data in each node split 
     % across 3 partitions (n=1).
     %
@@ -52,7 +64,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets) ->
     % - VNP is a parallel vnode (where a separate AAE key store is required 
     % to be kept in parallel)
     {ok, VNN} = mock_kv_vnode:open(MockPathN, native, IndexNs, PreflistFun),
-    {ok, VNP} = mock_kv_vnode:open(MockPathP, parallel, IndexNs, PreflistFun),
+    {ok, VNP} = mock_kv_vnode:open(MockPathP, PType, IndexNs, PreflistFun),
 
     RPid = self(),
     LogNotRepairFun = 
@@ -322,7 +334,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets) ->
     % a different time, as the look at the last rebuild time and schedule 
     % forward from there.
     {ok, VNNa} = mock_kv_vnode:open(MockPathN, native, IndexNs, PreflistFun),
-    {ok, VNPa} = mock_kv_vnode:open(MockPathP, parallel, IndexNs, PreflistFun),
+    {ok, VNPa} = mock_kv_vnode:open(MockPathP, PType, IndexNs, PreflistFun),
     {RebuildNa, false} = mock_kv_vnode:rebuild(VNNa, false),
     {RebuildPa, false} = mock_kv_vnode:rebuild(VNPa, false),
     io:format("Next rebuild vnn ~w vnp ~w~n", [RebuildNa, RebuildPa]),
@@ -509,8 +521,8 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets) ->
     RepairFunTC4 = GenuineRepairFun(VNPa, VNNa, RepairListTC4),
 
     RepairBucketFun = 
-        fun(CheckBucket, TargettedRepairFun, Hash) ->
-            CBFilters = {filter, CheckBucket, all, small, all, all, Hash},
+        fun(CheckBucket, TargettedRepairFun, KR, MR, Hash) ->
+            CBFilters = {filter, CheckBucket, KR, small, all, MR, Hash},
             {ok, _TCCB_P, TCCB_GUID} = 
                 aae_exchange:start(partial,
                                     [{exchange_vnodesendfun(VNNa), IndexNs}],
@@ -524,7 +536,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets) ->
     
     FoldRepair3Fun = 
         fun(_I, Acc) ->
-            case RepairBucketFun(Bucket3, RepairFunTC3, prehash) of
+            case RepairBucketFun(Bucket3, RepairFunTC3, all, all, prehash) of
                 {clock_compare, Count3} ->
                     Acc + Count3;
                 {tree_compare, 0} ->
@@ -538,7 +550,8 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets) ->
 
     FoldRepair4Fun = 
         fun(_I, Acc) ->
-            case RepairBucketFun(Bucket4, RepairFunTC4, {rehash, 5000}) of
+            case RepairBucketFun(Bucket4, RepairFunTC4,
+                                    all, all, {rehash, 5000}) of
                 {clock_compare, Count4} ->
                     Acc + Count4;
                 {tree_compare, 0} ->
@@ -559,7 +572,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets) ->
                 aae_exchange:start(partial,
                                     [{exchange_vnodesendfun(VNNa), IndexNs}],
                                     [{exchange_vnodesendfun(VNPa), IndexNs}],
-                                    LogNotRepairFun,
+                                    NullRepairFun,
                                     ReturnFun,
                                     LimiterFilters),
             io:format("Exchange id for tree compare ~s~n", [TCCB_GUID]),
@@ -570,21 +583,124 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets) ->
         % verify no hangover going into the key range test
     true = {tree_compare, 0} == LimiterCheckBucketFun(CheckFiltersB),
 
-    RplObjListMR = testutil:gen_riakobjects(2000, [], TupleBuckets),
-    RplObjListMR3 = lists:filter(FilterBucket3Fun, RplObjListMR),
+    RplObjListKR = testutil:gen_riakobjects(1000, [], TupleBuckets),
+    RplObjListKR3 = lists:filter(FilterBucket3Fun, RplObjListKR),
 
-    lists:foreach(SingleSidedPutFun(VNNa), RplObjListMR3),
+    lists:foreach(SingleSidedPutFun(VNNa), RplObjListKR3),
 
-    RepairListMR3 = lists:map(RepairListMapFun, RplObjListMR3),
-    RLMR3_SL = lists:sublist(lists:ukeysort(1, RepairListMR3), 50, 50),
-    [{SK, _SObj}|_RestMRSL] = RLMR3_SL,
-    {EK, _EObj} = lists:last(RLMR3_SL),
+    RepairListKR3 = lists:map(RepairListMapFun, RplObjListKR3),
+    RLKR3_SL = lists:sublist(lists:ukeysort(1, RepairListKR3), 50, 50),
+    [{SK, _SObj}|_RestKRSL] = RLKR3_SL,
+    {EK, _EObj} = lists:last(RLKR3_SL),
     io:format("StartKey ~s EndKey ~s in Range test~n", 
                 [binary_to_list(SK), binary_to_list(EK)]),
 
     CheckFiltersKR = 
         {filter, Bucket3, {SK, EK}, small, all, all, prehash},
     true = {clock_compare, 50} == LimiterCheckBucketFun(CheckFiltersKR),
+
+    RepairFunKR3 = GenuineRepairFun(VNNa, VNPa, RepairListKR3),
+
+    FoldRepair3FunKR = 
+        fun(_I, Acc) ->
+            case RepairBucketFun(Bucket3, RepairFunKR3,
+                                    {SK, EK},
+                                    all, prehash) of
+                {clock_compare, Count3} ->
+                    Acc + Count3;
+                {tree_compare, 0} ->
+                    Acc
+            end
+        end,
+    % Now repair those deltas - do the key range deltas first then the rest
+    TotalRepairsKR3 = lists:foldl(FoldRepair3FunKR, 0, lists:seq(1, 3)),
+    io:format("Total range repairs after key range test ~w~n",
+                [TotalRepairsKR3]),
+    true = 50 == TotalRepairsKR3,
+    AllRepairsKR3 = lists:foldl(FoldRepair3Fun, 0, lists:seq(1, 5)),
+    io:format("Total repairs after key range test ~w~n", [AllRepairsKR3]),
+    true = length(RplObjListKR3) - 50 == AllRepairsKR3,
+
+
+    % Some tests with a modified range.  Split a bunch of changes into two
+    % lots.  Apply those two lots in two distinct time ranges.  Find the 
+    % deltas by time range
+    MDR_TS1 = os:timestamp(),
+    timer:sleep(1000),
+    RplObjListMRa = testutil:gen_riakobjects(500, [], TupleBuckets),
+    RplObjListMRa3 = lists:filter(FilterBucket3Fun, RplObjListMRa),
+    MDR_TS2 = os:timestamp(),
+    timer:sleep(1000),
+    MDR_TS3 = os:timestamp(),
+    timer:sleep(1000),
+    RplObjListMRb = testutil:gen_riakobjects(100, [], TupleBuckets),
+    RplObjListMRb3 = lists:filter(FilterBucket3Fun, RplObjListMRb),
+    MDR_TS4 = os:timestamp(),
+    lists:foreach(SingleSidedPutFun(VNNa), RplObjListMRa3),
+        % add some deltas
+    lists:foreach(SingleSidedPutFun(VNPa), RplObjListMRb3),
+        % update some of those deltas
+        % updating the other vnode
+    
+    % check between TS3 and TS4 - should only see 'b' changes
+    TS3_4_Range = {date, convert_ts(MDR_TS3), convert_ts(MDR_TS4)},
+    CheckFiltersMRb = 
+        {filter, Bucket3, all, small, all, TS3_4_Range, prehash},
+        % verify no hangover going into the key range test
+    TS3_4_Result = LimiterCheckBucketFun(CheckFiltersMRb),
+    io:format("Exchange in second modified range resulted in ~w~n",
+                [TS3_4_Result]),
+    true = {clock_compare, length(RplObjListMRb3)} == TS3_4_Result,
+    
+    % check between TS1 and TS2 - should only see 'a' changes, but
+    % not 'b' chnages as they have a higher last modified date
+    TS1_2_Range = {date, convert_ts(MDR_TS1), convert_ts(MDR_TS2)},
+    CheckFiltersMRa = 
+        {filter, Bucket3, all, small, all, TS1_2_Range, prehash},
+        % verify no hangover going into the key range test
+    TS1_2_Result = LimiterCheckBucketFun(CheckFiltersMRa),
+    io:format("Exchange in first modified range resulted in ~w~n",
+                [TS1_2_Result]),
+    true = {clock_compare, length(RplObjListMRa3)} == TS1_2_Result,
+    % Important to relaise that as the second amendments were made
+    % on the other side (VNPa) - VNPa will return no modified 
+    % objects, and as VNNa so none of the second round of updates it
+    % will see all of the firts round of changes soon.
+
+    % Conflicting updates to (b) - but to be applied to VNN not VNP
+    RplObjListMRc = testutil:gen_riakobjects(100, [], TupleBuckets),
+    RplObjListMRc3 = lists:filter(FilterBucket3Fun, RplObjListMRc),
+    lists:foreach(SingleSidedPutFun(VNNa), RplObjListMRc3),
+
+    TS1_2_Result_ii = LimiterCheckBucketFun(CheckFiltersMRa),
+    io:format("Exchange in first modified range resulted in ~w~n",
+                [TS1_2_Result_ii]),
+    true =
+        {clock_compare, length(RplObjListMRa3) - length(RplObjListMRc3)}
+            == TS1_2_Result_ii,
+
+    RepairListMR3 = lists:map(RepairListMapFun, RplObjListMRa3),
+    RepairFunMR3 = GenuineRepairFun(VNNa, VNPa, RepairListMR3),
+
+    FoldRepair3FunMR = 
+        fun(_I, Acc) ->
+            case RepairBucketFun(Bucket3, RepairFunMR3,
+                                    all, 
+                                    {convert_ts(MDR_TS1), 
+                                        convert_ts(os:timestamp())},
+                                    prehash) of
+                {clock_compare, Count3} ->
+                    Acc + Count3;
+                {tree_compare, 0} ->
+                    Acc
+            end
+        end,
+    % Now repair those deltas - still using the modified range filter, but
+    % with the modified range being from TS1 to now
+    TotalRepairsMR3 = lists:foldl(FoldRepair3FunMR, 0, lists:seq(1, 6)),
+    io:format("Total range repairs after modified range test ~w~n",
+                [TotalRepairsMR3]),
+    true = length(RplObjListMRa3) == TotalRepairsMR3,
 
     % Shutdown and clear down files
     ok = mock_kv_vnode:close(VNNa),
@@ -615,19 +731,20 @@ wait_for_rebuild(Vnode) ->
     true = RebuildComplete == true.
 
 
-mock_vnode_coveragefold_nativemedium(_Config) ->
+coveragefold_nativemedium(_Config) ->
     mock_vnode_coveragefolder(native, 50000, true).
 
-mock_vnode_coveragefold_nativesmall(_Config) ->
+coveragefold_nativesmall(_Config) ->
     mock_vnode_coveragefolder(native, 5000, false).
 
-mock_vnode_coveragefold_parallelsmall(_Config) ->
-    mock_vnode_coveragefolder(parallel, 5000, true).
+coveragefold_parallelsmall(_Config) ->
+    mock_vnode_coveragefolder(parallel_so, 5000, true).
 
-mock_vnode_coveragefold_parallelmedium(_Config) ->
-    mock_vnode_coveragefolder(parallel, 50000, false).
+coveragefold_parallelmedium(_Config) ->
+    mock_vnode_coveragefolder(parallel_so, 50000, false).
 
-
+coveragefold_parallelmediumko(_Config) ->
+    mock_vnode_coveragefolder(parallel_ko, 50000, false).
 
 mock_vnode_coveragefolder(Type, InitialKeyCount, TupleBuckets) ->
     % This should load a set of 4 vnodes, with the data partitioned across the
@@ -789,3 +906,5 @@ mock_vnode_coveragefolder(Type, InitialKeyCount, TupleBuckets) ->
 
 
 exchange_vnodesendfun(MVN) -> testutil:exchange_vnodesendfun(MVN).
+
+convert_ts({Tmeg, Tsec, _Tmcr}) -> Tmeg * 1000000 + Tsec.

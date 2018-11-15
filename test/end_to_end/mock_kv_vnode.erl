@@ -70,6 +70,7 @@
 -define(V1_VERS, 1).
 -define(MAGIC, 53).  
 -define(EMPTY_VTAG_BIN, <<"e">>).
+-define(MAGIC_KEYS, [<<48,48,48,52,57,51>>]).
 
 
 -type r_object() :: #r_object{}.
@@ -181,8 +182,10 @@ init([Opts]) ->
         case Opts#options.aae of 
             native ->
                 {native, leveled_nko, VnSt};
-            parallel ->
-                {parallel, leveled_so}
+            parallel_so ->
+                {parallel, leveled_so};
+            parallel_ko ->
+                {parallel, leveled_ko}
         end,
     {ok, AAECntrl} = 
         aae_controller:aae_start(KeyStoreType, 
@@ -401,6 +404,7 @@ handle_call({aae, Msg, IndexNs, ReturnFun}, _From, State) ->
         {fetch_clocks_range, B, KR, SF, MR} ->
             FoldFun =
                 fun(BF, KF, EFs, KeyClockAcc) ->
+                    magickey_check(KF, State#state.aae_type),
                     {clock, VV} = lists:keyfind(clock, 1, EFs),
                     [{BF, KF, VV}|KeyClockAcc]
                 end,
@@ -632,6 +636,14 @@ strip_metabinary(SibCount, SibBin, LMD, MetaBinAcc) ->
                             MetaLen:32/integer, 
                             MetaBin:MetaLen/binary>>).
 
+
+magickey_check(Key, VnodeType) ->
+    case lists:member(Key, ?MAGIC_KEYS) of
+        true ->
+            io:format("Magic key ~w at VnodeType ~w~n", [Key, VnodeType]);
+        false ->
+            ok
+    end.
 
 %%%============================================================================
 %%% Test
