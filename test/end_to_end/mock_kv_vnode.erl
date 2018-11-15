@@ -543,7 +543,8 @@ bin_contents(Contents) ->
     lists:foldl(F, <<>>, Contents).
 
 meta_bin(MetaData) ->
-    {Mega,Secs,Micro} = os:timestamp(),
+    {last_modified_date, {Mega,Secs,Micro}} =
+        lists:keyfind(last_modified_date, 1, MetaData),
     LastModBin = <<Mega:32/integer, Secs:32/integer, Micro:32/integer>>,
     Deleted = <<0>>,
     RestBin = term_to_binary(MetaData),
@@ -574,9 +575,10 @@ fold_worker() ->
 
 
 from_aae_binary(AAEBin) ->
-    <<ObjectSize:32/integer, SibCount:32/integer, IndexHash:32/integer, 
-        HeadOnly/binary>> = AAEBin,
-    {ObjectSize, SibCount, IndexHash, HeadOnly}.
+    <<ObjectSize:32/integer, SibCount:32/integer, IndexHash:32/integer,
+        LMDmeg:32/integer, LMDsec:32/integer, LMDmcr:32/integer,
+        MDOnly/binary>> = AAEBin,
+    {ObjectSize, SibCount, IndexHash, [{LMDmeg, LMDsec, LMDmcr}], MDOnly}.
 
 
 %%%============================================================================
@@ -607,18 +609,25 @@ to_aae_binary(ObjectBin) ->
 
     IndexHash = erlang:phash2([]), % faking here
 
-    HeadOnly = strip_metabinary(SibCount, SibsBin, <<>>),
+    {{LMDmeg, LMDsec, LMDmcr}, MD} =
+        strip_metabinary(SibCount, SibsBin, {0, 0, 0}, <<>>),
+    
     <<ObjectSize:32/integer, SibCount:32/integer, IndexHash:32/integer, 
-        HeadOnly/binary>>.
+        LMDmeg:32/integer, LMDsec:32/integer, LMDmcr:32/integer, 
+        MD/binary>>.
 
 
-strip_metabinary(0, <<>>, MetaBinAcc) ->
-    MetaBinAcc;
-strip_metabinary(SibCount, SibBin, MetaBinAcc) ->
+strip_metabinary(0, <<>>, LMD, MetaBinAcc) ->
+    {LMD, MetaBinAcc};
+strip_metabinary(SibCount, SibBin, LMD, MetaBinAcc) ->
     <<ValLen:32/integer, _ValBin:ValLen/binary, 
         MetaLen:32/integer, MetaBin:MetaLen/binary, Rest/binary>> = SibBin,
+        <<LMDmega:32/integer, LMDsec:32/integer, LMDmicro:32/integer,
+            _RestMeta/binary>> = MetaBin,
+        LMD0 = max({LMDmega, LMDsec, LMDmicro}, LMD),
     strip_metabinary(SibCount - 1, 
-                        Rest, 
+                        Rest,
+                        LMD0,
                         <<MetaBinAcc/binary, 
                             MetaLen:32/integer, 
                             MetaBin:MetaLen/binary>>).

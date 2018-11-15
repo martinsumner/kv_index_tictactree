@@ -534,8 +534,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets) ->
     TotalRepairs3 = lists:foldl(FoldRepair3Fun, 0, lists:seq(1, 6)),
     io:format("Repaired ~w from list of length ~w~n",
                 [TotalRepairs3, length(RepairListTC3)]),
-    true = length(RepairListTC3) =< TotalRepairs3,
-    % **
+    true = length(RepairListTC3) == TotalRepairs3,
 
     FoldRepair4Fun = 
         fun(_I, Acc) ->
@@ -549,11 +548,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets) ->
     TotalRepairs4 = lists:foldl(FoldRepair4Fun, 0, lists:seq(1, 6)),
     io:format("Repaired ~w from list of length ~w~n",
                 [TotalRepairs4, length(RepairListTC4)]),
-    true = length(RepairListTC4) =< TotalRepairs4,
-    % **
-    % ** - note the use of "=<" here ..appears to eb sometimes out by one
-    % - timing issues?
-    % TODO: Clarify as to why, and is it sometimes more than 1s
+    true = length(RepairListTC4) == TotalRepairs4,
 
     % Check with a key range.  Testing with a modified range requires more
     % effort as the objects don't have a last modified date

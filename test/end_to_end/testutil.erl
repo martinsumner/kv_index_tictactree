@@ -102,9 +102,11 @@ gen_riakobjects(Count, ObjectList, TupleBuckets) ->
         end,
     Key = list_to_binary(string:right(integer_to_list(Count), 6, $0)),
     Value = leveled_rand:rand_bytes(512),
+    MD = [{last_modified_date, os:timestamp()}, 
+            {random, leveled_rand:uniform(3)}],
     Obj = #r_object{bucket = Bucket,
                     key = Key,
-                    contents = [#r_content{value = Value}]},
+                    contents = [#r_content{metadata = MD, value = Value}]},
     gen_riakobjects(Count - 1, [Obj|ObjectList], TupleBuckets).
 
 
