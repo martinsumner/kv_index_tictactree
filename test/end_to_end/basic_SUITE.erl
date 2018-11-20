@@ -4,14 +4,48 @@
 -export([dual_store_compare_medium_so/1,
             dual_store_compare_medium_ko/1,
             dual_store_compare_large_so/1,
-            dual_store_compare_large_ko/1]).
+            dual_store_compare_large_ko/1,
+            store_notsupported/1]).
 
 all() -> [dual_store_compare_medium_so,
             dual_store_compare_medium_ko,
             dual_store_compare_large_so,
-            dual_store_compare_large_ko
+            dual_store_compare_large_ko,
+            store_notsupported
         ].
     
+
+store_notsupported(_Config) ->
+    RootPath = testutil:reset_filestructure(),
+    VnodePath1 = filename:join(RootPath, "vnode1/"),
+    SplitF = fun(_X) -> {leveled_rand:uniform(1000), 1, 0, null} end,
+    RPid = self(),
+    ReturnFun = fun(R) -> RPid ! {result, R} end,
+    RepairFun = fun(_KL) -> null end,  
+
+    {ok, Cntrl1} = 
+        aae_controller:aae_start({parallel, leveled_ko}, 
+                                    true, 
+                                    {1, 300}, 
+                                    [{2, 0}, {2, 1}], 
+                                    VnodePath1, 
+                                    SplitF),
+    
+    BKVList = testutil:gen_keys([], 100),
+    ok = testutil:put_keys(Cntrl1, 2, BKVList, none),
+
+    {ok, _P1, GUID1} = 
+        aae_exchange:start([{exchange_sendfun(Cntrl1), [{2,0}]}],
+                                [{exchange_notsupported_sendfun(), [{3, 0}]}],
+                                RepairFun,
+                                ReturnFun),
+    io:format("Exchange id ~s~n", [GUID1]),
+    {ExchangeState1, 0} = testutil:start_receiver(),
+    io:format("ExchangeState ~w~n", [ExchangeState1]),
+    true = ExchangeState1 == not_supported.
+
+
+
 
 dual_store_compare_medium_so(_Config) ->
     dual_store_compare_tester(10000, leveled_so).
@@ -292,3 +326,12 @@ create_discrepancy(Cntrl, InitialKeyCount) ->
 
 
 exchange_sendfun(Cntrl) -> testutil:exchange_sendfun(Cntrl).
+
+
+exchange_notsupported_sendfun() ->
+    SendFun = 
+        fun(_Msg, _Preflists, Colour) ->
+            RPid = self(),
+            aae_exchange:reply(RPid, not_supported, Colour)
+        end,
+    SendFun.

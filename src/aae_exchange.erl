@@ -445,6 +445,9 @@ clock_compare(timeout, State) ->
         State#state{key_deltas = RepairKeys}}.
 
 
+waiting_all_results({reply, not_supported, Colour}, State) ->
+    aae_util:log("EX010", [Colour, State#state.exchange_id], logs()),
+    {stop, normal, State#state{pending_state = not_supported}};
 waiting_all_results({reply, Result, Colour}, State) ->
     aae_util:log("EX007", [Colour, State#state.exchange_id], logs()),
     {PC, PT} = State#state.pink_returns,
@@ -517,7 +520,7 @@ terminate(normal, StateName, State) ->
                             logs())
     end,
     ReplyFun = State#state.reply_fun,
-    ReplyFun({StateName, length(State#state.key_deltas)}).
+    ReplyFun({State#state.pending_state, length(State#state.key_deltas)}).
 
 code_change(_OldVsn, StateName, State, _Extra) ->
     {ok, StateName, State}.
@@ -847,7 +850,9 @@ logs() ->
             {info, "Normal exit for partial (dynamic) exchange at"
                         ++ " pending_state=~w for exchange_id=~s"
                         ++ " tree_compare_deltas=~w after tree_compares=~w"
-                        ++ " key_deltas=~w"}}
+                        ++ " key_deltas=~w"}},
+        {"EX010", 
+            {warn, "Exchange not_supported for colour=~w in exchange id=~s"}}
         ].
 
 
