@@ -141,6 +141,11 @@
             merge_root/2,
             merge_branches/2]).
 
+-export([compare_roots/2,
+            compare_branches/2,
+            compare_clocks/2,
+            compare_trees/2]).
+
 -export([start/4,
             start/6,
             reply/3]).
