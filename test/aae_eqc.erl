@@ -15,7 +15,14 @@
 
 %% -- State and state functions ----------------------------------------------
 initial_state() ->
-    [{"a", #{is_empty => true}}, {"b", #{is_empty => true}}].  %% list of controllers, each unique map
+    #{aae_controllers => 
+          [{"a", #{is_empty => true,
+                  store => []}}, 
+           {"b", #{is_empty => true,
+                  store => []}}], %% list of controllers, each unique map
+      history => 
+          [] %% {Bucket, Key, VClock, LastModified}
+      }.  
 
 %% -- Generators -------------------------------------------------------------
 
@@ -38,6 +45,9 @@ postcondition_common(_S, _Call, _Res) ->
 
 %% -- Operations -------------------------------------------------------------
 
+object_split(Object) ->
+     {_Size, _SiblingCount, _IndexHash, _LastMod, _UserData} = binary_to_term(Object).
+
 %% --- Operation: init ---
 start_pre(S) ->
     unstarted_controllers(S) =/= [].
@@ -49,28 +59,29 @@ start_args(S) ->
            bool(), 
            elements([{1, 1}, {0, 3600}]), %% if hours is set to 1 it means we cannot trigger a rebuild in a test
            [{0, 3}, {1, 3}, {2,3}],   %% behaviour is not different for less
-           {var, dir},
-           {pos(), pos(), list({nat(), nat()})}
+           {var, dir}
          ]).
 
-start(Path, KeyStoreType, IsEmpty, RebuildSchedule, PrefList, RootPath, {P1, P2, KVs}) ->
-    ObjectSplitFun = fun(Object) -> {P1, P2, 0, timestamp(Object), KVs} end,
-    case catch aae_controller:aae_start(KeyStoreType, IsEmpty, RebuildSchedule, PrefList, 
-                                         filename:join(RootPath, Path), ObjectSplitFun) of
+start(Path, KeyStoreType, IsEmpty, RebuildSchedule, PrefLists, RootPath) ->
+    case catch aae_controller:aae_start(KeyStoreType, IsEmpty, RebuildSchedule, PrefLists, 
+                                         filename:join(RootPath, Path), fun object_split/1) of
         {ok, Pid} -> Pid;
         Other -> Other
     end.
 
-start_next(S, Value, [Path, _KeyStoreType, IsEmpty, _RebuildSchedule, _PrefList, _RootPath, _ObjectSplit]) ->
-    {_, Map} = lists:keyfind(Path, 1, S),
+start_next(S, Value, [Path, _KeyStoreType, IsEmpty, _RebuildSchedule, PrefLists, _RootPath]) ->
+    Controllers = maps:get(aae_controllers, S),
+    {_, Map} = lists:keyfind(Path, 1, Controllers),
     RebuildIsDue = (not IsEmpty andalso maps:get(is_empty, Map)),
-    lists:keyreplace(Path, 1, S, {Path, Map#{aae_controller => Value,
-                                             rebuild_due => RebuildIsDue}}). 
+    S#{aae_controllers => 
+           lists:keyreplace(Path, 1, Controllers, {Path, Map#{aae_controller => Value,
+                                                              rebuild_due => RebuildIsDue,
+                                                              preflists => PrefLists}})}. 
 
 start_post(_S, _Args, Res) ->
     is_pid(Res).
 
-start_features(_S, [_Path, _KeyStoreType, IsEmpty, RebuildSchedule, _PrefList, _RootPath, _ObjectSplit], _Res) ->
+start_features(_S, [_Path, _KeyStoreType, IsEmpty, RebuildSchedule, _PrefLists, _RootPath], _Res) ->
     [ {start, {schedule, RebuildSchedule}}, {start, {is_empty, IsEmpty}} ].
 
 
@@ -83,15 +94,17 @@ stop_args(S) ->
          [Path, maps:get(aae_controller, M)]).
 
 stop_pre(S, [Path, Pid]) ->
-    {_, M} = lists:keyfind(Path, 1, S),
+    {_, M} = lists:keyfind(Path, 1, maps:get(aae_controllers, S)),
     Pid == maps:get(aae_controller, M).  %% for shrinking
 
 stop(_, Pid) ->
     catch aae_controller:aae_close(Pid).
 
 stop_next(S, _Value, [Path, _Pid]) ->
-    {_, M} = lists:keyfind(Path, 1, S),
-    lists:keyreplace(Path, 1, S, {Path,  maps:without([aae_controller], M)}).
+    Controllers = maps:get(aae_controllers, S),
+    {_, M} = lists:keyfind(Path, 1, Controllers),
+    S#{aae_controllers => 
+           lists:keyreplace(Path, 1, Controllers, {Path,  maps:without([aae_controller], M)})}.
 
 stop_post(_S, [_, _Pid], Res) ->
     eq(Res, ok).
@@ -105,7 +118,8 @@ nextrebuild_args(S) ->
          [Path, maps:get(aae_controller, M)]).
 
 nextrebuild_pre(S, [Path, Pid]) ->
-    {_, M} = lists:keyfind(Path, 1, S),
+    Controllers = maps:get(aae_controllers, S),
+    {_, M} = lists:keyfind(Path, 1, Controllers),
     Pid == maps:get(aae_controller, M).  %% for shrinking
 
 %% If we expected to be due, it should be due.
@@ -114,7 +128,8 @@ nextrebuild(_, Pid) ->
     os:timestamp() > TS.
 
 nextrebuild_post(S, [Path, _Pid], Res) ->
-    {_, M} = lists:keyfind(Path, 1, S),
+    Controllers = maps:get(aae_controllers, S),
+    {_, M} = lists:keyfind(Path, 1, Controllers),
     not maps:get(rebuild_due, M) orelse Res.
             
 
@@ -163,8 +178,10 @@ bugs(Time, Bugs) ->
 %%% ---- state functions
 
 unstarted_controllers(S) ->
-    lists:filter(fun({_, M}) -> not maps:is_key(aae_controller, M) end, S).
+    Controllers = maps:get(aae_controllers, S, []),
+    lists:filter(fun({_, M}) -> not maps:is_key(aae_controller, M) end, Controllers).
 
 started_controllers(S) ->
-    lists:filter(fun({_, M}) -> maps:is_key(aae_controller, M) end, S).
+    Controllers = maps:get(aae_controllers, S, []),
+    lists:filter(fun({_, M}) -> maps:is_key(aae_controller, M) end, Controllers).
 
