@@ -240,25 +240,44 @@ exchange(_, _, [BluePid, BluePrefLists], [PinkPid, PinkPrefLists]) ->
     PinkList =  [{testutil:exchange_sendfun(PinkPid), PinkPrefLists}],
     QuickCheck = self(),
     {ok, Pid, _UUID} = aae_exchange:start(BlueList, PinkList, 
-                                          fun(_) -> ok end, %% do not repair at all 
-                                          fun(Result) -> QuickCheck ! {self(), Result} end),
+                                          fun(KeyList) -> QuickCheck ! {self(), repair, KeyList} end, %% do not repair at all 
+                                          fun(Result) -> QuickCheck ! {self(), reply, Result} end),
     receive
-        {Pid, Result} ->
-            Result %% {PendingStates, Nr of KeyDeltas}
+        {Pid, reply, {root_compare, 0}} ->            
+            {root_compare, 0};
+        {Pid, reply, Other} ->
+            receive
+                {Pid, repair, KeyList} ->
+                    {repair, Other, KeyList}
+            after 5000 -> timeout
+            end
     after 5000 -> timeout
     end.
 
 exchange_post(S, [Path1, Path2, _Blue, _Pink], Res) ->
     {_, M1} = lists:keyfind(Path1, 1, maps:get(aae_controllers, S, [])),
     {_, M2} = lists:keyfind(Path2, 1, maps:get(aae_controllers, S, [])),
-    Store1 = maps:get(store, M1, []), 
-    Store2 = maps:get(store, M2, []),
-    Unique1 = Store1 -- Store2,
-    Unique2 = Store2 -- Store1,
-    Keys = lists:usort([ {B, K} || {{B, K}, _, _} <- Unique1 ++ Unique2 ]),
+    BlueStore = maps:get(store, M1, []), 
+    PinkStore = maps:get(store, M2, []),
+    BlueUnique = BlueStore -- PinkStore,
+    PinkUnique = PinkStore -- BlueStore,
+    Keys = lists:usort([ {B, K} || {{B, K}, _, _} <- BlueUnique ++ PinkUnique ]),
+    Expected = 
+        [ {Key, {case lists:keyfind(Key, 1, BlueUnique) of
+                     false -> none;
+                     {_, BC, _} -> BC
+                 end,
+                 case lists:keyfind(Key, 1, PinkUnique) of
+                     false -> none;
+                     {_, PC, _} -> PC
+                 end}} || Key <- Keys ],
     case Res of
-        {root_compare, 0} -> eq(0, length(Keys));
-        {clock_compare, N} -> eq(N, length(Keys));
+        {root_compare, 0} -> 
+            eq(0, length(Keys));
+        {repair, {clock_compare, N}, KeyList} -> 
+            N == length(Keys) 
+                andalso N == length(KeyList) 
+                andalso eq(KeyList, Expected);
         _ -> eq(Res, length(Keys))  %% will print the difference
     end.
 
