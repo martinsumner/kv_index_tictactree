@@ -94,7 +94,7 @@
         % for parallel stores must be a supported KV store by the aae_keystore
         % module 
 -type rebuild_schedule() 
-        :: {integer(), integer()}.
+        :: {non_neg_integer(), pos_integer()}.
         % A rebuild schedule, the first integer being the minimum number of 
         % hours to wait between rebuilds.  The second integer is a number of 
         % seconds by which to jitter the rebuild.  The actual rebuild will be 
@@ -890,7 +890,7 @@ cache(Startup, IndexN, RootPath) ->
 schedule_rebuild(never, Schedule) ->
     schedule_rebuild(os:timestamp(), Schedule);
 schedule_rebuild({MegaSecs, Secs, MicroSecs}, {MinHours, JitterSeconds}) ->
-    SlotCount = min(1024, JitterSeconds),
+    SlotCount = min(1024, max(JitterSeconds, 1)),
     SlotSize = JitterSeconds div SlotCount,
     P = self(),
     Slot = erlang:phash2({P, MicroSecs}, SlotCount),
