@@ -14,7 +14,7 @@
             terminate/2,
             code_change/3]).
 
--export([runner_start/0, 
+-export([runner_start/1, 
             runner_clockfold/4,
             runner_stop/1]).
 
@@ -22,7 +22,8 @@
 
 -record(state, {result_size = 0 :: integer(),
                 query_count = 0 :: integer(),
-                query_time  = 0 :: integer()}).
+                query_time  = 0 :: integer(),
+                log_levels :: aae_util:log_levels()|undefined}).
 
 -define(LOG_FREQUENCY, 100).
 
@@ -31,10 +32,11 @@
 %%%============================================================================
 
 
+-spec runner_start(aae_util:log_levels()|undefined) -> {ok, pid()}.
 %% @doc
 %% Start an AAE runner to manage folds 
-runner_start() ->
-    gen_server:start(?MODULE, [], []).
+runner_start(LogLevels) ->
+    gen_server:start(?MODULE, [LogLevels], []).
 
 %% @doc
 %% Pass some work to a runner
@@ -49,8 +51,8 @@ runner_stop(Runner) ->
 %%% gen_server callbacks
 %%%============================================================================
 
-init([]) ->
-    {ok, #state{}}.
+init([LogLevels]) ->
+    {ok, #state{log_levels = LogLevels}}.
 
 handle_call(close, _From, State) ->
     {stop, normal, ok, State}.
@@ -62,7 +64,8 @@ handle_cast({work, Folder, ReturnFun, SizeFun}, State) ->
     RS0 = State#state.result_size + SizeFun(Results),
     QT0 = State#state.query_time + timer:now_diff(os:timestamp(), SW),
     QC0 = State#state.query_count + 1,
-    {RS1, QT1, QC1} = maybe_log(RS0, QT0, QC0, ?LOG_FREQUENCY),
+    {RS1, QT1, QC1} =
+        maybe_log(RS0, QT0, QC0, ?LOG_FREQUENCY, State#state.log_levels),
 
     ReturnFun(Results),
 
@@ -78,7 +81,8 @@ terminate(normal, State) ->
     _ = maybe_log(State#state.result_size, 
                     State#state.query_time, 
                     State#state.query_count, 
-                    1),
+                    1,
+                    State#state.log_levels),
     ok.
 
 code_change(_OldVsn, State, _Extra) ->
@@ -89,10 +93,10 @@ code_change(_OldVsn, State, _Extra) ->
 %%%============================================================================
 
 
-maybe_log(RS_Acc, QT_Acc, QC_Acc, LogFreq) when QC_Acc < LogFreq ->
+maybe_log(RS_Acc, QT_Acc, QC_Acc, LogFreq, _LogLs) when QC_Acc < LogFreq ->
     {RS_Acc, QT_Acc, QC_Acc};
-maybe_log(RS_Acc, QT_Acc, QC_Acc, _LogFreq) ->
-    aae_util:log("R0001", [RS_Acc, QT_Acc, QC_Acc], logs()),
+maybe_log(RS_Acc, QT_Acc, QC_Acc, _LogFreq, LogLs) ->
+    aae_util:log("R0001", [RS_Acc, QT_Acc, QC_Acc], logs(), LogLs),
     {0, 0, 0}.
 
 

@@ -29,7 +29,8 @@ store_notsupported(_Config) ->
                                     {1, 300}, 
                                     [{2, 0}, {2, 1}], 
                                     VnodePath1, 
-                                    SplitF),
+                                    SplitF,
+                                    [info, warn, error, critical]),
     
     BKVList = testutil:gen_keys([], 100),
     ok = testutil:put_keys(Cntrl1, 2, BKVList, none),
@@ -88,14 +89,16 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
                                     {1, 300}, 
                                     [{2, 0}, {2, 1}], 
                                     VnodePath1, 
-                                    SplitF),
+                                    SplitF,
+                                    [warn, error, critical]),
     {ok, Cntrl2} = 
         aae_controller:aae_start({parallel, StoreType}, 
                                     true, 
                                     {1, 300}, 
                                     [{3, 0}, {3, 1}, {3, 2}], 
                                     VnodePath2, 
-                                    SplitF),
+                                    SplitF,
+                                    [warn, error, critical]),
     
     initial_load(InitialKeyCount, Cntrl1, Cntrl2),
 
@@ -130,9 +133,17 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
                                         ReturnFun),
     Root2C = testutil:start_receiver(),
     true = Root1C == Root2C,
+
+    %% Turn down logging in Cntrl1 and Cntrl2
+    ok = aae_controller:aae_loglevel(Cntrl1, [warn, error, critical]),
+    ok = aae_controller:aae_loglevel(Cntrl2, [warn, error, critical]),
     
     io:format("Direct partition compare complete in ~w ms~n", 
                 [timer:now_diff(os:timestamp(), SW1)/1000]),
+
+    % Change log levels
+    ok = aae_controller:aae_loglevel(Cntrl1, [info, warn, error, critical]),
+    ok = aae_controller:aae_loglevel(Cntrl2, [info, warn, error, critical]),
 
     % Now do a comparison based based on some key range queries:
     SW2 = os:timestamp(),
