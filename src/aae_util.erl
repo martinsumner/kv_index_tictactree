@@ -10,17 +10,20 @@
 -include_lib("eunit/include/eunit.hrl").
 
 -export([log/3,
+            log/4,
             log_timer/4,
+            log_timer/5,
             get_opt/2,
             get_opt/3,
-            make_binarykey/2]).
+            make_binarykey/2,
+            min_loglevel/1]).
 
 -export([clean_subdir/1,
             test_key_generator/1,
             flip_byte/3,
             get_segmentid/2]).         
 
--define(LOG_LEVEL, [info, warn, error, critical]).
+-define(DEFAULT_LOGLEVEL, [info, warn, error, critical]).
 -define(DEFAULT_LOGBASE, [
 
     {"G0001",
@@ -33,6 +36,11 @@
 
 -define(UNDEFINED_LOG, {"G0003", {info, "Undefined log reference"}}).
 
+-type log_level() :: debug|info|warn|error|critical.
+-type log_levels() :: list(log_level()).
+
+-export_type([log_levels/0]).
+
 %%%============================================================================
 %%% External functions
 %%%============================================================================
@@ -41,8 +49,10 @@
 %% @doc
 %% Pick the log out of the logbase based on the reference 
 log(LogReference, Subs, LogBase) ->
-    log(LogReference, Subs, LogBase, ?LOG_LEVEL).
+    log(LogReference, Subs, LogBase, ?DEFAULT_LOGLEVEL).
 
+log(LogRef, Subs, LogBase, undefined) ->
+    log(LogRef, Subs, LogBase, ?DEFAULT_LOGLEVEL);
 log(LogRef, Subs, LogBase, SupportedLogLevels) ->
     {LogRef0, {LogLevel, LogText}} = get_logreference(LogRef, LogBase),
     case lists:member(LogLevel, SupportedLogLevels) of
@@ -61,8 +71,10 @@ log(LogRef, Subs, LogBase, SupportedLogLevels) ->
 %% Pick the log out of the logbase based on the reference, and also log
 %% the time between the strat time and making the log
 log_timer(LogReference, Subs, StartTime, LogBase) ->
-    log_timer(LogReference, Subs, StartTime, LogBase, ?LOG_LEVEL).
+    log_timer(LogReference, Subs, StartTime, LogBase, ?DEFAULT_LOGLEVEL).
 
+log_timer(LogRef, Subs, StartTime, LogBase, undefined) ->
+    log_timer(LogRef, Subs, StartTime, LogBase, ?DEFAULT_LOGLEVEL);
 log_timer(LogRef, Subs, StartTime, LogBase, SupportedLogLevels) ->
     {LogRef0, {LogLevel, LogText}} = get_logreference(LogRef, LogBase),
     case lists:member(LogLevel, SupportedLogLevels) of
@@ -111,6 +123,13 @@ make_binarykey({Type, Bucket}, Key)
 make_binarykey(Bucket, Key) when is_binary(Bucket), is_binary(Key) ->
     <<Bucket/binary, Key/binary>>.
 
+-spec min_loglevel(log_levels()|undefined) -> log_level().
+%% @doc
+%% Return the lowest log level to be used in leveled startup
+min_loglevel(undefined) ->
+    info;
+min_loglevel([MinLevel|_Rest]) ->
+    MinLevel.
 
 %%%============================================================================
 %%% Internal functions
