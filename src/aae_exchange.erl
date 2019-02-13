@@ -147,7 +147,7 @@
             compare_trees/2]).
 
 -export([start/4,
-            start/6,
+            start/7,
             reply/3]).
 
 -include_lib("eunit/include/eunit.hrl").
@@ -174,7 +174,8 @@
                 exchange_type :: exchange_type(),
                 exchange_filters = none :: filters(),
                 last_tree_compare = none :: list(non_neg_integer())|none,
-                tree_compares = 0 :: integer()
+                tree_compares = 0 :: integer(),
+                transition_pause_ms = ?TRANSITION_PAUSE_MS :: pos_integer()
                 }).
 
 -type input_list() :: [{fun(), list(tuple())|all}].
@@ -208,6 +209,8 @@
         segment_filter(), modified_range(),
         hash_method()}|none.
     % filter to be used in partial exchanges
+-type option_item() :: {transition_pause_ms, pos_integer()}.
+-type options() :: list(option_item()).
 
 -define(FILTERIDX_SEG, 5).
 -define(FILTERIDX_TRS, 4).
@@ -219,33 +222,36 @@
 
 start(BlueList, PinkList, RepairFun, ReplyFun) ->
     % API for backwards compatability
-    start(full, BlueList, PinkList, RepairFun, ReplyFun, none).
+    start(full, BlueList, PinkList, RepairFun, ReplyFun, none, []).
 
 
 -spec start(exchange_type(),
             input_list(), input_list(), fun(), fun(),
-            filters()) -> {ok, pid(), list()}.
+            filters(),
+            options()) -> {ok, pid(), list()}.
 %% @doc
-%% Start an FSM to manage an exchange and comapre the preflsist in the 
+%% Start an FSM to manage an exchange and compare the preflsist in the 
 %% BlueList with those in the PinkList, using the RepairFun to repair any
 %% keys discovered to have inconsistent clocks.  ReplyFun used to reply back
 %% to calling client the StateName at termination.
 %%
-%% The ReplyFun should be a 1 arity function t
-start(full, BlueList, PinkList, RepairFun, ReplyFun, none) ->
+%% The ReplyFun should be a 1 arity function
+start(full, BlueList, PinkList, RepairFun, ReplyFun, none, Opts) ->
     ExchangeID = leveled_util:generate_uuid(),
     {ok, ExPID} = gen_fsm:start(?MODULE, 
                                 [{full, none}, 
                                     BlueList, PinkList, RepairFun, ReplyFun,
-                                    ExchangeID], 
+                                    ExchangeID,
+                                    Opts], 
                                 []),
     {ok, ExPID, ExchangeID};
-start(partial, BlueList, PinkList, RepairFun, ReplyFun, Filters) ->
+start(partial, BlueList, PinkList, RepairFun, ReplyFun, Filters, Opts) ->
     ExchangeID = leveled_util:generate_uuid(),
     {ok, ExPID} = gen_fsm:start(?MODULE, 
                                 [{partial, Filters}, 
                                     BlueList, PinkList, RepairFun, ReplyFun,
-                                    ExchangeID], 
+                                    ExchangeID,
+                                    Opts], 
                                 []),
     {ok, ExPID, ExchangeID}.
 
@@ -260,7 +266,8 @@ reply(Exchange, Result, Colour) ->
 %%% gen_fsm callbacks
 %%%============================================================================
 
-init([{full, none}, BlueList, PinkList, RepairFun, ReplyFun, ExChID]) ->
+init([{full, none},
+        BlueList, PinkList, RepairFun, ReplyFun, ExChID, Opts]) ->
     leveled_rand:seed(),
     PinkTarget = length(PinkList),
     BlueTarget = length(BlueList),
@@ -273,8 +280,9 @@ init([{full, none}, BlueList, PinkList, RepairFun, ReplyFun, ExChID]) ->
                     blue_returns = {BlueTarget, BlueTarget},
                     exchange_type = full},
     aae_util:log("EX001", [ExChID, PinkTarget + BlueTarget], logs()),
-    {ok, prepare_full_exchange, State, 0};
-init([{partial, Filters}, BlueList, PinkList, RepairFun, ReplyFun, ExChID]) ->
+    {ok, prepare_full_exchange, process_options(Opts, State), 0};
+init([{partial, Filters},
+        BlueList, PinkList, RepairFun, ReplyFun, ExChID, Opts]) ->
     leveled_rand:seed(),
     PinkTarget = length(PinkList),
     BlueTarget = length(BlueList),
@@ -288,7 +296,7 @@ init([{partial, Filters}, BlueList, PinkList, RepairFun, ReplyFun, ExChID]) ->
                     exchange_type = partial,
                     exchange_filters = Filters},
     aae_util:log("EX001", [ExChID, PinkTarget + BlueTarget], logs()),
-    {ok, prepare_partial_exchange, State, 0}.
+    {ok, prepare_partial_exchange, process_options(Opts, State), 0}.
 
 
 prepare_full_exchange(timeout, State) ->
@@ -474,7 +482,7 @@ waiting_all_results({reply, Result, Colour}, State) ->
             {next_state, 
                 State0#state.pending_state, 
                 State0, 
-                jitter_pause(?TRANSITION_PAUSE_MS)};
+                jitter_pause(State#state.transition_pause_ms)};
         false ->
             {next_state, 
                 waiting_all_results, 
@@ -585,6 +593,14 @@ merge_tree(Tree0, Tree1) ->
 %%%============================================================================
 %%% Internal Functions
 %%%============================================================================
+
+-spec process_options(options(), exchange_state()) -> exchange_state().
+%% @doc
+%% Alter state reflecting any passed in options
+process_options([], State) ->
+    State;
+process_options([{transition_pause_ms, PauseMS}|Tail], State) ->
+    process_options(Tail, State#state{transition_pause_ms = PauseMS}).
 
 -spec trigger_next(any(), atom(), fun(), any(), boolean(), 
                                         integer(), exchange_state()) -> any().

@@ -16,8 +16,8 @@
             terminate/2,
             code_change/3]).
 
--export([cache_open/2,
-            cache_new/2,
+-export([cache_open/3,
+            cache_new/3,
             cache_alter/4,
             cache_root/1,
             cache_leaves/2,
@@ -26,6 +26,7 @@
             cache_destroy/1,
             cache_startload/1,
             cache_completeload/2,
+            cache_loglevel/2,
             cache_close/1]).
 
 -include_lib("eunit/include/eunit.hrl").
@@ -42,7 +43,8 @@
                 loading = false :: boolean(),
                 dirty_segments = [] :: list(),
                 active_fold :: string()|undefined,
-                change_queue = [] :: list()}).
+                change_queue = [] :: list(),
+                log_levels :: aae_util:log_levels()|undefined}).
 
 -type partition_id() :: integer()|{integer(), integer()}.
 
@@ -51,24 +53,29 @@
 %%% API
 %%%============================================================================
 
--spec cache_open(list(), partition_id()) -> {boolean(), pid()}.
+-spec cache_open(list(), partition_id(), aae_util:log_levels()|undefined)
+                                                        -> {boolean(), pid()}.
 %% @doc
 %% Open a tree cache, using any previously saved one for this tree cache as a 
 %% starting point.  Return is_empty boolean as true to indicate if a new cache 
 %% was created, as well as the PID of this FSM
-cache_open(RootPath, PartitionID) ->
-    Opts = [{root_path, RootPath}, {partition_id, PartitionID}],
+cache_open(RootPath, PartitionID, LogLevels) ->
+    Opts = [{root_path, RootPath},
+            {partition_id, PartitionID},
+            {log_levels, LogLevels}],
     {ok, Pid} = gen_server:start_link(?MODULE, [Opts], []),
     IsRestored = gen_server:call(Pid, is_restored, infinity),
     {IsRestored, Pid}.
 
--spec cache_new(list(), partition_id()) -> {ok, pid()}.
+-spec cache_new(list(), partition_id(), aae_util:log_levels()|undefined)
+                                                        -> {ok, pid()}.
 %% @doc
 %% Open a tree cache, without restoring from file
-cache_new(RootPath, PartitionID) ->
+cache_new(RootPath, PartitionID, LogLevels) ->
     Opts = [{root_path, RootPath}, 
             {partition_id, PartitionID}, 
-            {ignore_disk, true}],
+            {ignore_disk, true},
+            {log_levels, LogLevels}],
     gen_server:start_link(?MODULE, [Opts], []).
 
 -spec cache_destroy(pid()) -> ok.
@@ -144,6 +151,12 @@ cache_startload(Pid) ->
 cache_completeload(Pid, LoadedTree) ->
     gen_server:cast(Pid, {complete_load, LoadedTree}).
 
+-spec cache_loglevel(pid(), aae_util:log_levels()) -> ok.
+%% @doc
+%% Alter the log level at runtime
+cache_loglevel(Pid, LogLevels) ->
+    gen_server:cast(Pid, {log_levels, LogLevels}).
+
 %%%============================================================================
 %%% gen_server callbacks
 %%%============================================================================
@@ -152,6 +165,7 @@ init([Opts]) ->
     PartitionID = aae_util:get_opt(partition_id, Opts),
     RootPath = aae_util:get_opt(root_path, Opts),
     IgnoreDisk = aae_util:get_opt(ignore_disk, Opts, false),
+    LogLevels = aae_util:get_opt(log_levels, Opts),
     RootPath0 = filename:join(RootPath, flatten_id(PartitionID)) ++ "/",
     {StartTree, SaveSQN, IsRestored} = 
         case IgnoreDisk of 
@@ -160,7 +174,7 @@ init([Opts]) ->
                     ?START_SQN, 
                     false};
             false ->
-                case open_from_disk(RootPath0) of 
+                case open_from_disk(RootPath0, LogLevels) of 
                     {none, SQN} ->
                         {leveled_tictac:new_tree(PartitionID, ?TREE_SIZE),
                             SQN, 
@@ -175,7 +189,8 @@ init([Opts]) ->
                 tree = StartTree, 
                 is_restored = IsRestored,
                 root_path = RootPath0,
-                partition_id = PartitionID}}.
+                partition_id = PartitionID,
+                log_levels = LogLevels}}.
     
 
 handle_call(is_restored, _From, State) ->
@@ -187,7 +202,8 @@ handle_call({fetch_leaves, BranchIDs}, _From, State) ->
 handle_call(close, _From, State) ->
     save_to_disk(State#state.root_path, 
                     State#state.save_sqn, 
-                    State#state.tree),
+                    State#state.tree,
+                    State#state.log_levels),
     {stop, normal, ok, State}.
 
 handle_cast({alter, Key, CurrentHash, OldHash}, State) ->
@@ -227,7 +243,10 @@ handle_cast({complete_load, Tree}, State=#state{loading=Loading})
                                     fun binary_extractfun/2)
         end,
     Tree0 = lists:foldr(LoadFun, Tree, State#state.change_queue),
-    aae_util:log("C0008", [length(State#state.change_queue)], logs()),
+    aae_util:log("C0008",
+                    [length(State#state.change_queue)],
+                    logs(),
+                    State#state.log_levels),
     {noreply, State#state{loading = false, change_queue = [], tree = Tree0}};
 handle_cast({mark_dirtysegments, SegmentList, FoldGUID}, State) ->
     case State#state.loading of 
@@ -245,7 +264,8 @@ handle_cast({replace_dirtysegments, SegmentMap, FoldGUID}, State) ->
                 true ->
                     aae_util:log("C0006", 
                                     [State#state.partition_id, SegID, NewHash],
-                                    logs()),
+                                    logs(),
+                                    State#state.log_levels),
                     leveled_tictac:alter_segment(SegID, NewHash, TreeAcc);
                 false ->
                     TreeAcc
@@ -262,8 +282,13 @@ handle_cast({replace_dirtysegments, SegmentMap, FoldGUID}, State) ->
             {noreply, State}
     end;
 handle_cast(destroy, State) ->
-    aae_util:log("C0004", [State#state.partition_id], logs()),
-    {stop, normal, State}.
+    aae_util:log("C0004",
+                    [State#state.partition_id],
+                    logs(),
+                    State#state.log_levels),
+    {stop, normal, State};
+handle_cast({log_levels, LogLevels}, State) ->
+    {noreply, State#state{log_levels = LogLevels}}.
 
 
 handle_info(_Info, State) ->
@@ -289,35 +314,39 @@ flatten_id({Index, N}) ->
 flatten_id(ID) ->
     integer_to_list(ID).
 
--spec save_to_disk(list(), integer(), leveled_tictac:tictactree()) -> ok.
+-spec save_to_disk(list(),
+                    integer(),
+                    leveled_tictac:tictactree(),
+                    aae_util:log_levels()|undefined) -> ok.
 %% @doc
 %% Save the TreeCache to disk, with a checksum so thatit can be 
 %% validated on read.
-save_to_disk(RootPath, SaveSQN, TreeCache) ->
+save_to_disk(RootPath, SaveSQN, TreeCache, LogLevels) ->
     Serialised = term_to_binary(leveled_tictac:export_tree(TreeCache)),
     CRC32 = erlang:crc32(Serialised),
     ok = filelib:ensure_dir(RootPath),
     PendingName = integer_to_list(SaveSQN) ++ ?PENDING_EXT,
-    aae_util:log("C0003", [RootPath, PendingName], logs()),
+    aae_util:log("C0003", [RootPath, PendingName], logs(), LogLevels),
     ok = file:write_file(filename:join(RootPath, PendingName),
                             <<CRC32:32/integer, Serialised/binary>>,
                             [raw]),
     file:rename(filename:join(RootPath, PendingName), 
                     form_cache_filename(RootPath, SaveSQN)).
 
--spec open_from_disk(list()) -> {leveled_tictac:tictactree()|none, integer()}.
+-spec open_from_disk(list(), aae_util:log_levels()|undefined)
+                            -> {leveled_tictac:tictactree()|none, integer()}.
 %% @doc
 %% Open most recently saved TicTac tree cache file on disk, deleting all 
 %% others both used and unused - to save an out of date tree from being used
 %% following a subsequent crash
-open_from_disk(RootPath) ->
+open_from_disk(RootPath, LogLevels) ->
     ok = filelib:ensure_dir(RootPath),
     {ok, Filenames} = file:list_dir(RootPath),
     FileFilterFun = 
         fun(FN, FinalFiles) ->
             case filename:extension(FN) of 
                 ?PENDING_EXT ->
-                    aae_util:log("C0001", [FN], logs()),
+                    aae_util:log("C0001", [FN], logs(), LogLevels),
                     ok = file:delete(filename:join(RootPath, FN)),
                     FinalFiles;
                 ?FINAL_EXT ->
@@ -347,7 +376,7 @@ open_from_disk(RootPath) ->
                     {leveled_tictac:import_tree(binary_to_term(STC)), 
                         HeadSQN +  1};
                 _ ->
-                    aae_util:log("C0002", [FileToUse], logs()),
+                    aae_util:log("C0002", [FileToUse], logs(), LogLevels),
                     {none, 1}
             end
     end.
@@ -419,8 +448,8 @@ setup_savedcaches(RootPath) ->
     Tree2 = leveled_tictac:add_kv(Tree1, 
                                     {<<"K2">>}, {<<"V2">>}, 
                                     fun({K}, {V}) -> {K, V} end),
-    ok = save_to_disk(RootPath, 1, Tree1),
-    ok = save_to_disk(RootPath, 2, Tree2),
+    ok = save_to_disk(RootPath, 1, Tree1, undefined),
+    ok = save_to_disk(RootPath, 2, Tree2, undefined),
     Tree2.
 
 clean_saveopen_test() ->
@@ -434,10 +463,10 @@ clean_saveopen_test() ->
     UnrelatedFN = filename:join(RootPath, "alt.file"),
     ok = file:write_file(UnrelatedFN, <<"no_delete">>),
 
-    {Tree3, SaveSQN} = open_from_disk(RootPath),
+    {Tree3, SaveSQN} = open_from_disk(RootPath, undefined),
     ?assertMatch(3, SaveSQN),
     ?assertMatch([], leveled_tictac:find_dirtyleaves(Tree2, Tree3)),
-    ?assertMatch({none, 1}, open_from_disk(RootPath)),
+    ?assertMatch({none, 1}, open_from_disk(RootPath, undefined)),
     
     ?assertMatch({ok, <<"no_delete">>}, file:read_file(UnrelatedFN)),
     ?assertMatch({error, enoent}, file:read_file(NextFN)),
@@ -460,7 +489,7 @@ corrupt_save_test() ->
     BrokenCacheCheckFun =
         fun(BrokenCache) ->
             ok = file:write_file(BestFN, BrokenCache),
-            R = open_from_disk(RootPath),
+            R = open_from_disk(RootPath, undefined),
             ?assertMatch({none, 1}, R)
         end,
     ok = lists:foreach(BrokenCacheCheckFun, BrokenCaches),
@@ -478,7 +507,7 @@ simple_test() ->
     AlternateKeys = lists:map(GenerateKeyFun, lists:seq(61, 80)),
     RemoveKeys = lists:map(GenerateKeyFun, lists:seq(81, 100)),
 
-    {ok, AAECache0} = cache_new(RootPath, PartitionID),
+    {ok, AAECache0} = cache_new(RootPath, PartitionID, undefined),
     
     {AddFun, AlterFun, RemoveFun} = test_setup_funs(InitialKeys),
     
@@ -486,7 +515,7 @@ simple_test() ->
     
     ok = cache_close(AAECache0),
 
-    {true, AAECache1} = cache_open(RootPath, PartitionID),
+    {true, AAECache1} = cache_open(RootPath, PartitionID, undefined),
     
     lists:foreach(AlterFun(AAECache1), AlternateKeys),
     lists:foreach(RemoveFun(AAECache1), RemoveKeys),
@@ -524,7 +553,7 @@ replace_test() ->
     AlternateKeys = lists:map(GenerateKeyFun, lists:seq(61, 80)),
     RemoveKeys = lists:map(GenerateKeyFun, lists:seq(81, 100)),
     
-    {ok, AAECache0} = cache_new(RootPath, PartitionID),
+    {ok, AAECache0} = cache_new(RootPath, PartitionID, undefined),
     
     {AddFun, AlterFun, RemoveFun} = test_setup_funs(InitialKeys),
     
@@ -585,7 +614,7 @@ dirty_segment_test() ->
     PartitionID = 99,
     aae_util:clean_subdir(RootPath ++ "/" ++ integer_to_list(PartitionID)),
 
-    {ok, AAECache0} = cache_new(RootPath, PartitionID),
+    {ok, AAECache0} = cache_new(RootPath, PartitionID, undefined),
     AddFun = 
         fun(I) ->
             K = integer_to_binary(I),

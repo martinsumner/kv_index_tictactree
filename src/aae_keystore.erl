@@ -22,7 +22,8 @@
                 {gen_fsm, send_event, 2},
                 {gen_fsm, sync_send_event, 2},
                 {gen_fsm, sync_send_event, 3},
-                {gen_fsm, sync_send_all_state_event, 2}
+                {gen_fsm, sync_send_all_state_event, 2},
+                {gen_fsm, send_all_state_event, 2}
                 ]}).
 -endif.
 
@@ -42,15 +43,16 @@
             native/2,
             native/3]).
 
--export([store_parallelstart/2,
-            store_nativestart/3,
+-export([store_parallelstart/3,
+            store_nativestart/4,
             store_startupdata/1,
             store_close/1,
             store_mput/2,
             store_mload/2,
             store_prompt/2,
             store_fold/8,
-            store_fetchclock/3]).
+            store_fetchclock/3,
+            store_loglevel/2]).
 
 -export([define_addobjectspec/3,
             define_delobjectspec/3,
@@ -72,7 +74,8 @@
                 load_store :: pid()|undefined,
                 load_guid :: list()|undefined,
                 backend_opts = [] :: list(),
-                trim_count = 0 :: integer()}).
+                trim_count = 0 :: integer(),
+                log_levels :: aae_util:log_levels()|undefined}).
 
 -record(manifest, {current_guid :: list()|undefined, 
                     pending_guid :: list()|undefined, 
@@ -193,33 +196,42 @@
 %%% API
 %%%============================================================================
 
--spec store_parallelstart(list(), parallel_stores()) -> 
+-spec store_parallelstart(list(),
+                            parallel_stores(),
+                            aae_util:log_levels()|undefined) -> 
                 {ok, {os:timestamp()|never, boolean()}, pid()}.
 %% @doc
 %% Start a store to be run in parallel mode
-store_parallelstart(Path, leveled_so) ->
+store_parallelstart(Path, leveled_so, LogLevels) ->
+    MinLevel = aae_util:min_loglevel(LogLevels),
     Opts = 
         [{root_path, Path}, 
             {native, {false, leveled_so}}, 
-            {backend_opts, ?LEVELED_BACKEND_OPTS}],
+            {backend_opts, [{log_level, MinLevel}|?LEVELED_BACKEND_OPTS]},
+            {log_levels, LogLevels}],
     {ok, Pid} = gen_fsm:start_link(?MODULE, [Opts], []),
     store_startupdata(Pid);
-store_parallelstart(Path, leveled_ko) ->
+store_parallelstart(Path, leveled_ko, LogLevels) ->
+    MinLevel = aae_util:min_loglevel(LogLevels),
     Opts = 
         [{root_path, Path}, 
             {native, {false, leveled_ko}}, 
-            {backend_opts, ?LEVELED_BACKEND_OPTS}],
+            {backend_opts, [{log_level, MinLevel}|?LEVELED_BACKEND_OPTS]},
+            {log_levels, LogLevels}],
     {ok, Pid} = gen_fsm:start_link(?MODULE, [Opts], []),
     store_startupdata(Pid).
 
--spec store_nativestart(list(), native_stores(), pid()) ->
+-spec store_nativestart(list(), native_stores(), pid(),
+                        aae_util:log_levels()|undefined) ->
                 {ok, {os:timestamp()|never, boolean()}, pid()}.
 %% @doc
 %% Start a keystore in native mode.  In native mode the store is just a pass
 %% through for queries - and there will be no puts
-store_nativestart(Path, NativeStoreType, BackendPid) ->
+store_nativestart(Path, NativeStoreType, BackendPid, LogLevels) ->
     Opts = 
-        [{root_path, Path}, {native, {true, NativeStoreType, BackendPid}}],
+        [{root_path, Path},
+            {native, {true, NativeStoreType, BackendPid}},
+            {log_levels, LogLevels}],
     {ok, Pid} = gen_fsm:start_link(?MODULE, [Opts], []),
     store_startupdata(Pid).
 
@@ -311,14 +323,22 @@ store_fold(Pid, RLimiter, SLimiter, LMDLimiter, MaxObjectCount,
 store_fetchclock(Pid, Bucket, Key) ->
     gen_fsm:sync_send_event(Pid, {fetch_clock, Bucket, Key}, infinity).
 
+
+-spec store_loglevel(pid(), aae_util:log_levels()) -> ok.
+%% @doc
+%% Alter the log level at runtime
+store_loglevel(Pid, LogLevels) ->
+    gen_fsm:send_all_state_event(Pid, {log_level, LogLevels}).
+
 %%%============================================================================
 %%% gen_fsm callbacks
 %%%============================================================================
 
 init([Opts]) ->
     RootPath = aae_util:get_opt(root_path, Opts),
+    LogLevels = aae_util:get_opt(log_levels, Opts),
     Manifest0 =
-        case open_manifest(RootPath) of 
+        case open_manifest(RootPath, LogLevels) of 
             false ->
                 GUID = leveled_util:generate_uuid(),
                 #manifest{current_guid = GUID};
@@ -336,7 +356,7 @@ init([Opts]) ->
                                         RootPath,
                                         Manifest1#manifest.current_guid),
             
-            ok = store_manifest(RootPath, Manifest1),
+            ok = store_manifest(RootPath, Manifest1, LogLevels),
             {ok, 
                 parallel, 
                 #state{store = Store, 
@@ -344,7 +364,8 @@ init([Opts]) ->
                         root_path = RootPath,
                         current_guid = Manifest0#manifest.current_guid,
                         last_rebuild = LastRebuild,
-                        backend_opts = BackendOpts0}};
+                        backend_opts = BackendOpts0,
+                        log_levels = LogLevels}};
         {true, StoreType, BackendPid} ->
             {ok, 
                 native,
@@ -352,7 +373,8 @@ init([Opts]) ->
                         store_type = StoreType,
                         root_path = RootPath,
                         current_guid = Manifest0#manifest.current_guid,
-                        last_rebuild = Manifest0#manifest.last_rebuild}}
+                        last_rebuild = Manifest0#manifest.last_rebuild,
+                        log_levels = LogLevels}}
     end.
 
 loading({fold, Range, Segments, LMD, Count, FoldFun, InitAcc, Elements},
@@ -411,7 +433,10 @@ loading({mput, ObjectSpecs}, State) ->
         ObjectCount1 div ?CHANGEQ_LOGFREQ > ObjectCount0 div ?CHANGEQ_LOGFREQ,
     case ToLog of 
         true ->
-            aae_util:log("KS001", [State#state.id, ObjectCount1], logs());
+            aae_util:log("KS001",
+                            [State#state.id, ObjectCount1],
+                            logs(),
+                            State#state.log_levels);
         false ->
             ok
     end,
@@ -425,7 +450,10 @@ loading({mload, ObjectSpecs}, State) ->
         LoadCount1 div ?CHANGEQ_LOGFREQ > LoadCount0 div ?CHANGEQ_LOGFREQ,
     case ToLog of 
         true ->
-            aae_util:log("KS004", [State#state.id, LoadCount1], logs());
+            aae_util:log("KS004",
+                            [State#state.id, LoadCount1],
+                            logs(),
+                            State#state.log_levels);
         false ->
             ok
     end,
@@ -434,13 +462,17 @@ loading({prompt, rebuild_complete}, State) ->
     StoreType = State#state.store_type,
     LoadStore = State#state.load_store,
     GUID = State#state.load_guid,
-    aae_util:log("KS007", [rebuild_complete, GUID], logs()),
+    aae_util:log("KS007",
+                    [rebuild_complete, GUID],
+                    logs(),
+                    State#state.log_levels),
     LoadFun = fun(OS) -> do_load(StoreType, LoadStore, OS) end,
     lists:foreach(LoadFun, lists:reverse(State#state.change_queue)),
     LastRebuild = os:timestamp(),
     ok = store_manifest(State#state.root_path, 
                         #manifest{current_guid = GUID,
-                                    last_rebuild = LastRebuild}),
+                                    last_rebuild = LastRebuild},
+                        State#state.log_levels),
     ok = delete_store(StoreType, State#state.store),
     {next_state, 
         parallel, 
@@ -458,28 +490,39 @@ parallel({mput, ObjectSpecs}, State) ->
     {next_state, parallel, State#state{trim_count = TrimCount}};
 parallel({prompt, rebuild_start}, State) ->
     GUID = leveled_util:generate_uuid(),
-    aae_util:log("KS007", [rebuild_start, GUID], logs()),
+    aae_util:log("KS007",
+                    [rebuild_start, GUID],
+                    logs(),
+                    State#state.log_levels),
     {ok, Store} =  open_store(State#state.store_type, 
                                 State#state.backend_opts, 
                                 State#state.root_path, 
                                 GUID),
     ok = store_manifest(State#state.root_path, 
                         #manifest{current_guid = State#state.current_guid,
-                                    pending_guid = GUID}),
+                                    pending_guid = GUID},
+                        State#state.log_levels),
     {next_state, loading, State#state{load_store = Store, load_guid = GUID}}.
 
 native({prompt, rebuild_start}, State) ->
     GUID = leveled_util:generate_uuid(),
-    aae_util:log("KS007", [rebuild_start, GUID], logs()),
+    aae_util:log("KS007",
+                    [rebuild_start, GUID],
+                    logs(),
+                    State#state.log_levels),
     
     {next_state, native, State#state{current_guid = GUID}};
 native({prompt, rebuild_complete}, State) ->
     GUID = State#state.current_guid,
-    aae_util:log("KS007", [rebuild_complete, GUID], logs()),
+    aae_util:log("KS007",
+                    [rebuild_complete, GUID],
+                    logs(),
+                    State#state.log_levels),
     LastRebuild = os:timestamp(),
     ok = store_manifest(State#state.root_path, 
                         #manifest{current_guid = GUID,
-                                    last_rebuild = LastRebuild}),
+                                    last_rebuild = LastRebuild},
+                        State#state.log_levels),
     {next_state, native, State#state{last_rebuild = LastRebuild}}.
 
 
@@ -487,8 +530,13 @@ native({prompt, rebuild_complete}, State) ->
 handle_sync_event(current_status, _From, StateName, State) ->
     {reply, {StateName, State#state.current_guid}, StateName, State}.
 
-handle_event(_Msg, StateName, State) ->
-    {next_state, StateName, State}.
+handle_event({log_level, LogLevels}, StateName, State) ->
+    MinLevel = aae_util:min_loglevel(LogLevels),
+    BackendOpts = [{log_level, MinLevel}|?LEVELED_BACKEND_OPTS],
+        % Change of log level will take place after next store is started
+    {next_state,
+        StateName,
+        State#state{log_levels = LogLevels, backend_opts = BackendOpts}}.
 
 handle_info(_Msg, StateName, State) ->
     {next_state, StateName, State}.
@@ -498,7 +546,8 @@ terminate(normal, native, _State) ->
 terminate(normal, _StateName, State) ->
     store_manifest(State#state.root_path, 
                     #manifest{current_guid = State#state.current_guid,
-                                last_rebuild = State#state.last_rebuild}).
+                                last_rebuild = State#state.last_rebuild},
+                    State#state.log_levels).
 
 code_change(_OldVsn, StateName, State, _Extra) ->
     {ok, StateName, State}.
@@ -869,7 +918,6 @@ do_fetchclock(leveled_so, Store, Bucket, Key, Seg) ->
 do_fold(leveled_so, Store, Range, SegFilter, LMDRange, MoC,
                                             FoldObjectsFun, InitAcc, Elements)
                                                         when is_integer(MoC) ->
-    aae_util:log("KS008", [], logs()),
     {async, Runner} = 
         do_fold(leveled_so, 
                 Store, Range, SegFilter, LMDRange, false,
@@ -1003,11 +1051,12 @@ range_check(_Range, _B, _K) ->
     false.
 
 
--spec open_manifest(list()) -> {ok, manifest()}|false.
+-spec open_manifest(list(), aae_util:log_levels()|undefined)
+                                                    -> {ok, manifest()}|false.
 %% @doc
 %% Open the manifest file, check the CRC and return the active folder 
 %% reference
-open_manifest(RootPath) ->
+open_manifest(RootPath, LogLevels) ->
     FN = filename:join(RootPath, ?MANIFEST_FN ++ ?COMLPETE_EXT),
     case filelib:is_file(FN) of 
         true ->
@@ -1015,23 +1064,33 @@ open_manifest(RootPath) ->
             case erlang:crc32(Manifest) of 
                 CRC32 ->
                     M = binary_to_term(Manifest),
-                    aae_util:log("KS005", [M#manifest.current_guid], logs()),
+                    aae_util:log("KS005",
+                                    [M#manifest.current_guid],
+                                    logs(),
+                                    LogLevels),
                     {ok, M};
                 _ ->
-                    aae_util:log("KS002", [RootPath, "crc32"], logs()),
+                    aae_util:log("KS002",
+                                    [RootPath, "crc32"],
+                                    logs(),
+                                    LogLevels),
                     false
             end;
         false ->
-            aae_util:log("KS002", [RootPath, "missing"], logs()),
+            aae_util:log("KS002",
+                            [RootPath, "missing"],
+                            logs(),
+                            LogLevels),
             false
     end.
             
--spec store_manifest(list(), manifest()) -> ok.
+-spec store_manifest(list(), manifest(), aae_util:log_levels()|undefined)
+                                                                        -> ok.
 %% @doc
 %% Store tham manifest file, adding a CRC, and ensuring it is readable before
 %% returning
-store_manifest(RootPath, Manifest) ->
-    aae_util:log("KS003", [Manifest#manifest.current_guid], logs()),
+store_manifest(RootPath, Manifest, LogLevels) ->
+    aae_util:log("KS003", [Manifest#manifest.current_guid], logs(), LogLevels),
     ManBin = term_to_binary(Manifest),
     CRC32 = erlang:crc32(ManBin),
     PFN = filename:join(RootPath, ?MANIFEST_FN ++ ?PENDING_EXT),
@@ -1082,10 +1141,7 @@ logs() ->
         {"KS006",
             {warn, "Pending store is garbage and should be deleted at ~s"}},
         {"KS007",
-            {info, "Rebuild prompt ~w with GUID ~s"}},
-        {"KS008",
-            {warn, "Count Limit on fold to be ignored as segment-ordered" 
-                    ++ " backend so all results will be returned"}}
+            {info, "Rebuild prompt ~w with GUID ~s"}}
 
         ].
 
@@ -1117,18 +1173,20 @@ leveled_ko_emptybuildandclose_test() ->
 empty_buildandclose_tester(StoreType) ->
     RootPath = "test/keystore0/",
     aae_util:clean_subdir(RootPath),
-    {ok, {never, true}, Store0} = store_parallelstart(RootPath, StoreType),
+    {ok, {never, true}, Store0} =
+        store_parallelstart(RootPath, StoreType, undefined),
     
-    {ok, Manifest0} = open_manifest(RootPath),
+    {ok, Manifest0} = open_manifest(RootPath, undefined),
     {parallel, CurrentGUID} = store_currentstatus(Store0),
     ?assertMatch(CurrentGUID, Manifest0#manifest.current_guid),
     ?assertMatch(none, Manifest0#manifest.shutdown_guid),
     
     ok = store_close(Store0),
-    {ok, Manifest1} = open_manifest(RootPath),
+    {ok, Manifest1} = open_manifest(RootPath, undefined),
     ?assertMatch(CurrentGUID, Manifest1#manifest.current_guid),
     
-    {ok, {never, true}, Store1} = store_parallelstart(RootPath, StoreType),
+    {ok, {never, true}, Store1} =
+        store_parallelstart(RootPath, StoreType, undefined),
     ?assertMatch({parallel, CurrentGUID}, store_currentstatus(Store1)),
     ok = store_close(Store1),
     
@@ -1138,19 +1196,19 @@ bad_manifest_test() ->
     RootPath = "test/keystore1/",
     ok = filelib:ensure_dir(RootPath),
     aae_util:clean_subdir(RootPath),
-    ?assertMatch(false, open_manifest(RootPath)),
+    ?assertMatch(false, open_manifest(RootPath, undefined)),
     Manifest = #manifest{current_guid = "aaa-111"},
-    ok = store_manifest(RootPath, Manifest),
-    ?assertMatch({ok, Manifest}, open_manifest(RootPath)),
+    ok = store_manifest(RootPath, Manifest, undefined),
+    ?assertMatch({ok, Manifest}, open_manifest(RootPath, [])),
     ManifestFN = filename:join(RootPath, ?MANIFEST_FN ++ ?COMLPETE_EXT),
     {ok, Bin0} = file:read_file(ManifestFN),
     Bin1 = aae_util:flip_byte(Bin0, 0, byte_size(Bin0)),
     ok = file:delete(ManifestFN),
     ok = file:write_file(ManifestFN, Bin1),
-    ?assertMatch(false, open_manifest(RootPath)),
+    ?assertMatch(false, open_manifest(RootPath, undefined)),
     ok = file:delete(ManifestFN),
     ok = file:write_file(ManifestFN, Bin0),
-    ?assertMatch({ok, Manifest}, open_manifest(RootPath)),
+    ?assertMatch({ok, Manifest}, open_manifest(RootPath, [])),
     aae_util:clean_subdir(RootPath).
 
 
@@ -1186,7 +1244,8 @@ load_tester(StoreType) ->
     {L3, R3} = lists:split(32, R2),
     {L4, L5} = lists:split(32, R3),
 
-    {ok, {never, true}, Store0} = store_parallelstart(RootPath, StoreType),
+    {ok, {never, true}, Store0} =
+        store_parallelstart(RootPath, StoreType, undefined),
     ok = store_mput(Store0, L1),
     ok = store_mput(Store0, L2),
     ok = store_mput(Store0, L3),
@@ -1251,7 +1310,7 @@ load_tester(StoreType) ->
     ok = store_close(Store0),
 
     {ok, {LastRebuildTime, false}, Store1} 
-        = store_parallelstart(RootPath, StoreType),
+        = store_parallelstart(RootPath, StoreType, undefined),
     
     ?assertMatch(true, LastRebuildTime > RebuildCompleteTime),
    
@@ -1374,7 +1433,8 @@ big_load_tester(StoreType) ->
 
     GenerateKeyFun = aae_util:test_key_generator(v1),
 
-    {ok, {never, true}, Store0} = store_parallelstart(RootPath, StoreType),
+    {ok, {never, true}, Store0} =
+        store_parallelstart(RootPath, StoreType, undefined),
 
     InitialKeys = 
         lists:map(GenerateKeyFun, lists:seq(1, KeyCount)),
@@ -1406,7 +1466,7 @@ big_load_tester(StoreType) ->
     ok = store_close(Store0),
 
     {ok, {RebuildTS, false}, Store1} 
-        = store_parallelstart(RootPath, StoreType),
+        = store_parallelstart(RootPath, StoreType, undefined),
     ?assertMatch(true, RebuildTS < os:timestamp()),
     
     timed_fold(Store1, KeyCount, FoldObjectsFun, StoreType, true),
@@ -1419,7 +1479,7 @@ big_load_tester(StoreType) ->
                     {true, M};
                 false ->
                     timer:sleep(100),
-                    {ok, PMan0} = open_manifest(RootPath),
+                    {ok, PMan0} = open_manifest(RootPath, undefined),
                     {not (PMan0#manifest.pending_guid == undefined), PMan0}
             end
         end,
@@ -1432,7 +1492,7 @@ big_load_tester(StoreType) ->
     ?assertMatch(undefined, M0#manifest.pending_guid),
 
     {ok, {RebuildTS2, false}, Store2} 
-        = store_parallelstart(RootPath, StoreType),
+        = store_parallelstart(RootPath, StoreType, undefined),
     ?assertMatch(RebuildTS, RebuildTS2),
 
     timed_fold(Store2, KeyCount, FoldObjectsFun, StoreType, true),
@@ -1469,7 +1529,6 @@ timed_bulk_put(Store, ObjectSpecs, StoreType) ->
 
 coverage_cheat_test() ->
     State = #state{store_type = leveled_so},
-    {next_state, native, _State} = handle_event(null, native, State),
     {next_state, native, _State} = handle_info(null, native, State),
     {ok, native, _State} = code_change(null, native, State, null).
 
