@@ -13,6 +13,9 @@
 -compile([export_all, nowarn_export_all]).
 -compile({nowarn_deprecated_function, [{erlang, now, 0}]}).
 
+-define(LOG_LEVELS, [warn, error, critical]).
+-define(EXCHANGE_PAUSE_MS, 10).
+
 %% -- State and state functions ----------------------------------------------
 initial_state() ->
     #{aae_controllers => 
@@ -108,7 +111,9 @@ start_args(S) ->
 
 start(Path, KeyStoreType, IsEmpty, RebuildSchedule, PrefLists, RootPath) ->
     case catch aae_controller:aae_start(KeyStoreType, IsEmpty, RebuildSchedule, PrefLists, 
-                                         filename:join(RootPath, Path), fun object_split/1) of
+                                         filename:join(RootPath, Path),
+                                         fun object_split/1,
+                                         ?LOG_LEVELS) of
         {ok, Pid} -> Pid;
         Other -> Other
     end.
@@ -239,9 +244,11 @@ exchange(_, _, [BluePid, BluePrefLists], [PinkPid, PinkPrefLists]) ->
     BlueList =  [{testutil:exchange_sendfun(BluePid), BluePrefLists}],
     PinkList =  [{testutil:exchange_sendfun(PinkPid), PinkPrefLists}],
     QuickCheck = self(),
-    {ok, Pid, _UUID} = aae_exchange:start(BlueList, PinkList, 
+    {ok, Pid, _UUID} = aae_exchange:start(full, BlueList, PinkList, 
                                           fun(KeyList) -> QuickCheck ! {self(), repair, KeyList} end, %% do not repair at all 
-                                          fun(Result) -> QuickCheck ! {self(), reply, Result} end),
+                                          fun(Result) -> QuickCheck ! {self(), reply, Result} end,
+                                          none,
+                                          [{transition_pause_ms, ?EXCHANGE_PAUSE_MS}]),
     receive
         {Pid, reply, {root_compare, 0}} ->            
             {root_compare, 0};
