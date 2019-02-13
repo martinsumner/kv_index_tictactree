@@ -11,3 +11,4 @@ rel/example_project
 .DS_Store
 _build/*
 rebar.lock
+aae_data/*
