@@ -248,7 +248,8 @@ exchange(_, _, [BluePid, BluePrefLists], [PinkPid, PinkPrefLists]) ->
                                           fun(KeyList) -> QuickCheck ! {self(), repair, KeyList} end, %% do not repair at all 
                                           fun(Result) -> QuickCheck ! {self(), reply, Result} end,
                                           none,
-                                          [{transition_pause_ms, ?EXCHANGE_PAUSE_MS}]),
+                                          [{transition_pause_ms, ?EXCHANGE_PAUSE_MS},
+                                            {log_levels, ?LOG_LEVELS}]),
     receive
         {Pid, reply, {root_compare, 0}} ->            
             {root_compare, 0};
