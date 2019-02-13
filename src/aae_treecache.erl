@@ -183,7 +183,7 @@ init([Opts]) ->
                         {Tree, SQN, true}
                 end
         end,
-    aae_util:log("C0005", [IsRestored, PartitionID], logs()),
+    aae_util:log("C0005", [IsRestored, PartitionID], logs(), LogLevels),
     process_flag(trap_exit, true),
     {ok, #state{save_sqn = SaveSQN, 
                 tree = StartTree, 

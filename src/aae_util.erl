@@ -57,8 +57,10 @@ log(LogRef, Subs, LogBase, SupportedLogLevels) ->
     {LogRef0, {LogLevel, LogText}} = get_logreference(LogRef, LogBase),
     case lists:member(LogLevel, SupportedLogLevels) of
         true ->
-            io:format(format_time()
-                        ++ " " ++ LogRef0 ++ " ~w "
+            io:format(format_time() ++ " "
+                        ++ atom_to_list(LogLevel) ++ " "
+                        ++ LogRef0 ++ " "
+                        ++ "~w "
                         ++ LogText ++ "~n",
                         [self()|Subs]);
         false ->

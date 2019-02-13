@@ -175,7 +175,8 @@
                 exchange_filters = none :: filters(),
                 last_tree_compare = none :: list(non_neg_integer())|none,
                 tree_compares = 0 :: integer(),
-                transition_pause_ms = ?TRANSITION_PAUSE_MS :: pos_integer()
+                transition_pause_ms = ?TRANSITION_PAUSE_MS :: pos_integer(),
+                log_levels :: aae_util:log_levels()|undefined
                 }).
 
 -type input_list() :: [{fun(), list(tuple())|all}].
@@ -279,8 +280,12 @@ init([{full, none},
                     pink_returns = {PinkTarget, PinkTarget},
                     blue_returns = {BlueTarget, BlueTarget},
                     exchange_type = full},
-    aae_util:log("EX001", [ExChID, PinkTarget + BlueTarget], logs()),
-    {ok, prepare_full_exchange, process_options(Opts, State), 0};
+    State0 = process_options(Opts, State),
+    aae_util:log("EX001",
+                    [ExChID, PinkTarget + BlueTarget],
+                    logs(),
+                    State0#state.log_levels),
+    {ok, prepare_full_exchange, State0, 0};
 init([{partial, Filters},
         BlueList, PinkList, RepairFun, ReplyFun, ExChID, Opts]) ->
     leveled_rand:seed(),
@@ -295,14 +300,19 @@ init([{partial, Filters},
                     blue_returns = {BlueTarget, BlueTarget},
                     exchange_type = partial,
                     exchange_filters = Filters},
-    aae_util:log("EX001", [ExChID, PinkTarget + BlueTarget], logs()),
-    {ok, prepare_partial_exchange, process_options(Opts, State), 0}.
+    State0 = process_options(Opts, State),
+    aae_util:log("EX001",
+                    [ExChID, PinkTarget + BlueTarget],
+                    logs(),
+                    State0#state.log_levels),
+    {ok, prepare_partial_exchange, State0, 0}.
 
 
 prepare_full_exchange(timeout, State) ->
     aae_util:log("EX006",
                     [prepare_tree_exchange, State#state.exchange_id],
-                    logs()),
+                    logs(),
+                    State#state.log_levels),
     trigger_next(fetch_root, 
                     root_compare, 
                     fun merge_root/2, 
@@ -314,7 +324,8 @@ prepare_full_exchange(timeout, State) ->
 prepare_partial_exchange(timeout, State) ->
     aae_util:log("EX006",
                     [prepare_partial_exchange, State#state.exchange_id],
-                    logs()),
+                    logs(),
+                    State#state.log_levels),
     Filters = State#state.exchange_filters,
     ScanTimeout = filtered_timeout(Filters),
     TreeSize = element(?FILTERIDX_TRS, Filters),
@@ -327,7 +338,10 @@ prepare_partial_exchange(timeout, State) ->
                     State).
 
 root_compare(timeout, State) ->
-    aae_util:log("EX006", [root_compare, State#state.exchange_id], logs()),
+    aae_util:log("EX006",
+                    [root_compare, State#state.exchange_id],
+                    logs(),
+                    State#state.log_levels),
     BranchIDs = compare_roots(State#state.blue_acc, State#state.pink_acc),
     trigger_next(fetch_root, 
                     root_confirm, 
@@ -338,7 +352,10 @@ root_compare(timeout, State) ->
                     State#state{root_compare_deltas = BranchIDs}).
 
 tree_compare(timeout, State) ->
-    aae_util:log("EX006", [root_compare, State#state.exchange_id], logs()),
+    aae_util:log("EX006",
+                    [root_compare, State#state.exchange_id],
+                    logs(),
+                    State#state.log_levels),
     DirtyLeaves = compare_trees(State#state.blue_acc, State#state.pink_acc),
     TreeCompares = State#state.tree_compares + 1,
     {StillDirtyLeaves, Reduction} = 
@@ -386,7 +403,8 @@ tree_compare(timeout, State) ->
             SegmentIDs = select_ids(StillDirtyLeaves, 
                                     ?MAX_RESULTS,
                                     tree_compare, 
-                                    State#state.exchange_id),
+                                    State#state.exchange_id,
+                                    State#state.log_levels),
             % TODO - select_ids doesn't account for TreeSize
             Filters0 =
                 setelement(?FILTERIDX_SEG,
@@ -403,13 +421,17 @@ tree_compare(timeout, State) ->
     end.
 
 root_confirm(timeout, State) ->
-    aae_util:log("EX006", [root_confirm, State#state.exchange_id], logs()),
+    aae_util:log("EX006",
+                    [root_confirm, State#state.exchange_id],
+                    logs(),
+                    State#state.log_levels),
     BranchIDs0 = State#state.root_compare_deltas,
     BranchIDs1 = compare_roots(State#state.blue_acc, State#state.pink_acc),
     BranchIDs = select_ids(intersect_ids(BranchIDs0, BranchIDs1), 
                             ?MAX_RESULTS, 
                             root_confirm, 
-                            State#state.exchange_id),
+                            State#state.exchange_id,
+                            State#state.log_levels),
     trigger_next({fetch_branches, BranchIDs}, 
                     branch_compare, 
                     fun merge_branches/2, 
@@ -419,7 +441,10 @@ root_confirm(timeout, State) ->
                     State#state{root_confirm_deltas = BranchIDs}).
 
 branch_compare(timeout, State) ->
-    aae_util:log("EX006", [branch_compare, State#state.exchange_id], logs()),
+    aae_util:log("EX006",
+                    [branch_compare, State#state.exchange_id],
+                    logs(),
+                    State#state.log_levels),
     SegmentIDs = compare_branches(State#state.blue_acc, State#state.pink_acc),
     trigger_next({fetch_branches, State#state.root_confirm_deltas}, 
                     branch_confirm, 
@@ -430,13 +455,17 @@ branch_compare(timeout, State) ->
                     State#state{branch_compare_deltas = SegmentIDs}).
 
 branch_confirm(timeout, State) ->
-    aae_util:log("EX006", [branch_confirm, State#state.exchange_id], logs()),
+    aae_util:log("EX006",
+                    [branch_confirm, State#state.exchange_id],
+                    logs(),
+                    State#state.log_levels),
     SegmentIDs0 = State#state.branch_compare_deltas,
     SegmentIDs1 = compare_branches(State#state.blue_acc, State#state.pink_acc),
     SegmentIDs = select_ids(intersect_ids(SegmentIDs0, SegmentIDs1), 
                             ?MAX_RESULTS,
                             branch_confirm, 
-                            State#state.exchange_id),
+                            State#state.exchange_id,
+                            State#state.log_levels),
     trigger_next({fetch_clocks, SegmentIDs}, 
                     clock_compare, 
                     fun merge_clocks/2, 
@@ -446,12 +475,20 @@ branch_confirm(timeout, State) ->
                     State#state{branch_confirm_deltas = SegmentIDs}).
 
 clock_compare(timeout, State) ->
-    aae_util:log("EX006", [clock_compare, State#state.exchange_id], logs()),
+    aae_util:log("EX006",
+                    [clock_compare, State#state.exchange_id],
+                    logs(),
+                    State#state.log_levels),
+    aae_util:log("EX008",
+                    [State#state.blue_acc, State#state.pink_acc],
+                    logs(),
+                    State#state.log_levels),
     RepairKeys = compare_clocks(State#state.blue_acc, State#state.pink_acc),
     RepairFun = State#state.repair_fun,
     aae_util:log("EX004", 
                     [State#state.exchange_id, length(RepairKeys)], 
-                    logs()),
+                    logs(),
+                    State#state.log_levels),
     RepairFun(RepairKeys),
     {stop, 
         normal, 
@@ -459,10 +496,16 @@ clock_compare(timeout, State) ->
 
 
 waiting_all_results({reply, not_supported, Colour}, State) ->
-    aae_util:log("EX010", [Colour, State#state.exchange_id], logs()),
+    aae_util:log("EX010",
+                    [Colour, State#state.exchange_id],
+                    logs(),
+                    State#state.log_levels),
     {stop, normal, State#state{pending_state = not_supported}};
 waiting_all_results({reply, Result, Colour}, State) ->
-    aae_util:log("EX007", [Colour, State#state.exchange_id], logs()),
+    aae_util:log("EX007",
+                    [Colour, State#state.exchange_id],
+                    logs(),
+                    State#state.log_levels),
     {PC, PT} = State#state.pink_returns,
     {BC, BT} = State#state.blue_returns,
     MergeFun = State#state.merge_fun,
@@ -498,7 +541,8 @@ waiting_all_results(timeout, State) ->
                     [State#state.pending_state, 
                         MissingCount, 
                         State#state.exchange_id], 
-                        logs()),
+                        logs(),
+                        State#state.log_levels),
     {stop, normal, State#state{pending_state = timeout}}.
 
 
@@ -522,7 +566,8 @@ terminate(normal, StateName, State) ->
                                 length(State#state.branch_compare_deltas),
                                 length(State#state.branch_confirm_deltas),
                                 length(State#state.key_deltas)], 
-                            logs());
+                            logs(),
+                            State#state.log_levels);
         partial ->
             aae_util:log("EX009", 
                             [StateName,
@@ -530,7 +575,8 @@ terminate(normal, StateName, State) ->
                                 length(State#state.tree_compare_deltas),
                                 State#state.tree_compares,
                                 length(State#state.key_deltas)], 
-                            logs())
+                            logs(),
+                            State#state.log_levels)
     end,
     ReplyFun = State#state.reply_fun,
     ReplyFun({State#state.pending_state, length(State#state.key_deltas)}).
@@ -600,7 +646,9 @@ merge_tree(Tree0, Tree1) ->
 process_options([], State) ->
     State;
 process_options([{transition_pause_ms, PauseMS}|Tail], State) ->
-    process_options(Tail, State#state{transition_pause_ms = PauseMS}).
+    process_options(Tail, State#state{transition_pause_ms = PauseMS});
+process_options([{log_levels, LogLevels}|Tail], State) ->
+    process_options(Tail, State#state{log_levels = LogLevels}).
 
 -spec trigger_next(any(), atom(), fun(), any(), boolean(), 
                                         integer(), exchange_state()) -> any().
@@ -713,7 +761,6 @@ compare_branches(BlueBranches, PinkBranches) ->
 compare_clocks(BlueList, PinkList) ->
     % Two lists of {B, K, VC} want to remove everything where {B, K, VC} is
     % the same in both lists
-    aae_util:log("EX008", [BlueList, PinkList], logs()),
 
     BlueSet = ordsets:from_list(BlueList),
     PinkSet = ordsets:from_list(PinkList),
@@ -778,14 +825,14 @@ intersect_ids(IDs0, IDs1) ->
     lists:filter(fun(ID) -> lists:member(ID, IDs1) end, IDs0).
 
 
--spec select_ids(list(integer()), pos_integer(), atom(), list()) 
-                                                        -> list(integer()).
+-spec select_ids(list(integer()), pos_integer(), atom(), list(),
+                    aae_util:log_levels()|undefined) -> list(integer()).
 %% @doc
 %% Select a cluster of IDs if the list of IDs is smaller than the maximum 
 %% output size.  The lookup based on these IDs will be segment based, so it 
 %% is expected that the tightest clustering will yield the most efficient 
 %% results. 
-select_ids(IDList, MaxOutput, StateName, ExchangeID) ->
+select_ids(IDList, MaxOutput, StateName, ExchangeID, LogLevels) ->
     IDList0 = lists:usort(IDList),
     FoldFun =
         fun(Idx, {BestIdx, MinOutput}) ->
@@ -802,7 +849,8 @@ select_ids(IDList, MaxOutput, StateName, ExchangeID) ->
         true ->
             aae_util:log("EX005", 
                             [ExchangeID, length(IDList0), StateName],
-                            logs()),
+                            logs(),
+                            LogLevels),
             {BestSliceStart, _Score} = 
                 lists:foldl(FoldFun, 
                             {0, infinity}, 
@@ -885,17 +933,23 @@ logs() ->
 
 select_id_test() ->
     L0 = [1, 2, 3],
-    ?assertMatch(L0, select_ids(L0, 3, root_confirm, "t0")),
+    ?assertMatch(L0, select_ids(L0, 3, root_confirm, "t0", undefined)),
     L1 = [1, 2, 3, 5],
-    ?assertMatch(L0, select_ids(L1, 3, root_confirm, "t1")),
+    ?assertMatch(L0, select_ids(L1, 3, root_confirm, "t1", undefined)),
     L2 = [1, 2, 3, 5, 6, 7, 8],
-    ?assertMatch(L0, select_ids(L2, 3, root_confirm, "t2")),
-    ?assertMatch([5, 6, 7, 8], select_ids(L2, 4, root_confirm, "t3")),
-    ?assertMatch(L0, select_ids(intersect_ids(L1, L2), 3, root_confirm, "t4")),
+    ?assertMatch(L0, select_ids(L2, 3, root_confirm, "t2", undefined)),
+    ?assertMatch([5, 6, 7, 8],
+                    select_ids(L2, 4, root_confirm, "t3", undefined)),
+    ?assertMatch(L0,
+                    select_ids(intersect_ids(L1, L2),
+                                3, root_confirm, "t4", undefined)),
     L3 = [8, 7, 1, 3, 2, 5, 6],
-    ?assertMatch(L0, select_ids(L3, 3, root_confirm, "t5")),
-    ?assertMatch([5, 6, 7, 8], select_ids(L3, 4, root_confirm, "t6")),
-    ?assertMatch(L0, select_ids(intersect_ids(L1, L3), 3, root_confirm, "t7")).
+    ?assertMatch(L0, select_ids(L3, 3, root_confirm, "t5", undefined)),
+    ?assertMatch([5, 6, 7, 8],
+                    select_ids(L3, 4, root_confirm, "t6", undefined)),
+    ?assertMatch(L0,
+                    select_ids(intersect_ids(L1, L3),
+                                3, root_confirm, "t7", undefined)).
 
 compare_clocks_test() ->
     KV1 = {<<"B1">>, <<"K1">>, [{a, 1}]},
