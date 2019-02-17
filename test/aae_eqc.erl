@@ -183,7 +183,7 @@ nextrebuild_post(S, [Path, _Pid], Res) ->
             
 
 nextrebuild_features(_S, [_, _Pid], Res) ->
-    [ {rebuild, Res} ].
+    [ {nextrebuild, Res} ].
 
 
 %%--- Operation: put ---
@@ -350,25 +350,24 @@ prop_aae() ->
     begin
         os:cmd("rm -rf " ++ Dir),
         {H, S, Res} = run_commands(Cmds, [{dir, Dir}]),
-        %% io:format("State = ~p~n", [S]),
         [ aae_controller:aae_close(maps:get(aae_controller, M)) || {_, M} <- started_controllers(S) ],
         CallFeatures = call_features(H),
         check_command_names(Cmds,
             measure(length, commands_length(Cmds),
             aggregate(with_title('Features'), CallFeatures,
-            featuresort(CallFeatures,
+            aggregate_feats(all_command_names(), CallFeatures,
             features(CallFeatures,
                 pretty_commands(?MODULE, Cmds, {H, S, Res},
                                 Res == ok))))))
     end)).
 
-featuresort([], Prop) ->
-    Prop;
-featuresort([{Key, Feature} | Features], Prop) ->
-    Same = [ F || {K, F} <- Features, K == Key],
-    Different =  [ {K, F} || {K, F} <- Features, K =/= Key],
-    aggregate(with_title(Key), [Feature | Same], 
-       featuresort(Different, Prop)).
+aggregate_feats([], _, Prop) -> Prop;
+aggregate_feats([atoms | Kinds], Features, Prop) ->
+    {Atoms, Rest} = lists:partition(fun is_atom/1, Features),
+    aggregate(with_title(atoms), Atoms, aggregate_feats(Kinds, Rest, Prop));
+aggregate_feats([Tag | Kinds], Features, Prop) ->
+    {Tuples, Rest} = lists:partition(fun(X) -> is_tuple(X) andalso element(1, X) == Tag end, Features),
+    aggregate(with_title(Tag), [ Arg || {_, Arg} <- Tuples ], aggregate_feats(Kinds, Rest, Prop)).
 
 
 bugs() -> bugs(10).
