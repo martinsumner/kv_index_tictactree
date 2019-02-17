@@ -109,6 +109,17 @@ start_args(S) ->
            {var, dir}
          ]).
 
+start_pre(S, [Path, _KeyStoreType, _IsEmpty, _RebuildSchedule, _PrefLists, _RootPath]) ->
+    Controllers = maps:get(aae_controllers, S, []),
+    case lists:keyfind(Path, 1, Controllers) of
+        false ->
+            %% Controller has not been started yet
+            true;
+        {_, M} ->
+            %% Check whether the controller is already started
+            not maps:is_key(aae_controller, M)
+    end.
+
 start(Path, KeyStoreType, IsEmpty, RebuildSchedule, PrefLists, RootPath) ->
     case catch aae_controller:aae_start(KeyStoreType, IsEmpty, RebuildSchedule, PrefLists, 
                                          filename:join(RootPath, Path),
