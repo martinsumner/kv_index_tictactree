@@ -13,7 +13,7 @@
 -compile([export_all, nowarn_export_all]).
 -compile({nowarn_deprecated_function, [{erlang, now, 0}]}).
 
--define(LOG_LEVELS, [warn, error, critical]).
+-define(LOG_LEVELS, [error, critical]).
 -define(EXCHANGE_PAUSE_MS, 10).
 
 %% -- State and state functions ----------------------------------------------
