@@ -63,7 +63,7 @@
 
 -record(state, {vnode :: pid()|undefined,
                 store :: pid()|undefined,
-                id = "KeyStore" :: any(),
+                id = key_store :: any(),
                 store_type :: parallel_stores()|native_stores(),
                 change_queue = [] :: list(),
                 change_queue_counter = 0 :: integer(),

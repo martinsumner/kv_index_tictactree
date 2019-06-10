@@ -59,8 +59,7 @@ log(LogRef, Subs, LogBase, SupportedLogLevels) ->
         true ->
             io:format(format_time() ++ " "
                         ++ atom_to_list(LogLevel) ++ " "
-                        ++ LogRef0 ++ " "
-                        ++ "~w "
+                        ++ LogRef0 ++ " ~w "
                         ++ LogText ++ "~n",
                         [self()|Subs]);
         false ->
@@ -81,18 +80,21 @@ log_timer(LogRef, Subs, StartTime, LogBase, SupportedLogLevels) ->
     {LogRef0, {LogLevel, LogText}} = get_logreference(LogRef, LogBase),
     case lists:member(LogLevel, SupportedLogLevels) of
         true ->
-            MicroS = timer:now_diff(os:timestamp(), StartTime),
-            {Unit, Time} = case MicroS of
-                                MicroS when MicroS < 1000 ->
-                                    {"microsec", MicroS};
-                                MicroS ->
-                                    {"ms", MicroS div 1000}
-                            end,
-            io:format(format_time()
-                            ++ " " ++ LogRef0 ++ " ~w "
-                            ++ LogText
-                            ++ " with time taken ~w " ++ Unit ++ "~n",
-                        [self()|Subs] ++ [Time]);
+            DurationText =
+                case timer:now_diff(os:timestamp(), StartTime) of
+                    US when US > 1000 ->
+                        " with us_duration=" ++ integer_to_list(US) ++
+                        " or ms_duration="
+                        ++ integer_to_list(US div 1000);
+                    US ->
+                        " with us_duration=" ++ integer_to_list(US)
+                end,
+            io:format(format_time() ++ " "
+                        ++ atom_to_list(LogLevel) ++ " "
+                        ++ LogRef0 ++ " ~w "
+                        ++ LogText
+                        ++ DurationText ++ "~n",
+                        [self()|Subs]);
         false ->
             ok
     end.
