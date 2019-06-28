@@ -11,10 +11,8 @@
 %% repeated access, and a relatively high proportion fo the overall cost in
 %% network bandwitdh.  These exchanges go through the following process:
 %%
-%% - Root Compare
-%% - Root Confirm
-%% - Branch Compare
-%% - Branch Confirm
+%% - Root Compare (x n)
+%% - Branch Compare (x n)
 %% - Clock Compare
 %% - Repair
 %%
@@ -133,9 +131,7 @@
             prepare_full_exchange/2,
             prepare_partial_exchange/2,
             root_compare/2,
-            root_confirm/2,
             branch_compare/2,
-            branch_confirm/2,
             clock_compare/2,
             tree_compare/2,
             merge_root/2,
@@ -153,9 +149,7 @@
 -include_lib("eunit/include/eunit.hrl").
 
 -record(state, {root_compare_deltas = [] :: list(),
-                root_confirm_deltas = [] :: list(),
                 branch_compare_deltas = [] :: list(),
-                branch_confirm_deltas = [] :: list(),
                 tree_compare_deltas = [] :: list(),
                 key_deltas = [] :: list(),
                 repair_fun,
@@ -174,7 +168,11 @@
                 exchange_type :: exchange_type(),
                 exchange_filters = none :: filters(),
                 last_tree_compare = none :: list(non_neg_integer())|none,
+                last_root_compare = none :: list(non_neg_integer())|none,
+                last_branch_compare = none :: list(non_neg_integer())|none,
                 tree_compares = 0 :: integer(),
+                root_compares = 0 :: integer(),
+                branch_compares = 0 :: integer(),
                 transition_pause_ms = ?TRANSITION_PAUSE_MS :: pos_integer(),
                 log_levels :: aae_util:log_levels()|undefined
                 }).
@@ -337,20 +335,6 @@ prepare_partial_exchange(timeout, State) ->
                     ScanTimeout,
                     State).
 
-root_compare(timeout, State) ->
-    aae_util:log("EX006",
-                    [root_compare, State#state.exchange_id],
-                    logs(),
-                    State#state.log_levels),
-    BranchIDs = compare_roots(State#state.blue_acc, State#state.pink_acc),
-    trigger_next(fetch_root, 
-                    root_confirm, 
-                    fun merge_root/2, 
-                    <<>>, 
-                    length(BranchIDs) == 0, 
-                    ?CACHE_TIMEOUT_MS, 
-                    State#state{root_compare_deltas = BranchIDs}).
-
 tree_compare(timeout, State) ->
     aae_util:log("EX006",
                     [root_compare, State#state.exchange_id],
@@ -420,59 +404,97 @@ tree_compare(timeout, State) ->
                                         tree_compares = TreeCompares})
     end.
 
-root_confirm(timeout, State) ->
+
+root_compare(timeout, State) ->
     aae_util:log("EX006",
-                    [root_confirm, State#state.exchange_id],
+                    [root_compare, State#state.exchange_id],
                     logs(),
                     State#state.log_levels),
-    BranchIDs0 = State#state.root_compare_deltas,
-    BranchIDs1 = compare_roots(State#state.blue_acc, State#state.pink_acc),
-    BranchIDs = select_ids(intersect_ids(BranchIDs0, BranchIDs1), 
-                            ?MAX_RESULTS, 
-                            root_confirm, 
-                            State#state.exchange_id,
-                            State#state.log_levels),
-    trigger_next({fetch_branches, BranchIDs}, 
-                    branch_compare, 
-                    fun merge_branches/2, 
-                    [], 
-                    length(BranchIDs) == 0, 
-                    ?CACHE_TIMEOUT_MS, 
-                    State#state{root_confirm_deltas = BranchIDs}).
+    DirtyBranches = compare_roots(State#state.blue_acc, State#state.pink_acc),
+    RootCompares = State#state.root_compares + 1,
+    {BranchIDs, Reduction} = 
+        case State#state.last_root_compare of
+            none ->
+                {DirtyBranches, 1.0};
+            PreviouslyDirtyBranches ->
+                BDL = intersect_ids(PreviouslyDirtyBranches, DirtyBranches),
+                {BDL, 1.0 - length(BDL) / length(PreviouslyDirtyBranches)}
+        end,
+    % Should we loop again on root_compare?  As longs as root_compare is
+    % reducing the result set sufficiently, keep doing it until we switch to
+    % branch_compare
+    case ((length(BranchIDs) > 0)
+            and (Reduction > ?WORTHWHILE_REDUCTION)) of
+        true ->
+            trigger_next(fetch_root, 
+                            root_compare, 
+                            fun merge_root/2, 
+                            <<>>, 
+                            false, 
+                            ?CACHE_TIMEOUT_MS, 
+                            State#state{last_root_compare = BranchIDs,
+                                        root_compares = RootCompares});
+        false ->
+            BranchesToFetch = select_ids(BranchIDs, 
+                                            ?MAX_RESULTS, 
+                                            root_confirm, 
+                                            State#state.exchange_id,
+                                            State#state.log_levels),
+            trigger_next({fetch_branches, BranchesToFetch}, 
+                            branch_compare, 
+                            fun merge_branches/2, 
+                            [], 
+                            length(BranchIDs) == 0, 
+                            ?CACHE_TIMEOUT_MS, 
+                            State#state{root_compare_deltas = BranchesToFetch,
+                                        root_compares = RootCompares})
+    end.
+
 
 branch_compare(timeout, State) ->
     aae_util:log("EX006",
                     [branch_compare, State#state.exchange_id],
                     logs(),
                     State#state.log_levels),
-    SegmentIDs = compare_branches(State#state.blue_acc, State#state.pink_acc),
-    trigger_next({fetch_branches, State#state.root_confirm_deltas}, 
-                    branch_confirm, 
-                    fun merge_branches/2, 
-                    [],
-                    length(SegmentIDs) == 0, 
-                    ?CACHE_TIMEOUT_MS, 
-                    State#state{branch_compare_deltas = SegmentIDs}).
-
-branch_confirm(timeout, State) ->
-    aae_util:log("EX006",
-                    [branch_confirm, State#state.exchange_id],
-                    logs(),
-                    State#state.log_levels),
-    SegmentIDs0 = State#state.branch_compare_deltas,
-    SegmentIDs1 = compare_branches(State#state.blue_acc, State#state.pink_acc),
-    SegmentIDs = select_ids(intersect_ids(SegmentIDs0, SegmentIDs1), 
-                            ?MAX_RESULTS,
-                            branch_confirm, 
-                            State#state.exchange_id,
-                            State#state.log_levels),
-    trigger_next({fetch_clocks, SegmentIDs}, 
-                    clock_compare, 
-                    fun merge_clocks/2, 
-                    [],
-                    length(SegmentIDs) == 0, 
-                    ?SCAN_TIMEOUT_MS, 
-                    State#state{branch_confirm_deltas = SegmentIDs}).
+    DirtySegments = compare_branches(State#state.blue_acc, State#state.pink_acc),
+    BranchCompares = State#state.branch_compares + 1,
+    {SegmentIDs, Reduction} = 
+        case State#state.last_branch_compare of
+            none ->
+                {DirtySegments, 1.0};
+            PreviouslyDirtySegments ->
+                SDL = intersect_ids(PreviouslyDirtySegments, DirtySegments),
+                {SDL, 1.0 - length(SDL) / length(PreviouslyDirtySegments)}
+        end,
+    % Should we loop again on root_compare?  As longs as root_compare is
+    % reducing the result set sufficiently, keep doing it until we switch to
+    % branch_compare
+    case ((length(SegmentIDs) > 0)
+            and (Reduction > ?WORTHWHILE_REDUCTION)) of
+        true ->
+            trigger_next({fetch_branches, State#state.root_compare_deltas}, 
+                            branch_compare, 
+                            fun merge_branches/2, 
+                            [],
+                            false, 
+                            ?CACHE_TIMEOUT_MS, 
+                            State#state{last_branch_compare = SegmentIDs,
+                                        branch_compares = BranchCompares});
+        false ->
+            SegstoFetch = select_ids(SegmentIDs, 
+                                        ?MAX_RESULTS,
+                                        branch_confirm, 
+                                        State#state.exchange_id,
+                                        State#state.log_levels),
+            trigger_next({fetch_clocks, SegstoFetch}, 
+                            clock_compare, 
+                            fun merge_clocks/2, 
+                            [],
+                            length(SegmentIDs) == 0, 
+                            ?SCAN_TIMEOUT_MS, 
+                            State#state{branch_compare_deltas = SegstoFetch,
+                                        branch_compares = BranchCompares})
+    end.
 
 clock_compare(timeout, State) ->
     aae_util:log("EX006",
@@ -562,9 +584,9 @@ terminate(normal, StateName, State) ->
                             [StateName,
                                 State#state.exchange_id,
                                 length(State#state.root_compare_deltas),
-                                length(State#state.root_confirm_deltas),
+                                State#state.root_compares,
                                 length(State#state.branch_compare_deltas),
-                                length(State#state.branch_confirm_deltas),
+                                State#state.branch_compares,
                                 length(State#state.key_deltas)], 
                             logs(),
                             State#state.log_levels);
@@ -902,9 +924,9 @@ logs() ->
         {"EX003",
             {info, "Normal exit for full exchange at"
                         ++ " pending_state=~w for exchange_id=~s"
-                        ++ " root_compare_deltas=~w root_confirm_deltas=~w"
-                        ++ " branch_compare_deltas=~w branch_confirm_deltas=~w"
-                        ++ " key_deltas=~w"}},
+                        ++ " root_compare_deltas=~w root_compares=~w"
+                        ++ " branch_compare_deltas=~w branch_compares=~w"
+                        ++ " keys_passed_for_compare=~w"}},
         {"EX004",
             {info, "Exchange id=~s led to prompting of repair_count=~w"}},
         {"EX005",
@@ -919,7 +941,7 @@ logs() ->
             {info, "Normal exit for partial (dynamic) exchange at"
                         ++ " pending_state=~w for exchange_id=~s"
                         ++ " tree_compare_deltas=~w after tree_compares=~w"
-                        ++ " key_deltas=~w"}},
+                        ++ " keys_passed_for_compare=~w"}},
         {"EX010", 
             {warn, "Exchange not_supported for colour=~w in exchange id=~s"}}
         ].
