@@ -472,7 +472,11 @@ clean_saveopen_test() ->
     ?assertMatch({error, enoent}, file:read_file(NextFN)),
     aae_util:clean_subdir(RootPath).
 
-corrupt_save_test() ->
+
+corrupt_save_test_() ->
+    {timeout, 60, fun corrupt_save_tester/0}.
+
+corrupt_save_tester() ->
     % If any byte is corrupted on disk - then the result should be a failure 
     % to open and the TreeCache reverting to empty
     RootPath = "test/cachecs/",
