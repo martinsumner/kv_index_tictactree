@@ -60,7 +60,7 @@ gen_bkcm(S) ->
              false ->
                  {B, K, none, gen_vclock(), gen_last_modified()};
              {_, PrevClock, _LastModifed} ->
-                 {B, K, PrevClock, gen_vclock(PrevClock), gen_last_modified()}
+                 {B, K, undefined, gen_vclock(PrevClock), gen_last_modified()}
          end).
 
 gen_last_modified() ->
@@ -276,35 +276,49 @@ exchange(_, _, [BluePid, BluePrefLists], [PinkPid, PinkPrefLists]) ->
 exchange_post(S, [Path1, Path2, _Blue, _Pink], Res) ->
     {_, M1} = lists:keyfind(Path1, 1, maps:get(aae_controllers, S, [])),
     {_, M2} = lists:keyfind(Path2, 1, maps:get(aae_controllers, S, [])),
-    BlueStore = maps:get(store, M1, []), 
-    PinkStore = maps:get(store, M2, []),
-    BlueUnique = BlueStore -- PinkStore,
-    PinkUnique = PinkStore -- BlueStore,
-    Keys = lists:usort([ {B, K} || {{B, K}, _, _} <- BlueUnique ++ PinkUnique ]),
-    Expected = 
-        [ {Key, {case lists:keyfind(Key, 1, BlueUnique) of
-                     false -> none;
-                     {_, BC, _} -> BC
-                 end,
-                 case lists:keyfind(Key, 1, PinkUnique) of
-                     false -> none;
-                     {_, PC, _} -> PC
-                 end}} || Key <- Keys ],
+    BlueStore = lists:usort(maps:get(store, M1, [])), 
+    PinkStore = lists:usort(maps:get(store, M2, [])),
+    MatchBlueFun =
+        fun({{B, K}, C, _L}, Acc) ->
+            case lists:keyfind({B, K}, 1, PinkStore) of
+                false ->
+                    [{{B, K}, {C, none}}|Acc];
+                {{B, K}, C, _} ->
+                    Acc;
+                {{B, K}, NC, _} ->
+                    [{{B, K}, {C, NC}}|Acc]
+            end
+        end,
+    MatchPinkFun =
+        fun({{B, K}, C, _L}, Acc) ->
+            case lists:keyfind({B, K}, 1, BlueStore) of
+                false ->
+                    [{{B, K}, {none, C}}|Acc];
+                _ ->
+                    Acc
+            end
+        end,
+    Acc0 = lists:foldl(MatchBlueFun, [], BlueStore),
+    Expected = lists:usort(lists:foldl(MatchPinkFun, Acc0, PinkStore)),
     case Res of
         {root_compare, 0} -> 
-            eq(0, length(Keys));
+            eq(0, length(Expected));
         {repair, {clock_compare, N}, KeyList} -> 
-            N == length(Keys) 
-                andalso N == length(KeyList) 
-                andalso eq(KeyList, Expected);
-        _ -> eq(Res, length(Keys))  %% will print the difference
+            N == length(KeyList) 
+                andalso eq(lists:sort(KeyList), Expected);
+        _ ->
+            eq(Res, Expected)  %% will print the difference
     end.
 
-exchange_features(S, [Path1, _Path2, _Blue, _Pink], Res) ->
-    Controllers = started_controllers(S),
-    {_, M1} = lists:keyfind(Path1, 1, Controllers),
-    [{exchange, {exchange_diff, Res}}] ++
-       [ {exchange, {equal_with_n_elements, length(maps:get(store, M1))}} || Res == {root_compare, 0} ].
+exchange_features(_S, [_Path1, _Path2, _Blue, _Pink], Res) ->
+    case Res of
+        {root_compare, 0} -> 
+            root_compare;
+        {repair, {clock_compare, N}, _KeyList} -> 
+            {clock_compare, N};
+        _ ->
+            Res
+    end.
 
 
 
