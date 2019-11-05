@@ -1,5 +1,7 @@
 # KV Tictac Tree
 
+[![Build Status](https://travis-ci.com/martinsumner/kv_index_tictactree.svg?branch=master)](https://travis-ci.com/martinsumner/kv_index_tictactree)
+
 An Active Anti-Entropy library for Key-Value stores in Erlang.
 
 This is currently a working prototype with basic testing.  The target for the library is to be fully integrated with [Riak KV](https://github.com/basho/riak_kv) for Release 3.0 (Autumn 2018).
