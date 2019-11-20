@@ -1,7 +1,7 @@
 {application, kv_index_tictactree,
  [
   {description, "AAE helper service for KV vnode"},
-  {vsn, "0.9.10"},
+  {vsn, "0.9.11"},
   {registered, []},
   {applications, [
                   kernel,
