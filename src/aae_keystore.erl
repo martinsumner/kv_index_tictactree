@@ -661,7 +661,7 @@ value(parallel, {md, _F}, {_B, _K, {2, ValueItems}}) ->
 value(native, {clock, _F}, {_B, _K, V}) ->
     element(1, summary_from_native(V));
 value(native, {hash, _F}, {_B, _K, V}) ->
-    {VC, _Sz, _SC} = summary_from_native(V),
+    {VC, _Sz, _SC, _MB} = summary_from_native(V),
     element(1, aae_controller:hash_clocks(VC, none));
 value(native, {size, _F}, {_B, _K, V}) ->
     element(2, summary_from_native(V));
@@ -671,6 +671,8 @@ value(native, {aae_segment, null}, {B, K, _V}) ->
     BinaryKey = aae_util:make_binarykey(B, K),
     SegmentID = leveled_tictac:keyto_segment48(BinaryKey),
     aae_keystore:generate_treesegment(SegmentID);
+value(native, {md, null}, {_B, _K, V}) ->
+    element(4, summary_from_native(V));
 value(native, {_NotExposed, F}, {B, K, _V}) ->
     % preflist, aae_segment, index_hash
     F(B, K).
@@ -678,26 +680,29 @@ value(native, {_NotExposed, F}, {B, K, _V}) ->
 
 -spec summary_from_native(binary()) 
                         -> {aae_controller:version_vector(), 
-                            non_neg_integer(), non_neg_integer()}.
+                            non_neg_integer(), non_neg_integer(),
+                            binary()}.
 %% @doc
-%% Extract only sumarry infromation from the binary - the vector, the object 
+%% Extract only summary information from the binary - the vector, the object 
 %% size and the sibling count
 summary_from_native(<<131, _Rest/binary>>=ObjBin) ->  
     {proxy_object, HeadBin, ObjSize, _Fetcher} 
         = binary_to_term(ObjBin),
     summary_from_native(HeadBin, ObjSize).
 
--spec summary_from_native(binary(), integer()) ->
-    {aae_controller:version_vector(), non_neg_integer(), non_neg_integer()}.
+-spec summary_from_native(binary(), integer()) 
+                        -> {aae_controller:version_vector(),
+                            non_neg_integer(), non_neg_integer(),
+                            binary()}.
 %% @doc 
-%% Return afrom a version 1 binary the vector clock and siblings
+%% Split a version 1 binary, as found in the native store
 summary_from_native(ObjBin, ObjSize) ->
     <<?MAGIC:8/integer, 
         1:8/integer, 
         VclockLen:32/integer, VclockBin:VclockLen/binary, 
         SibCount:32/integer, 
-        _MetaBin/binary>> = ObjBin,
-    {binary_to_term(VclockBin), ObjSize, SibCount}.
+        MetaBin/binary>> = ObjBin,
+    {binary_to_term(VclockBin), ObjSize, SibCount, MetaBin}.
 
 
 -spec convert_segmentlimiter(segment_limiter()) ->
