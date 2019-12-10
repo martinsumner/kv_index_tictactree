@@ -37,6 +37,7 @@
             aae_rebuildstore/2,
             aae_fold/6,
             aae_fold/8,
+            aae_bucketlist/1,
             aae_loglevel/2]).
 
 -export([foldobjects_buildtrees/2,
@@ -172,7 +173,7 @@ aae_nextrebuild(Pid) ->
     gen_server:call(Pid, rebuild_time).
 
 -spec aae_put(pid(), responsible_preflist(), 
-                            binary(), binary(), 
+                            aae_keystore:bucket(), aae_keystore:key(),
                             version_vector(), version_vector(),
                             binary()) -> ok.
 %% @doc
@@ -347,6 +348,13 @@ aae_rebuildstore(Pid, SplitObjectFun) ->
 %% Set the level for logging in the aae processes this controller manages
 aae_loglevel(Pid, LogLevels) ->
     gen_server:cast(Pid, {log_levels, LogLevels}).
+
+-spec aae_bucketlist(pid()) -> {async, fun(() -> list(aae_keystore:bucket()))}.
+%% @doc
+%% List buckets within the aae_keystore.  This will be efficient for native or
+%% key-prdered parallel stores - but not for segment-ordered stores.
+aae_bucketlist(Pid) ->
+    gen_server:call(Pid, bucket_list).
 
 %%%============================================================================
 %%% gen_server callbacks
@@ -669,7 +677,13 @@ handle_call({fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PreflFun},
                                 Folder, 
                                 ReturnFun0, 
                                 SizeFun),
-    {reply, ok, State}.
+    {reply, ok, State};
+handle_call(bucket_list,  _From, State) ->
+    ok = maybe_flush_puts(State#state.key_store, 
+                            State#state.objectspecs_queue,
+                            State#state.parallel_keystore),
+    R = aae_keystore:store_bucketlist(State#state.key_store),
+    {reply, R, State}.
 
 handle_cast({put, IndexN, Bucket, Key, Clock, PrevClock, BinaryObj}, State) ->
     % Setup

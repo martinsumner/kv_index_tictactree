@@ -24,6 +24,7 @@
             rehash/4,
             rebuild_complete/2,
             fold_aae/6,
+            bucketlist_aae/1,
             close/1]).
 
 -export([extractclock_from_riakhead/1,
@@ -155,6 +156,12 @@ fold_aae(Vnode, Range, Segments, FoldObjectsFun, InitAcc, Elements) ->
 exchange_message(Vnode, Msg, IndexNs, ReturnFun) ->
     gen_server:call(Vnode, {aae, Msg, IndexNs, ReturnFun}).
 
+
+-spec bucketlist_aae(pid()) -> fun(() -> list()).
+%% @doc
+%% List buckets via AAE store
+bucketlist_aae(Vnode) ->
+    gen_server:call(Vnode, bucketlist_aae).
 
 -spec close(pid()) -> ok.
 %% @doc
@@ -430,6 +437,9 @@ handle_call({fold_aae, Range, Segments, FoldFun, InitAcc, Elements},
                                 Segments, 
                                 FoldFun, InitAcc, 
                                 Elements),
+    {reply, R, State};
+handle_call(bucketlist_aae, _From, State) ->
+    R = aae_controller:aae_bucketlist(State#state.aae_controller),
     {reply, R, State};
 handle_call(close, _From, State) ->
     ok = aae_controller:aae_close(State#state.aae_controller),

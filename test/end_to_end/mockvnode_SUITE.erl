@@ -46,7 +46,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     % The purpose if to perform exchanges to first highlight no differences, 
     % and then once a difference is created, discover any difference 
     _TestStartPoint = os:timestamp(),
-    InitialKeyCount = 50000,
+    InitialKeyCount = 80000,
     RootPath = testutil:reset_filestructure(),
     MockPathN = filename:join(RootPath, "mock_native/"),
     MockPathP = filename:join(RootPath, "mock_parallel/"),
@@ -396,7 +396,22 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
                                 NullRepairFun,
                                 ReturnFun),
     io:format("Exchange id ~s~n", [GUID3c]),
-    {ExchangeState3c, 2} = testutil:start_receiver(),
+    % This could receive {timeout, 0}.  On complete of rebuild the leveled
+    % store is shutdown - and by design this closes all iterators.  So this
+    % may crash if in the fetch_clock state
+    {ExchangeState3c, 2} = 
+        case testutil:start_receiver() of
+            {timeout, 0} ->
+                aae_exchange:start([{exchange_vnodesendfun(VNNa), IndexNs}],
+                                    [{exchange_vnodesendfun(VNPa), IndexNs}],
+                                    NullRepairFun,
+                                    ReturnFun),
+                % Retry in the case this exchange times out on the rebuild
+                % completing faster than expected
+                testutil:start_receiver();
+            Other ->
+                Other
+        end,
     true = ExchangeState3c == clock_compare,
 
     wait_for_rebuild(VNPa),
@@ -929,6 +944,14 @@ mock_vnode_coveragefolder(Type, InitialKeyCount, TupleBuckets) ->
     {A, B, C} = MDRAcc,
     true = InitialKeyCount == A + B + C,
     true = (A > MinVal) and (B > MinVal) and (C > MinVal),
+
+    {async, BucketListF1} = mock_kv_vnode:bucketlist_aae(VNN1),
+    {async, BucketListF2} = mock_kv_vnode:bucketlist_aae(VNN2),
+    {async, BucketListF3} = mock_kv_vnode:bucketlist_aae(VNN3),
+    {async, BucketListF4} = mock_kv_vnode:bucketlist_aae(VNN4),
+    DedupedBL = lists:usort(BucketListF1() ++ BucketListF2()
+                            ++ BucketListF3() ++ BucketListF4()),
+    true = 5 == length(DedupedBL),
 
     ok = mock_kv_vnode:close(VNN1),
     ok = mock_kv_vnode:close(VNN2),
