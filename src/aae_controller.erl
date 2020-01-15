@@ -38,7 +38,8 @@
             aae_fold/6,
             aae_fold/8,
             aae_bucketlist/1,
-            aae_loglevel/2]).
+            aae_loglevel/2,
+            aae_ping/3]).
 
 -export([foldobjects_buildtrees/2,
             hash_clocks/2,
@@ -355,6 +356,22 @@ aae_loglevel(Pid, LogLevels) ->
 %% key-prdered parallel stores - but not for segment-ordered stores.
 aae_bucketlist(Pid) ->
     gen_server:call(Pid, bucket_list).
+
+-spec aae_ping(pid(), erlang:timestamp(), pid()|sync) -> ok.
+%% @doc
+%% Ping the AAE process and it will return (async) the timer difference between
+%% now and the passed in timestamp.  The calling process may set a threshold, 
+%% and if the timing is over the threshold it may assume the mailbox of the
+%% controller is too large, and instead next send a sync ping so that the
+%% calling process is blocked until the controller can catch up.  It is
+%% expected that this may be used by a vnode that "owns" the controller to
+%% resolve the case whereby a vnode may be able to handle PUT load faster than
+%% the controller.
+%% The sync ping will return 'ok'.
+aae_ping(Pid, RequestTime, sync) ->
+    gen_server:call(Pid, {ping, RequestTime}, infinity);
+aae_ping(Pid, RequestTime, From) ->
+    gen_server:cast(Pid, {ping, RequestTime, From}).
 
 %%%============================================================================
 %%% gen_server callbacks
@@ -683,7 +700,12 @@ handle_call(bucket_list,  _From, State) ->
                             State#state.objectspecs_queue,
                             State#state.parallel_keystore),
     R = aae_keystore:store_bucketlist(State#state.key_store),
-    {reply, R, State}.
+    {reply, R, State};
+handle_call({ping, RequestTime}, _From, State) ->
+    T = max(0, timer:now_diff(os:timestamp(), RequestTime)),
+    aae_util:log("AAE15", [T div 1000], logs(), State#state.log_levels),
+    {reply, ok, State}.
+
 
 handle_cast({put, IndexN, Bucket, Key, Clock, PrevClock, BinaryObj}, State) ->
     % Setup
@@ -787,7 +809,10 @@ handle_cast({log_levels, LogLevels}, State) ->
         fun({_I, TC}) -> aae_treecache:cache_loglevel(TC, LogLevels) end,
     lists:foreach(UpdateCache, State#state.tree_caches),
     ok = aae_keystore:store_loglevel(State#state.key_store, LogLevels),
-    {noreply, State#state{log_levels = LogLevels}}.
+    {noreply, State#state{log_levels = LogLevels}};
+handle_cast({ping, RequestTime, From}, State) ->
+    From ! {aae_pong, max(0, timer:now_diff(os:timestamp(), RequestTime))},
+    {noreply, State}.    
 
 
 handle_info(_Info, State) ->
@@ -1043,8 +1068,9 @@ logs() ->
         {"AAE13",
             {info, "Completed tree rebuild"}},
         {"AAE14",
-            {info, "Mismatch finding unexpected IndexN in fold of ~w"}} 
-                % Probably should be switched to debug
+            {debug, "Mismatch finding unexpected IndexN in fold of ~w"}},
+        {"AAE15",
+            {info, "Ping showed time difference of ~w ms"}}
     
     ].
 
@@ -1448,7 +1474,8 @@ start_wrap(IsEmpty, RootPath, RPL, StoreType) ->
                 RPL, RootPath, F).
 
 
-put_keys(_Cntrl, _Preflists, KeyList, 0) ->
+put_keys(Cntrl, _Preflists, KeyList, 0) ->
+    ok = aae_ping(Cntrl, os:timestamp(), sync),
     KeyList;
 put_keys(Cntrl, Preflists, KeyList, Count) ->
     Preflist = lists:nth(leveled_rand:uniform(length(Preflists)), Preflists),

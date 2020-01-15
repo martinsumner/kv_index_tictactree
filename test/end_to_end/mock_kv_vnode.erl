@@ -72,6 +72,7 @@
 -define(MAGIC, 53).  
 -define(EMPTY_VTAG_BIN, <<"e">>).
 -define(MAGIC_KEYS, [<<48,48,48,52,57,51>>]).
+-define(POKE_TIME, 1000).
 
 
 -type r_object() :: #r_object{}.
@@ -201,6 +202,7 @@ init([Opts]) ->
                                     Opts#options.index_ns, 
                                     RP, 
                                     fun from_aae_binary/1),
+    erlang:send_after(?POKE_TIME, self(), poke),
     {ok, #state{root_path = RP,
                 aae_type = KeyStoreType,
                 vnode_store = VnSt,
@@ -492,8 +494,15 @@ handle_cast({rebuild_complete, tree}, State) ->
     {noreply, State#state{aae_rebuild = false}}.
 
 
-handle_info(_Info, State) ->
-    {noreply, State}.
+handle_info(poke, State) ->
+    ok = aae_controller:aae_ping(State#state.aae_controller,
+                                    os:timestamp(),
+                                    self()),
+    {noreply, State};
+handle_info({aae_pong, QueueTime}, State) ->
+    io:format("Queuetime in microseconds ~w~n", [QueueTime]),
+    erlang:send_after(?POKE_TIME, self(), poke),
+    {noreply, State}.    
 
 terminate(_Reason, _State) ->
     ok.
