@@ -212,7 +212,7 @@
         {fetch_clocks, list(non_neg_integer())} |
         {merge_tree_range, filters()} |
         {fetch_clocks_range, filters()}.
--type send_fun() :: fun((send_message(), list(tuple()), blue|pink) -> ok).
+-type send_fun() :: fun((send_message(), list(tuple())|all, blue|pink) -> ok).
 -type input_list() :: [{send_fun(), list(tuple())|all}].
     % The Blue List and the Pink List are made up of:
     % - a SendFun, which should  be a 3-arity function, taking a preflist, 
