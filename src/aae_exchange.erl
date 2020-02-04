@@ -555,12 +555,16 @@ waiting_all_results({reply, Result, Colour}, State) ->
                 set_timeout(State0#state.start_time, 
                             State0#state.reply_timeout)}
     end;
-waiting_all_results(timeout, State) ->
+waiting_all_results(UnexpectedResponse, State) ->
+    % timeout expected here, but also may get errors from vnode - such as
+    % {error, mailbox_overload} when vnode has entered overload state.  Not
+    % possible to complete exchange so stop
     {PC, PT} = State#state.pink_returns,
     {BC, BT} = State#state.blue_returns,
     MissingCount = PT + BT - (PC + BC),
     aae_util:log("EX002", 
-                    [State#state.pending_state, 
+                    [UnexpectedResponse,
+                        State#state.pending_state, 
                         MissingCount, 
                         State#state.exchange_id], 
                         logs(),
@@ -919,7 +923,7 @@ logs() ->
     [{"EX001", 
             {info, "Exchange id=~s with target_count=~w expected"}},
         {"EX002",
-            {error, "Timeout with pending_state=~w and missing_count=~w" 
+            {error, "~w with pending_state=~w and missing_count=~w" 
                         ++ " for exchange id=~s"}},
         {"EX003",
             {info, "Normal exit for full exchange at"
