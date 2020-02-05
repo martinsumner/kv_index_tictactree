@@ -812,8 +812,8 @@ compare_branches(BlueBranches, PinkBranches) ->
 -spec compare_clocks(list(tuple()), list(tuple())) -> list(repair_input()).
 %% @doc
 %% Find the differences between the lists - and return a list of
-%% {B, K, blue-side VC, pink-side VC}
-%% If theblue-side or pink-seide does not contain the key, then none is used
+%% {{B, K}, {blue-side VC | none, pink-side VC | none}}
+%% If the blue-side or pink-side does not contain the key, then none is used
 %% in place of the clock
 compare_clocks(BlueList, PinkList) ->
     % Two lists of {B, K, VC} want to remove everything where {B, K, VC} is
