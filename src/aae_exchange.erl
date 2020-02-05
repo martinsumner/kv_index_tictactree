@@ -177,20 +177,16 @@
                 log_levels :: aae_util:log_levels()|undefined
                 }).
 
--type input_list() :: [{fun(), list(tuple())|all}].
-    % The Blue List and the Pink List are made up of:
-    % - a SendFun, which should  be a 3-arity function, taking a preflist, 
-    % a message and a colour to be used to flag the reply;
-    % - a list of preflists, to be used in the SendFun to be filtered by the
-    % target.  The Preflist might be {Index, Node} for remote requests or 
-    % {Index, Pid} for local requests
-    % For partial exchanges only, the preflist can and must be set to 'all'
 -type branch_results() :: list({integer(), binary()}).
     % Results to branch queries are a list mapping Branch ID to the binary for
     % that branch
 -type exchange_state() :: #state{}.
 -type exchange_type() :: full|partial.
 
+-type compare_state() ::
+    root_compare|tree_compare|branch_compare|clock_compare.
+-type closing_state() ::
+    compare_state()|timeout|error|not_supported.
 -type bucket() :: 
     {binary(), binary()}|binary().
 -type key_range() :: 
@@ -210,6 +206,21 @@
     % filter to be used in partial exchanges
 -type option_item() :: {transition_pause_ms, pos_integer()}.
 -type options() :: list(option_item()).
+-type send_message() ::
+        fetch_root |
+        {fetch_branches, list(non_neg_integer())} |
+        {fetch_clocks, list(non_neg_integer())} |
+        {merge_tree_range, filters()} |
+        {fetch_clocks_range, filters()}.
+-type send_fun() :: fun((send_message(), list(tuple())|all, blue|pink) -> ok).
+-type input_list() :: [{send_fun(), list(tuple())|all}].
+    % The Blue List and the Pink List are made up of:
+    % - a SendFun, which should  be a 3-arity function, taking a preflist, 
+    % a message and a colour to be used to flag the reply;
+    % - a list of preflists, to be used in the SendFun to be filtered by the
+    % target.  The Preflist might be {Index, Node} for remote requests or 
+    % {Index, Pid} for local requests
+    % For partial exchanges only, the preflist can and must be set to 'all'
 
 -define(FILTERIDX_SEG, 5).
 -define(FILTERIDX_TRS, 4).
@@ -225,7 +236,9 @@ start(BlueList, PinkList, RepairFun, ReplyFun) ->
 
 
 -spec start(exchange_type(),
-            input_list(), input_list(), fun(), fun(),
+            input_list(), input_list(),
+            fun((list({any(), any(), any()})) -> ok),
+            fun(({closing_state(), non_neg_integer()}) -> ok),
             filters(),
             options()) -> {ok, pid(), list()}.
 %% @doc
@@ -234,7 +247,8 @@ start(BlueList, PinkList, RepairFun, ReplyFun) ->
 %% keys discovered to have inconsistent clocks.  ReplyFun used to reply back
 %% to calling client the StateName at termination.
 %%
-%% The ReplyFun should be a 1 arity function
+%% The ReplyFun should be a 1 arity function that expects a tuple with the
+%% closing state and the cout of deltas.  
 start(full, BlueList, PinkList, RepairFun, ReplyFun, none, Opts) ->
     ExchangeID = leveled_util:generate_uuid(),
     {ok, ExPID} = gen_fsm:start(?MODULE, 
@@ -258,6 +272,8 @@ start(partial, BlueList, PinkList, RepairFun, ReplyFun, Filters, Opts) ->
 -spec reply(pid(), any(), pink|blue) -> ok.
 %% @doc
 %% Support events to be sent back to the FSM
+reply(Exchange, {error, Error}, _Colour) ->
+    gen_fsm:send_event(Exchange, {error, Error});
 reply(Exchange, Result, Colour) ->
     gen_fsm:send_event(Exchange, {reply, Result, Colour}).
 
@@ -569,7 +585,14 @@ waiting_all_results(UnexpectedResponse, State) ->
                         State#state.exchange_id], 
                         logs(),
                         State#state.log_levels),
-    {stop, normal, State#state{pending_state = timeout}}.
+    ReplyState =
+        case UnexpectedResponse of
+            timeout ->
+                timeout;
+            _ ->
+                error
+        end,
+    {stop, normal, State#state{pending_state = ReplyState}}.
 
 
 handle_sync_event(_msg, _From, StateName, State) ->
@@ -1007,6 +1030,40 @@ clean_exit_ontimeout_test() ->
     State1 = State0#state{pending_state = timeout},
     {stop, normal, State1} = waiting_all_results(timeout, State0).
 
+
+connect_error_test() ->
+    SendFun =
+        fun(_Msg, _PLs, Colour) ->
+            Exchange = self(),
+            reply(Exchange, {error, disconnected}, Colour)
+        end,
+    BlueList = [{SendFun, [{0, 1}]}],
+    PinkList = [{SendFun, [{0, 1}]}],
+    RepairFun = fun(_RL) -> ok end,
+    ReceiveReply =
+        spawn(fun() ->
+                    receive
+                        {error, 0} ->
+                            ok
+                    end
+                end),
+    
+    ReplyFun = fun(R) -> ReceiveReply ! R end,
+    {ok, Test, _ExID} = start(BlueList, PinkList, RepairFun, ReplyFun),
+    ?assertMatch(true,
+                    lists:foldl(fun(X, Acc) ->
+                                    case Acc of
+                                        true ->
+                                            true;
+                                        false ->
+                                            timer:sleep(X),
+                                            not is_process_alive(ReceiveReply)
+                                    end
+                                end,
+                                false,
+                                [1000, 1000, 1000])),
+    ?assertMatch(false, is_process_alive(Test)).
+    
 
 coverage_cheat_test() ->
     {next_state, prepare, _State0} =
