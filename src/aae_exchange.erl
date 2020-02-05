@@ -152,8 +152,8 @@
                 branch_compare_deltas = [] :: list(),
                 tree_compare_deltas = [] :: list(),
                 key_deltas = [] :: list(),
-                repair_fun,
-                reply_fun,
+                repair_fun :: repair_fun()|undefined,
+                reply_fun :: reply_fun()|undefined,
                 blue_list = [] :: input_list(),
                 pink_list = [] :: input_list(),
                 exchange_id = "not_set" :: list(),
@@ -221,9 +221,17 @@
     % target.  The Preflist might be {Index, Node} for remote requests or 
     % {Index, Pid} for local requests
     % For partial exchanges only, the preflist can and must be set to 'all'
+-type repair_input() :: {{any(), any()}, {any(), any()}}.
+    % {{Bucket, Key}, {BlueClock, PinkClock}}.
+-type repair_fun() :: fun((list(repair_input())) -> ok).
+    % Input will be Bucket, Key, Clock
+-type reply_fun() :: fun(({closing_state(), non_neg_integer()}) -> ok).
+
 
 -define(FILTERIDX_SEG, 5).
 -define(FILTERIDX_TRS, 4).
+
+-export_type([send_fun/0, repair_fun/0, reply_fun/0]).
 
 %%%============================================================================
 %%% API
@@ -237,8 +245,8 @@ start(BlueList, PinkList, RepairFun, ReplyFun) ->
 
 -spec start(exchange_type(),
             input_list(), input_list(),
-            fun((list({any(), any(), any()})) -> ok),
-            fun(({closing_state(), non_neg_integer()}) -> ok),
+            repair_fun(),
+            reply_fun(),
             filters(),
             options()) -> {ok, pid(), list()}.
 %% @doc
@@ -801,7 +809,7 @@ compare_branches(BlueBranches, PinkBranches) ->
         end,
     lists:foldl(FoldFun, [], lists:seq(1, length(BlueBranches))).
 
--spec compare_clocks(list(tuple()), list(tuple())) -> list(tuple()).
+-spec compare_clocks(list(tuple()), list(tuple())) -> list(repair_input()).
 %% @doc
 %% Find the differences between the lists - and return a list of
 %% {B, K, blue-side VC, pink-side VC}
