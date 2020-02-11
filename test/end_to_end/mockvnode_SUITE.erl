@@ -46,7 +46,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     % The purpose if to perform exchanges to first highlight no differences, 
     % and then once a difference is created, discover any difference 
     _TestStartPoint = os:timestamp(),
-    InitialKeyCount = 50000,
+    InitialKeyCount = 80000,
     RootPath = testutil:reset_filestructure(),
     MockPathN = filename:join(RootPath, "mock_native/"),
     MockPathP = filename:join(RootPath, "mock_parallel/"),
@@ -396,7 +396,22 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
                                 NullRepairFun,
                                 ReturnFun),
     io:format("Exchange id ~s~n", [GUID3c]),
-    {ExchangeState3c, 2} = testutil:start_receiver(),
+    % This could receive {timeout, 0}.  On complete of rebuild the leveled
+    % store is shutdown - and by design this closes all iterators.  So this
+    % may crash if in the fetch_clock state
+    {ExchangeState3c, 2} = 
+        case testutil:start_receiver() of
+            {timeout, 0} ->
+                aae_exchange:start([{exchange_vnodesendfun(VNNa), IndexNs}],
+                                    [{exchange_vnodesendfun(VNPa), IndexNs}],
+                                    NullRepairFun,
+                                    ReturnFun),
+                % Retry in the case this exchange times out on the rebuild
+                % completing faster than expected
+                testutil:start_receiver();
+            Other ->
+                Other
+        end,
     true = ExchangeState3c == clock_compare,
 
     wait_for_rebuild(VNPa),
@@ -773,8 +788,8 @@ mock_vnode_coveragefolder(Type, InitialKeyCount, TupleBuckets) ->
             lists:nth(Idx + 1, IndexNs)
         end,
 
-    % Open four vnodes to take two of the rpeflists each
-    % - this isintended to replicate a ring-size=4, n-val=2 ring 
+    % Open four vnodes to take two of the preflists each
+    % - this is intended to replicate a ring-size=4, n-val=2 ring 
     {ok, VNN1} = 
         mock_kv_vnode:open(MockPathN1, Type, [{1, 2}, {0, 2}], PreflistFun),
     {ok, VNN2} = 
@@ -825,7 +840,6 @@ mock_vnode_coveragefolder(Type, InitialKeyCount, TupleBuckets) ->
     io:format("Exchange id ~s~n", [GUID1]),
     {ExchangeState1, 0} = testutil:start_receiver(),
     true = ExchangeState1 == root_compare,
-
 
     % Fold over a valid coverage plan to find siblings (there are none) 
     SibCountFoldFun =
@@ -904,11 +918,61 @@ mock_vnode_coveragefolder(Type, InitialKeyCount, TupleBuckets) ->
 
     true = lists:usort(BKHSzL2) == lists:usort(BKHSzL1),
 
+    % Fold over a valid coverage plan to find siblings (there are none) 
+    RandMetadataFoldFun =
+        fun(_B, _K, V, RandAcc) ->
+            {md, MD} = lists:keyfind(md, 1, V),
+            [MD_Dict] = fold_metabin(MD, []),
+                %% The fold needs to cope with the MD being in different
+                %% formats between parallel and native stores.  Preference
+                %% is to avoid this going forward - but this is the case
+                %% given how ObjectSplitFun was initially implemented in Riak
+            {random, X} = lists:keyfind(random, 1, MD_Dict),
+            [X|RandAcc]
+        end,
+
+    {async, Folder2MDR} =
+        mock_kv_vnode:fold_aae(VNN2, all, all, RandMetadataFoldFun, 
+                                [], [{md, null}]),
+    {async, Folder4MDR} = 
+        mock_kv_vnode:fold_aae(VNN4, all, all, RandMetadataFoldFun, 
+                                Folder2MDR(), [{md, null}]),
+
+    CountFun = fun(X, Acc) -> setelement(X, Acc, element(X, Acc) + 1) end,
+    MDRAcc = lists:foldl(CountFun, {0, 0, 0}, Folder4MDR()),
+    MinVal = InitialKeyCount div 3 - InitialKeyCount div 6,
+    {A, B, C} = MDRAcc,
+    true = InitialKeyCount == A + B + C,
+    true = (A > MinVal) and (B > MinVal) and (C > MinVal),
+
+    {async, BucketListF1} = mock_kv_vnode:bucketlist_aae(VNN1),
+    {async, BucketListF2} = mock_kv_vnode:bucketlist_aae(VNN2),
+    {async, BucketListF3} = mock_kv_vnode:bucketlist_aae(VNN3),
+    {async, BucketListF4} = mock_kv_vnode:bucketlist_aae(VNN4),
+    DedupedBL = lists:usort(BucketListF1() ++ BucketListF2()
+                            ++ BucketListF3() ++ BucketListF4()),
+    true = 5 == length(DedupedBL),
+
     ok = mock_kv_vnode:close(VNN1),
     ok = mock_kv_vnode:close(VNN2),
     ok = mock_kv_vnode:close(VNN3),
     ok = mock_kv_vnode:close(VNN4),
     RootPath = testutil:reset_filestructure().
+
+
+fold_metabin(<<>>, MDAcc) ->
+    lists:reverse(MDAcc);
+fold_metabin(<<0:32/integer,
+                MetaLen:32/integer, MetaBin:MetaLen/binary,
+                Rest/binary>>, MDAcc) ->
+    <<_LastModBin:12/binary, VTagLen:8/integer, _VTagBin:VTagLen/binary,
+      _Deleted:1/binary-unit:8, MetaDictBin/binary>> = MetaBin,
+    fold_metabin(Rest, [binary_to_term(MetaDictBin)|MDAcc]);
+fold_metabin(<<MetaLen:32/integer, MetaBin:MetaLen/binary,
+                Rest/binary>>, MDAcc) ->
+    <<_LastModBin:12/binary, VTagLen:8/integer, _VTagBin:VTagLen/binary,
+      _Deleted:1/binary-unit:8, MetaDictBin/binary>> = MetaBin,
+    fold_metabin(Rest, [binary_to_term(MetaDictBin)|MDAcc]).
 
 
 exchange_vnodesendfun(MVN) -> testutil:exchange_vnodesendfun(MVN).
