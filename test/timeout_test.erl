@@ -7,11 +7,12 @@
             code_change/3, terminate/2]).
 
 start_link() -> gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
-stop() ->  gen_server:stop(?MODULE).
+stop() ->  gen_server:call(?MODULE, stop).
 
 init([]) -> {ok, []}.
 
-handle_call({test}, _From, State) -> {reply, timer:sleep(1000), State}.
+handle_call({test}, _From, State) -> {reply, timer:sleep(1000), State};
+handle_call(stop, _From, State) -> {stop, normal, ok, State}.
 
 handle_cast(_Request, State) -> {noreply, State}.
 handle_info(_, State) -> {noreply, State}.
