@@ -178,6 +178,12 @@ aae_fold_tester(ParallelStoreType, KeyCount) ->
         (KeyCount div 64) > length(lists:subtract(FetchedClocks, BKVSL_ByBL)),
         % Didn't find "too many" others due to collisions on segment
 
+    {async, Runner8} = aae_controller:aae_bucketlist(Cntrl1),
+    ListOfBuckets = Runner8(),
+    true = length(ListOfBuckets) == 5,
+    true = lists:usort(ListOfBuckets) == ListOfBuckets,
+        % There are five buckets - they are found in the expected order
+
     ok = aae_controller:aae_close(Cntrl1),
     RootPath = testutil:reset_filestructure().
 

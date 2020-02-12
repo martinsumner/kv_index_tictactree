@@ -37,13 +37,15 @@
             aae_rebuildstore/2,
             aae_fold/6,
             aae_fold/8,
-            aae_loglevel/2]).
+            aae_bucketlist/1,
+            aae_loglevel/2,
+            aae_ping/3]).
 
 -export([foldobjects_buildtrees/2,
             hash_clocks/2,
             wrapped_splitobjfun/1]).
 
--export([rebuild_worker/1]).
+-export([rebuild_worker/1, wait_on_sync/3]).
 
 -include_lib("eunit/include/eunit.hrl").
 
@@ -172,7 +174,7 @@ aae_nextrebuild(Pid) ->
     gen_server:call(Pid, rebuild_time).
 
 -spec aae_put(pid(), responsible_preflist(), 
-                            binary(), binary(), 
+                            aae_keystore:bucket(), aae_keystore:key(),
                             version_vector(), version_vector(),
                             binary()) -> ok.
 %% @doc
@@ -347,6 +349,30 @@ aae_rebuildstore(Pid, SplitObjectFun) ->
 %% Set the level for logging in the aae processes this controller manages
 aae_loglevel(Pid, LogLevels) ->
     gen_server:cast(Pid, {log_levels, LogLevels}).
+
+-spec aae_bucketlist(pid()) -> {async, fun(() -> list(aae_keystore:bucket()))}.
+%% @doc
+%% List buckets within the aae_keystore.  This will be efficient for native or
+%% key-prdered parallel stores - but not for segment-ordered stores.
+aae_bucketlist(Pid) ->
+    gen_server:call(Pid, bucket_list).
+
+-spec aae_ping(pid(), erlang:timestamp(), pid()|{sync, pos_integer()})
+                                                                -> ok|timeout.
+%% @doc
+%% Ping the AAE process and it will return (async) the timer difference between
+%% now and the passed in timestamp.  The calling process may set a threshold, 
+%% and if the timing is over the threshold it may assume the mailbox of the
+%% controller is too large, and instead next send a sync ping so that the
+%% calling process is blocked until the controller can catch up.  It is
+%% expected that this may be used by a vnode that "owns" the controller to
+%% resolve the case whereby a vnode may be able to handle PUT load faster than
+%% the controller.
+%% The sync ping will return 'ok'.
+aae_ping(Pid, RequestTime, {sync, Timeout}) ->
+    wait_on_sync(Pid, {ping, RequestTime}, Timeout);
+aae_ping(Pid, RequestTime, From) ->
+    gen_server:cast(Pid, {ping, RequestTime, From}).
 
 %%%============================================================================
 %%% gen_server callbacks
@@ -669,7 +695,18 @@ handle_call({fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PreflFun},
                                 Folder, 
                                 ReturnFun0, 
                                 SizeFun),
+    {reply, ok, State};
+handle_call(bucket_list,  _From, State) ->
+    ok = maybe_flush_puts(State#state.key_store, 
+                            State#state.objectspecs_queue,
+                            State#state.parallel_keystore),
+    R = aae_keystore:store_bucketlist(State#state.key_store),
+    {reply, R, State};
+handle_call({ping, RequestTime}, _From, State) ->
+    T = max(0, timer:now_diff(os:timestamp(), RequestTime)),
+    aae_util:log("AAE15", [T div 1000], logs(), State#state.log_levels),
     {reply, ok, State}.
+
 
 handle_cast({put, IndexN, Bucket, Key, Clock, PrevClock, BinaryObj}, State) ->
     % Setup
@@ -773,7 +810,10 @@ handle_cast({log_levels, LogLevels}, State) ->
         fun({_I, TC}) -> aae_treecache:cache_loglevel(TC, LogLevels) end,
     lists:foreach(UpdateCache, State#state.tree_caches),
     ok = aae_keystore:store_loglevel(State#state.key_store, LogLevels),
-    {noreply, State#state{log_levels = LogLevels}}.
+    {noreply, State#state{log_levels = LogLevels}};
+handle_cast({ping, RequestTime, From}, State) ->
+    From ! {aae_pong, max(0, timer:now_diff(os:timestamp(), RequestTime))},
+    {noreply, State}.    
 
 
 handle_info(_Info, State) ->
@@ -988,6 +1028,14 @@ hash_clock(none) ->
 hash_clock(Clock) ->
     erlang:phash2(lists:sort(Clock)).
 
+-spec wait_on_sync(pid(), tuple(), pos_integer()) -> any().
+%% @doc
+%% Wait on a sync call until timeout - but don't crash on the timeout
+wait_on_sync(Pid, Call, Timeout) ->
+    try gen_server:call(Pid, Call, Timeout)
+    catch exit:{timeout, _} -> timeout
+    end.
+
 %%%============================================================================
 %%% log definitions
 %%%============================================================================
@@ -1029,8 +1077,9 @@ logs() ->
         {"AAE13",
             {info, "Completed tree rebuild"}},
         {"AAE14",
-            {info, "Mismatch finding unexpected IndexN in fold of ~w"}} 
-                % Probably should be switched to debug
+            {debug, "Mismatch finding unexpected IndexN in fold of ~w"}},
+        {"AAE15",
+            {info, "Ping showed time difference of ~w ms"}}
     
     ].
 
@@ -1413,7 +1462,7 @@ varyindexn_cache_rebuild_tester(StoreType) ->
 
 
 coverage_cheat_test() ->
-    {noreply, _State0} = handle_info(timeout, #state{}),
+    {noreply, _State0} = handle_info(null, #state{}),
     {ok, _State1} = code_change(null, #state{}, null).
 
 
@@ -1434,7 +1483,8 @@ start_wrap(IsEmpty, RootPath, RPL, StoreType) ->
                 RPL, RootPath, F).
 
 
-put_keys(_Cntrl, _Preflists, KeyList, 0) ->
+put_keys(Cntrl, _Preflists, KeyList, 0) ->
+    ok = aae_ping(Cntrl, os:timestamp(), {sync, 10000}),
     KeyList;
 put_keys(Cntrl, Preflists, KeyList, Count) ->
     Preflist = lists:nth(leveled_rand:uniform(length(Preflists)), Preflists),
