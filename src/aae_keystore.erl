@@ -52,6 +52,7 @@
             store_prompt/2,
             store_fold/8,
             store_fetchclock/3,
+            store_bucketlist/1,
             store_loglevel/2]).
 
 -export([define_addobjectspec/3,
@@ -324,6 +325,12 @@ store_fetchclock(Pid, Bucket, Key) ->
     gen_fsm:sync_send_event(Pid, {fetch_clock, Bucket, Key}, infinity).
 
 
+-spec store_bucketlist(pid()) -> fun(() -> list(bucket())).
+%% @doc
+%% List all the buckets in the keystore
+store_bucketlist(Pid) ->
+    gen_fsm:sync_send_all_state_event(Pid, bucket_list).
+
 -spec store_loglevel(pid(), aae_util:log_levels()) -> ok.
 %% @doc
 %% Alter the log level at runtime
@@ -527,6 +534,9 @@ native({prompt, rebuild_complete}, State) ->
 
 
 
+handle_sync_event(bucket_list, _From, StateName, State) ->
+    Folder = bucket_list(State#state.store_type, State#state.store),
+    {reply, Folder, StateName, State};
 handle_sync_event(current_status, _From, StateName, State) ->
     {reply, {StateName, State#state.current_guid}, StateName, State}.
 
@@ -661,7 +671,7 @@ value(parallel, {md, _F}, {_B, _K, {2, ValueItems}}) ->
 value(native, {clock, _F}, {_B, _K, V}) ->
     element(1, summary_from_native(V));
 value(native, {hash, _F}, {_B, _K, V}) ->
-    {VC, _Sz, _SC} = summary_from_native(V),
+    {VC, _Sz, _SC, _MB} = summary_from_native(V),
     element(1, aae_controller:hash_clocks(VC, none));
 value(native, {size, _F}, {_B, _K, V}) ->
     element(2, summary_from_native(V));
@@ -671,6 +681,8 @@ value(native, {aae_segment, null}, {B, K, _V}) ->
     BinaryKey = aae_util:make_binarykey(B, K),
     SegmentID = leveled_tictac:keyto_segment48(BinaryKey),
     aae_keystore:generate_treesegment(SegmentID);
+value(native, {md, null}, {_B, _K, V}) ->
+    element(4, summary_from_native(V));
 value(native, {_NotExposed, F}, {B, K, _V}) ->
     % preflist, aae_segment, index_hash
     F(B, K).
@@ -678,26 +690,29 @@ value(native, {_NotExposed, F}, {B, K, _V}) ->
 
 -spec summary_from_native(binary()) 
                         -> {aae_controller:version_vector(), 
-                            non_neg_integer(), non_neg_integer()}.
+                            non_neg_integer(), non_neg_integer(),
+                            binary()}.
 %% @doc
-%% Extract only sumarry infromation from the binary - the vector, the object 
+%% Extract only summary information from the binary - the vector, the object 
 %% size and the sibling count
 summary_from_native(<<131, _Rest/binary>>=ObjBin) ->  
     {proxy_object, HeadBin, ObjSize, _Fetcher} 
         = binary_to_term(ObjBin),
     summary_from_native(HeadBin, ObjSize).
 
--spec summary_from_native(binary(), integer()) ->
-    {aae_controller:version_vector(), non_neg_integer(), non_neg_integer()}.
+-spec summary_from_native(binary(), integer()) 
+                        -> {aae_controller:version_vector(),
+                            non_neg_integer(), non_neg_integer(),
+                            binary()}.
 %% @doc 
-%% Return afrom a version 1 binary the vector clock and siblings
+%% Split a version 1 binary, as found in the native store
 summary_from_native(ObjBin, ObjSize) ->
     <<?MAGIC:8/integer, 
         1:8/integer, 
         VclockLen:32/integer, VclockBin:VclockLen/binary, 
         SibCount:32/integer, 
-        _MetaBin/binary>> = ObjBin,
-    {binary_to_term(VclockBin), ObjSize, SibCount}.
+        SibBin/binary>> = ObjBin,
+    {binary_to_term(VclockBin), ObjSize, SibCount, SibBin}.
 
 
 -spec convert_segmentlimiter(segment_limiter()) ->
@@ -899,6 +914,30 @@ do_fetchclock(leveled_so, Store, Bucket, Key, Seg) ->
                         all, false,
                         FoldFun, InitAcc, [{clock, null}]),
     Folder().
+
+
+-spec bucket_list(parallel_stores(), pid()) -> {async, fun()}.
+%% @doc
+%% List buckets in backend - using fast skipping method native to leveled if
+%% the backend is key-ordered.
+bucket_list(leveled_so, Store) ->
+    FoldFun = 
+        fun(B, _K, _V, Acc) ->
+            case lists:member(B, Acc) of
+                true ->
+                    Acc;
+                false ->
+                    lists:usort([B|Acc])
+            end
+        end,
+    do_fold(leveled_so, Store, all, all, all, false, FoldFun, [], []);
+bucket_list(leveled_ko, Store) ->
+    FoldFun =  fun(Bucket, Acc) -> Acc ++ [Bucket] end,
+    leveled_bookie:book_bucketlist(Store, ?HEAD_TAG, {FoldFun, []}, all);
+bucket_list(leveled_nko, Store) ->
+    FoldFun =  fun(Bucket, Acc) -> Acc ++ [Bucket] end,
+    leveled_bookie:book_bucketlist(Store, ?RIAK_TAG, {FoldFun, []}, all).
+
 
 -spec do_fold(parallel_stores(), pid(), 
                         range_limiter(), segment_limiter(),

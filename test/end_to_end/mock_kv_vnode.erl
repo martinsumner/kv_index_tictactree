@@ -24,6 +24,7 @@
             rehash/4,
             rebuild_complete/2,
             fold_aae/6,
+            bucketlist_aae/1,
             close/1]).
 
 -export([extractclock_from_riakhead/1,
@@ -71,6 +72,7 @@
 -define(MAGIC, 53).  
 -define(EMPTY_VTAG_BIN, <<"e">>).
 -define(MAGIC_KEYS, [<<48,48,48,52,57,51>>]).
+-define(POKE_TIME, 1000).
 
 
 -type r_object() :: #r_object{}.
@@ -156,6 +158,12 @@ exchange_message(Vnode, Msg, IndexNs, ReturnFun) ->
     gen_server:call(Vnode, {aae, Msg, IndexNs, ReturnFun}).
 
 
+-spec bucketlist_aae(pid()) -> fun(() -> list()).
+%% @doc
+%% List buckets via AAE store
+bucketlist_aae(Vnode) ->
+    gen_server:call(Vnode, bucketlist_aae).
+
 -spec close(pid()) -> ok.
 %% @doc
 %% Close the vnode, and any aae controller
@@ -194,6 +202,7 @@ init([Opts]) ->
                                     Opts#options.index_ns, 
                                     RP, 
                                     fun from_aae_binary/1),
+    erlang:send_after(?POKE_TIME, self(), poke),
     {ok, #state{root_path = RP,
                 aae_type = KeyStoreType,
                 vnode_store = VnSt,
@@ -431,6 +440,9 @@ handle_call({fold_aae, Range, Segments, FoldFun, InitAcc, Elements},
                                 FoldFun, InitAcc, 
                                 Elements),
     {reply, R, State};
+handle_call(bucketlist_aae, _From, State) ->
+    R = aae_controller:aae_bucketlist(State#state.aae_controller),
+    {reply, R, State};
 handle_call(close, _From, State) ->
     ok = aae_controller:aae_close(State#state.aae_controller),
     {stop, normal, ok, State}.
@@ -482,8 +494,15 @@ handle_cast({rebuild_complete, tree}, State) ->
     {noreply, State#state{aae_rebuild = false}}.
 
 
-handle_info(_Info, State) ->
-    {noreply, State}.
+handle_info(poke, State) ->
+    ok = aae_controller:aae_ping(State#state.aae_controller,
+                                    os:timestamp(),
+                                    self()),
+    {noreply, State};
+handle_info({aae_pong, QueueTime}, State) ->
+    io:format("Queuetime in microseconds ~w~n", [QueueTime]),
+    erlang:send_after(?POKE_TIME, self(), poke),
+    {noreply, State}.    
 
 terminate(_Reason, _State) ->
     ok.
