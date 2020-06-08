@@ -168,20 +168,15 @@ init([Opts]) ->
     LogLevels = aae_util:get_opt(log_levels, Opts),
     RootPath0 = filename:join(RootPath, flatten_id(PartitionID)) ++ "/",
     {StartTree, SaveSQN, IsRestored} = 
-        case IgnoreDisk of 
-            true ->
-                {leveled_tictac:new_tree(PartitionID, ?TREE_SIZE), 
+        case {open_from_disk(RootPath0, LogLevels), IgnoreDisk} of
+            % Always run open_from_disk even if the result is to be ignored,
+            % as any files present must still be cleared
+            {{Tree, SQN}, false} when Tree =/= none ->
+                {Tree, SQN, true};
+            _ ->
+                {leveled_tictac:new_tree(PartitionID, ?TREE_SIZE),
                     ?START_SQN, 
-                    false};
-            false ->
-                case open_from_disk(RootPath0, LogLevels) of 
-                    {none, SQN} ->
-                        {leveled_tictac:new_tree(PartitionID, ?TREE_SIZE),
-                            SQN, 
-                            false};
-                    {Tree, SQN} ->
-                        {Tree, SQN, true}
-                end
+                    false}
         end,
     aae_util:log("C0005", [IsRestored, PartitionID], logs(), LogLevels),
     process_flag(trap_exit, true),
@@ -470,6 +465,23 @@ clean_saveopen_test() ->
     
     ?assertMatch({ok, <<"no_delete">>}, file:read_file(UnrelatedFN)),
     ?assertMatch({error, enoent}, file:read_file(NextFN)),
+    aae_util:clean_subdir(RootPath).
+
+
+clear_old_cache_test() ->
+    RootPath = "test/oldcache0/",
+    PartitionID = 1,
+    RP0 = filename:join(RootPath, integer_to_list(PartitionID)) ++ "/",
+    aae_util:clean_subdir(RP0),
+    _Tree2 = setup_savedcaches(RP0),
+    {ok, FN0s} = file:list_dir(RP0),
+    ?assertMatch(2, length(FN0s)),
+    {ok, Cpid} = cache_new(RootPath, 1, undefined),
+    {ok, FN1s} = file:list_dir(RP0),
+    ?assertMatch(0, length(FN1s)),
+    ok = cache_close(Cpid),
+    {ok, FN2s} = file:list_dir(RP0),
+    ?assertMatch(1, length(FN2s)),
     aae_util:clean_subdir(RootPath).
 
 
