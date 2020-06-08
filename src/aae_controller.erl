@@ -28,6 +28,7 @@
             aae_nextrebuild/1,
             aae_put/7,
             aae_close/1,
+            aae_destroy/1,
             aae_fetchroot/3,
             aae_mergeroot/3,
             aae_fetchbranches/4,
@@ -307,6 +308,11 @@ aae_fold(Pid, RLimiter, SLimiter, LMDLimiter, MaxObjectCount,
 aae_close(Pid) ->
     gen_server:call(Pid, close, 30000).
 
+-spec aae_destroy(pid()) -> ok.
+%% @doc
+%% Closedown the AAE controller.
+aae_destroy(Pid) ->
+    gen_server:call(Pid, destroy, 30000).
 
 -spec aae_rebuildtrees(pid(), 
                         list(responsible_preflist()), fun()|null, fun(),
@@ -477,6 +483,15 @@ handle_call(close, _From, State) ->
             ok = aae_treecache:cache_close(TreeCache)
         end,
     lists:foreach(CloseTCFun, State#state.tree_caches),
+    ok = aae_runner:runner_stop(State#state.runner),
+    {stop, normal, ok, State};
+handle_call(destroy, _From, State) ->
+    DestroyTCFun = 
+        fun({_IndexN, TreeCache}) ->
+            ok = aae_treecache:cache_destroy(TreeCache)
+        end,
+    lists:foreach(DestroyTCFun, State#state.tree_caches),
+    ok = aae_keystore:store_destroy(State#state.key_store),
     ok = aae_runner:runner_stop(State#state.runner),
     {stop, normal, ok, State};
 handle_call({rebuild_trees, IndexNs, PreflistFun, WorkerFun, OnlyIfBroken}, 
@@ -1354,7 +1369,7 @@ basic_cache_rebuild_tester(StoreType) ->
     ?assertMatch(Root1, RB_Root1),
     ?assertMatch(Root2, RB_Root2),
     
-    ok = aae_close(Cntrl0),
+    ok = aae_destroy(Cntrl0),
     aae_util:clean_subdir(RootPath).
 
 

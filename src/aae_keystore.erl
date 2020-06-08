@@ -47,6 +47,7 @@
             store_nativestart/4,
             store_startupdata/1,
             store_close/1,
+            store_destroy/1,
             store_mput/2,
             store_mload/2,
             store_prompt/2,
@@ -258,6 +259,13 @@ store_startupdata(Pid) ->
 store_close(Pid) ->
     gen_fsm:sync_send_event(Pid, close, 10000).
 
+
+-spec store_destroy(pid()) -> ok.
+%% @doc
+%% Close the store and clear the data if parallel
+store_destroy(Pid) ->
+    gen_fsm:sync_send_event(Pid, destroy, 30000).
+
 -spec store_mput(pid(), list()) -> ok.
 %% @doc
 %% Put multiple objectspecs into the store.  The object specs should be of the
@@ -393,9 +401,9 @@ loading({fold, Range, Segments, LMD, Count, FoldFun, InitAcc, Elements},
 loading({fetch_clock, Bucket, Key}, _From, State) ->
     VV = do_fetchclock(State#state.store_type, State#state.store, Bucket, Key),
     {reply, VV, loading, State};
-loading(close, _From, State) ->
+loading(Shutdown, _From, State) when Shutdown == close; Shutdown == destroy ->
     ok = delete_store(State#state.store_type, State#state.load_store),
-    ok = close_store(State#state.store_type, State#state.store),
+    ok = close_store(State#state.store_type, State#state.store, Shutdown),
     {stop, normal, ok, State}.
 
 parallel({fold, Range, Segments, LMD, Count, FoldFun, InitAcc, Elements},
@@ -406,15 +414,16 @@ parallel({fold, Range, Segments, LMD, Count, FoldFun, InitAcc, Elements},
 parallel({fetch_clock, Bucket, Key}, _From, State) ->
     VV = do_fetchclock(State#state.store_type, State#state.store, Bucket, Key),
     {reply, VV, parallel, State};
-parallel(close, _From, State) ->
-    ok = close_store(State#state.store_type, State#state.store),
-    {stop, normal, ok, State};
 parallel(startup_metadata, _From, State) ->
     IsEmpty = is_empty(State#state.store_type, State#state.store),
     {reply, 
         {State#state.last_rebuild, IsEmpty}, 
         parallel, 
-        State}.
+        State};
+parallel(Shutdown, _From, State) when Shutdown == close; Shutdown == destroy ->
+    ok = close_store(State#state.store_type, State#state.store, Shutdown),
+    {stop, normal, ok, State}.
+
 
 native({fold, Range, SegFilter, LMD, Count, FoldFun, InitAcc, Elements},
                                                             _From, State) ->
@@ -427,7 +436,7 @@ native(startup_metadata, _From, State) ->
         {State#state.last_rebuild, false}, 
         native,
         State};
-native(close, _From, State) ->
+native(Shutdown, _From, State) when Shutdown == close; Shutdown == destroy ->
     {stop, normal, ok, State}.
 
 
@@ -788,13 +797,13 @@ is_empty(leveled_so, Store) ->
 is_empty(leveled_ko, Store) ->
     leveled_bookie:book_isempty(Store, ?HEAD_TAG).
 
--spec close_store(parallel_stores(), pid()) -> ok.
+-spec close_store(parallel_stores(), pid(), close|destroy) -> ok.
 %% @doc
 %% Wait for store to close
-close_store(leveled_so, Store) ->
+close_store(PS, Store, close) when PS == leveled_so; PS == leveled_ko ->
     leveled_bookie:book_close(Store);
-close_store(leveled_ko, Store) ->
-    leveled_bookie:book_close(Store).
+close_store(PS, Store, destroy) when PS == leveled_so; PS == leveled_ko ->
+    leveled_bookie:book_destroy(Store).
 
 -spec open_store(parallel_stores(), list(), list(), list()) -> {ok, pid()}.
 %% @doc
@@ -1446,7 +1455,7 @@ fetch_clock_test() ->
     ?assertMatch([{"d", 1}],
                     do_fetchclock(leveled_so, Store0, <<"B1">>, <<"K1">>, 1)),
     
-    ok = close_store(leveled_so, Store0),
+    ok = close_store(leveled_so, Store0, destroy),
     aae_util:clean_subdir(RootPath).
     
 
