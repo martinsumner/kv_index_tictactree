@@ -1108,22 +1108,30 @@ open_manifest(RootPath, LogLevels) ->
     FN = filename:join(RootPath, ?MANIFEST_FN ++ ?COMLPETE_EXT),
     case filelib:is_file(FN) of 
         true ->
-            {ok, <<CRC32:32/integer, Manifest/binary>>} = file:read_file(FN),
-            case erlang:crc32(Manifest) of 
-                CRC32 ->
-                    M = binary_to_term(Manifest),
-                    aae_util:log("KS005",
-                                    [M#manifest.current_guid],
-                                    logs(),
-                                    LogLevels),
-                    {ok, M};
+            case file:read_file(FN) of
+                {ok, <<CRC32:32/integer, Manifest/binary>>} ->
+                    case erlang:crc32(Manifest) of 
+                        CRC32 ->
+                            M = binary_to_term(Manifest),
+                            aae_util:log("KS005",
+                                            [M#manifest.current_guid],
+                                            logs(),
+                                            LogLevels),
+                            {ok, M};
+                        _ ->
+                            aae_util:log("KS002",
+                                            [RootPath, "crc32"],
+                                            logs(),
+                                            LogLevels),
+                            false
+                    end;
                 _ ->
                     aae_util:log("KS002",
-                                    [RootPath, "crc32"],
+                                    [RootPath, "other_read_failure"],
                                     logs(),
                                     LogLevels),
                     false
-            end;
+            end;        
         false ->
             aae_util:log("KS002",
                             [RootPath, "missing"],
@@ -1257,6 +1265,15 @@ bad_manifest_test() ->
     ok = file:delete(ManifestFN),
     ok = file:write_file(ManifestFN, Bin0),
     ?assertMatch({ok, Manifest}, open_manifest(RootPath, [])),
+    aae_util:clean_subdir(RootPath).
+
+empty_manifest_test() ->
+    RootPath = "test/emptyman1/",
+    ok = filelib:ensure_dir(RootPath),
+    aae_util:clean_subdir(RootPath),
+    ManifestFN = filename:join(RootPath, ?MANIFEST_FN ++ ?COMLPETE_EXT),
+    ok = file:write_file(ManifestFN, <<>>),
+    ?assertMatch(false, open_manifest(RootPath, undefined)),
     aae_util:clean_subdir(RootPath).
 
 
