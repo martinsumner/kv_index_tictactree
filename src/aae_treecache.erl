@@ -364,14 +364,13 @@ open_from_disk(RootPath, LogLevels) ->
                 end,
             lists:foreach(DeleteFun, Tail), 
             FileToUse = form_cache_filename(RootPath, HeadSQN),
-            {ok, <<CRC32:32/integer, STC/binary>>} = file:read_file(FileToUse),
-            case erlang:crc32(STC) of 
-                CRC32 ->
+            case aae_util:safe_open(FileToUse) of
+                {ok, STC} ->
                     ok = file:delete(FileToUse),
                     {leveled_tictac:import_tree(binary_to_term(STC)), 
                         HeadSQN +  1};
-                _ ->
-                    aae_util:log("C0002", [FileToUse], logs(), LogLevels),
+                {error, Reason} ->
+                    aae_util:log("C0002", [FileToUse, Reason], logs(), LogLevels),
                     {none, 1}
             end
     end.
@@ -421,7 +420,7 @@ binary_extractfun(Key, {CurrentHash, OldHash}) ->
 %% Define log lines for this module
 logs() ->
     [{"C0001", {info, "Pending filename ~s found and will delete"}},
-        {"C0002", {warn, "CRC wonky in file ~w"}},
+        {"C0002", {warn, "File ~w opened with error=~w so will be ignored"}},
         {"C0003", {info, "Saving tree cache to path ~s and filename ~s"}},
         {"C0004", {info, "Destroying tree cache for partition ~w"}},
         {"C0005", {info, "Starting cache with is_restored=~w and IndexN of ~w"}},
