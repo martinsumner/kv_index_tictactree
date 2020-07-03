@@ -16,7 +16,8 @@
             get_opt/2,
             get_opt/3,
             make_binarykey/2,
-            min_loglevel/1]).
+            min_loglevel/1,
+            safe_open/1]).
 
 -export([clean_subdir/1,
             test_key_generator/1,
@@ -163,6 +164,26 @@ localtime_ms() ->
 format_time({{Y, M, D}, {H, Mi, S, Ms}}) ->
     io_lib:format("~b-~2..0b-~2..0b", [Y, M, D]) ++ "T" ++
         io_lib:format("~2..0b:~2..0b:~2..0b.~3..0b", [H, Mi, S, Ms]).
+
+
+-spec safe_open(string()) -> {ok, binary()}|{error, atom()}.
+safe_open(FileName) ->
+    case filelib:is_file(FileName) of 
+        true ->
+            case file:read_file(FileName) of
+                {ok, <<CRC32:32/integer, BinContent/binary>>} ->
+                    case erlang:crc32(BinContent) of 
+                        CRC32 ->
+                            {ok, BinContent};
+                        _ ->
+                            {error, crc_wonky}
+                    end;
+                _ ->
+                    {error, no_crc}
+            end;        
+        false ->
+            {error, not_present}
+    end.
 
 
 %%%============================================================================

@@ -1106,35 +1106,17 @@ range_check(_Range, _B, _K) ->
 %% reference
 open_manifest(RootPath, LogLevels) ->
     FN = filename:join(RootPath, ?MANIFEST_FN ++ ?COMLPETE_EXT),
-    case filelib:is_file(FN) of 
-        true ->
-            case file:read_file(FN) of
-                {ok, <<CRC32:32/integer, Manifest/binary>>} ->
-                    case erlang:crc32(Manifest) of 
-                        CRC32 ->
-                            M = binary_to_term(Manifest),
-                            aae_util:log("KS005",
-                                            [M#manifest.current_guid],
-                                            logs(),
-                                            LogLevels),
-                            {ok, M};
-                        _ ->
-                            aae_util:log("KS002",
-                                            [RootPath, "crc32"],
-                                            logs(),
-                                            LogLevels),
-                            false
-                    end;
-                _ ->
-                    aae_util:log("KS002",
-                                    [RootPath, "other_read_failure"],
-                                    logs(),
-                                    LogLevels),
-                    false
-            end;        
-        false ->
+    case aae_util:safe_open(FN) of
+        {ok, BinaryContents} ->
+            M = binary_to_term(BinaryContents),
+            aae_util:log("KS005",
+                            [M#manifest.current_guid],
+                            logs(),
+                            LogLevels),
+            {ok, M};
+        {error, Reason} ->
             aae_util:log("KS002",
-                            [RootPath, "missing"],
+                            [RootPath, Reason],
                             logs(),
                             LogLevels),
             false
