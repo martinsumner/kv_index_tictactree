@@ -104,8 +104,8 @@
     % 60 seconds (used in fetch root/branches)
 -define(SCAN_TIMEOUT_MS, 600000). 
     % 10 minutes (used in fetch clocks)
--define(UNFILTERED_SCAN_TIMEOUT_MS, 3600000).
-    % 60 minutes (used in fetch trees with no filters)
+-define(UNFILTERED_SCAN_TIMEOUT_MS, 14400000).
+    % 4 hours (used in fetch trees with no filters)
 -define(MAX_RESULTS, 128). 
     % Maximum number of results to request in one round of
 -define(WORTHWHILE_REDUCTION, 0.3).
@@ -174,7 +174,8 @@
                 root_compares = 0 :: integer(),
                 branch_compares = 0 :: integer(),
                 transition_pause_ms = ?TRANSITION_PAUSE_MS :: pos_integer(),
-                log_levels :: aae_util:log_levels()|undefined
+                log_levels :: aae_util:log_levels()|undefined,
+                scan_timeout = ?SCAN_TIMEOUT_MS :: non_neg_integer()
                 }).
 
 -type branch_results() :: list({integer(), binary()}).
@@ -204,7 +205,10 @@
         segment_filter(), modified_range(),
         hash_method()}|none.
     % filter to be used in partial exchanges
--type option_item() :: {transition_pause_ms, pos_integer()}.
+-type option_item() ::
+        {transition_pause_ms, pos_integer()}|
+        {scan_timeout, non_neg_integer()}|
+        {log_levels, aae_util:log_levels()}.
 -type options() :: list(option_item()).
 -type send_message() ::
         fetch_root |
@@ -349,7 +353,7 @@ prepare_partial_exchange(timeout, State) ->
                     logs(),
                     State#state.log_levels),
     Filters = State#state.exchange_filters,
-    ScanTimeout = filtered_timeout(Filters),
+    ScanTimeout = filtered_timeout(Filters, State#state.scan_timeout),
     TreeSize = element(?FILTERIDX_TRS, Filters),
     trigger_next({merge_tree_range, Filters},
                     tree_compare,
@@ -396,7 +400,7 @@ tree_compare(timeout, State) ->
                     false ->
                         Filters
                 end,
-            ScanTimeout = filtered_timeout(Filters0),
+            ScanTimeout = filtered_timeout(Filters0, State#state.scan_timeout),
             trigger_next({merge_tree_range, Filters0},
                             tree_compare,
                             fun merge_tree/2,
@@ -423,7 +427,7 @@ tree_compare(timeout, State) ->
                             fun merge_clocks/2, 
                             [],
                             length(SegmentIDs) == 0, 
-                            ?SCAN_TIMEOUT_MS, 
+                            State#state.scan_timeout, 
                             State#state{tree_compare_deltas = StillDirtyLeaves,
                                         tree_compares = TreeCompares})
     end.
@@ -515,7 +519,7 @@ branch_compare(timeout, State) ->
                             fun merge_clocks/2, 
                             [],
                             length(SegmentIDs) == 0, 
-                            ?SCAN_TIMEOUT_MS, 
+                            State#state.scan_timeout, 
                             State#state{branch_compare_deltas = SegstoFetch,
                                         branch_compares = BranchCompares})
     end.
@@ -705,7 +709,9 @@ process_options([], State) ->
 process_options([{transition_pause_ms, PauseMS}|Tail], State) ->
     process_options(Tail, State#state{transition_pause_ms = PauseMS});
 process_options([{log_levels, LogLevels}|Tail], State) ->
-    process_options(Tail, State#state{log_levels = LogLevels}).
+    process_options(Tail, State#state{log_levels = LogLevels});
+process_options([{scan_timeout, Timeout}|Tail], State) ->
+    process_options(Tail, State#state{scan_timeout = Timeout}).
 
 -spec trigger_next(any(), atom(), fun(), any(), boolean(), 
                                         integer(), exchange_state()) -> any().
@@ -931,16 +937,17 @@ jitter_pause(Timeout) ->
 %% Rest the count back to 0
 reset({Target, Target}) -> {0, Target}. 
 
--spec filtered_timeout(filters()) -> pos_integer().
+-spec filtered_timeout(filters(), pos_integer()) -> pos_integer().
 %% @doc
 %% Has a filter been applied to the scan (true), or are we scanning the whole
 %% bucket (false)
-filtered_timeout({filter, _B, KeyRange, _TS, SegFilter, ModRange, _HM}) ->
+filtered_timeout({filter, _B, KeyRange, _TS, SegFilter, ModRange, _HM},
+                    ScanTimeout) ->
     case ((KeyRange == all) and (SegFilter == all) and (ModRange == all)) of
         true ->
             ?UNFILTERED_SCAN_TIMEOUT_MS;
         false ->
-            ?SCAN_TIMEOUT_MS
+            ScanTimeout
     end.
 
 %%%============================================================================
