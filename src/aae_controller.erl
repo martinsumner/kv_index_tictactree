@@ -35,6 +35,7 @@
             aae_mergebranches/4,
             aae_fetchclocks/5,
             aae_rebuildtrees/5,
+            aae_rebuildtrees/4,
             aae_rebuildstore/2,
             aae_fold/6,
             aae_fold/8,
@@ -333,10 +334,24 @@ aae_destroy(Pid) ->
 %% WorkerFun(Folder, FinishFun), with the FinishFun to be called once the 
 %% Fold is complete (being passed the result of the Folder()).
 aae_rebuildtrees(Pid, IndexNs, PreflistFun, WorkerFun, OnlyIfBroken) ->
-    gen_server:call(Pid, {rebuild_trees, 
-                            IndexNs, PreflistFun, WorkerFun, 
-                            OnlyIfBroken}).
+    case aae_rebuildtrees(Pid, IndexNs, PreflistFun, OnlyIfBroken) of
+        {ok, FoldFun, FinishFun} ->
+            WorkerFun(FoldFun, FinishFun),
+            ok;
+        skipped ->
+            skipped
+    end.
 
+-spec aae_rebuildtrees(pid(), 
+                        list(responsible_preflist()), fun()|null,
+                        boolean()) -> 
+                            {ok, fun(), fun()}|skipped.
+%% @doc
+%% Call aae_rebuildtrees/4 to avoid use of a passed in WorkerFun
+aae_rebuildtrees(Pid, IndexNs, PreflistFun, OnlyIfBroken) ->
+    gen_server:call(Pid, {rebuild_trees, 
+                            IndexNs, PreflistFun, 
+                            OnlyIfBroken}).
 
 -spec aae_rebuildstore(pid(), fun()) -> {ok, fun()|skip, fun()}|ok.
 %% @doc
@@ -494,7 +509,7 @@ handle_call(destroy, _From, State) ->
     ok = aae_keystore:store_destroy(State#state.key_store),
     ok = aae_runner:runner_stop(State#state.runner),
     {stop, normal, ok, State};
-handle_call({rebuild_trees, IndexNs, PreflistFun, WorkerFun, OnlyIfBroken}, 
+handle_call({rebuild_trees, IndexNs, PreflistFun, OnlyIfBroken},
                 _From, State) ->
     DontRebuild = OnlyIfBroken and not State#state.broken_trees,
     LogLevels = State#state.log_levels,
@@ -545,8 +560,6 @@ handle_call({rebuild_trees, IndexNs, PreflistFun, WorkerFun, OnlyIfBroken},
                     aae_util:log_timer("AAE13", [], SW, logs(), LogLevels)
                 end,
 
-            WorkerFun(Folder, FinishFun),
-
             % The IndexNs and TreeCaches supported by the controller must now
             % be updated to match the lasted provided list of responsible
             % preflists
@@ -562,25 +575,22 @@ handle_call({rebuild_trees, IndexNs, PreflistFun, WorkerFun, OnlyIfBroken},
             % reschedule an outstanding requirement to rebuild the store.
             RescheduleRequired = 
                 not (OnlyIfBroken and State#state.parallel_keystore),
-            case RescheduleRequired of
-                true ->
-                    RebuildTS = 
-                        schedule_rebuild(os:timestamp(), 
-                                            State#state.rebuild_schedule),
-                    aae_util:log("AAE11", [RebuildTS], logs(), LogLevels),
-                    {reply, 
-                        ok, 
-                        State#state{tree_caches = TreeCaches, 
-                                        index_ns = IndexNs, 
-                                        next_rebuild = RebuildTS,
-                                        broken_trees = false}};
-                false ->
-                    {reply,
-                        ok,
-                        State#state{tree_caches = TreeCaches, 
-                                        index_ns = IndexNs,
-                                        broken_trees = false}}
-            end
+            RebuildTS =
+                case RescheduleRequired of
+                    true ->
+                        TS = schedule_rebuild(os:timestamp(), 
+                                                State#state.rebuild_schedule),
+                        aae_util:log("AAE11", [TS], logs(), LogLevels),
+                        TS;
+                    false ->
+                        State#state.next_rebuild
+                end,
+            {reply, 
+                {ok, Folder, FinishFun}, 
+                State#state{tree_caches = TreeCaches, 
+                                index_ns = IndexNs, 
+                                next_rebuild = RebuildTS,
+                                broken_trees = false}}
     end;
 handle_call({rebuild_store, SplitObjFun}, _From, State)->
     aae_util:log("AAE12", [State#state.parallel_keystore],
