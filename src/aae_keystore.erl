@@ -99,7 +99,7 @@
                                     {max_journalsize, 10000000},
                                     {compression_method, native},
                                     {compression_point, on_compact}]).
--define(CHANGEQ_LOGFREQ, 10000).
+-define(CHANGEQ_LOGFREQ, 100000).
 -define(STATE_BUCKET, <<"state">>).
 -define(MANIFEST_FN, "keystore"). 
     % filename for Keystore manifes
