@@ -122,6 +122,7 @@
     % so the fold will represent the state of the store when the request was
     % processed, and not when the fold was run
 -define(USE_SET_FOR_SPEED, 64).
+-define(SYNC_TIMEOUT, 30000).
 
 -type bucket() :: binary()|{binary(),binary()}.
 -type key() :: binary().
@@ -243,7 +244,8 @@ store_nativestart(Path, NativeStoreType, BackendPid, LogLevels) ->
 %% @doc
 %% Get the startup metadata from the store
 store_startupdata(Pid) ->
-    {LastRebuild, IsEmpty} = gen_fsm:sync_send_event(Pid, startup_metadata),
+    {LastRebuild, IsEmpty} =
+        gen_fsm:sync_send_event(Pid, startup_metadata, ?SYNC_TIMEOUT),
     {ok, {LastRebuild, IsEmpty}, Pid}.
 
 
@@ -257,14 +259,14 @@ store_startupdata(Pid) ->
 %%
 %% Startup should always delete the Shutdown GUID in both stores.
 store_close(Pid) ->
-    gen_fsm:sync_send_event(Pid, close, 10000).
+    gen_fsm:sync_send_event(Pid, close, ?SYNC_TIMEOUT).
 
 
 -spec store_destroy(pid()) -> ok.
 %% @doc
 %% Close the store and clear the data if parallel
 store_destroy(Pid) ->
-    gen_fsm:sync_send_event(Pid, destroy, 30000).
+    gen_fsm:sync_send_event(Pid, destroy, ?SYNC_TIMEOUT).
 
 -spec store_mput(pid(), list()) -> ok.
 %% @doc
@@ -337,7 +339,7 @@ store_fetchclock(Pid, Bucket, Key) ->
 %% @doc
 %% List all the buckets in the keystore
 store_bucketlist(Pid) ->
-    gen_fsm:sync_send_all_state_event(Pid, bucket_list).
+    gen_fsm:sync_send_all_state_event(Pid, bucket_list, infinity).
 
 -spec store_loglevel(pid(), aae_util:log_levels()) -> ok.
 %% @doc

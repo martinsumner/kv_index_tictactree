@@ -58,6 +58,8 @@
 -define(DEFAULT_REBUILD_SCHEDULE, {1, 300}).
 -define(EMPTY, <<>>).
 -define(EMPTY_MD, term_to_binary([])).
+-define(SYNC_TIMEOUT, 60000).
+    % May depend on x2 underlying 30s timeout
 
 
 -record(state, {key_store :: pid()|undefined,
@@ -173,7 +175,7 @@ aae_start(KeyStoreT, IsEmpty, RebuildSch,
 %% @doc
 %% When is the next keystore rebuild process scheduled for
 aae_nextrebuild(Pid) ->
-    gen_server:call(Pid, rebuild_time).
+    gen_server:call(Pid, rebuild_time, ?SYNC_TIMEOUT).
 
 -spec aae_put(pid(), responsible_preflist(), 
                             aae_keystore:bucket(), aae_keystore:key(),
@@ -265,7 +267,8 @@ aae_mergebranches(Pid, IndexNs, BranchIDs, ReturnFun) ->
 %% included in the fold result. 
 aae_fetchclocks(Pid, IndexNs, SegmentIDs, ReturnFun, PrefLFun) ->
     gen_server:call(Pid, 
-                    {fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PrefLFun}).
+                    {fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PrefLFun},
+                    ?SYNC_TIMEOUT).
 
 -spec aae_fold(pid(), 
                 aae_keystore:range_limiter(),
@@ -301,19 +304,20 @@ aae_fold(Pid, RLimiter, SLimiter, LMDLimiter, MaxObjectCount,
                     {fold, 
                         RLimiter, SLimiter, LMDLimiter, MaxObjectCount,
                         FoldObjectsFun, InitAcc, 
-                        Elements}).
+                        Elements},
+                    ?SYNC_TIMEOUT).
 
 -spec aae_close(pid()) -> ok.
 %% @doc
 %% Closedown the AAE controller.
 aae_close(Pid) ->
-    gen_server:call(Pid, close, 30000).
+    gen_server:call(Pid, close, ?SYNC_TIMEOUT).
 
 -spec aae_destroy(pid()) -> ok.
 %% @doc
 %% Closedown the AAE controller.
 aae_destroy(Pid) ->
-    gen_server:call(Pid, destroy, 30000).
+    gen_server:call(Pid, destroy, ?SYNC_TIMEOUT).
 
 -spec aae_rebuildtrees(pid(), 
                         list(responsible_preflist()), fun()|null, fun(),
@@ -349,9 +353,11 @@ aae_rebuildtrees(Pid, IndexNs, PreflistFun, WorkerFun, OnlyIfBroken) ->
 %% @doc
 %% Call aae_rebuildtrees/4 to avoid use of a passed in WorkerFun
 aae_rebuildtrees(Pid, IndexNs, PreflistFun, OnlyIfBroken) ->
-    gen_server:call(Pid, {rebuild_trees, 
-                            IndexNs, PreflistFun, 
-                            OnlyIfBroken}).
+    gen_server:call(Pid,
+                    {rebuild_trees, 
+                        IndexNs, PreflistFun, 
+                        OnlyIfBroken},
+                    infinity).
 
 -spec aae_rebuildstore(pid(), fun()) -> {ok, fun()|skip, fun()}|ok.
 %% @doc
@@ -363,7 +369,9 @@ aae_rebuildtrees(Pid, IndexNs, PreflistFun, OnlyIfBroken) ->
 %% The SplitValueFun must be able to take the {B, K, V} to be used in the 
 %% object fold and convert it into {B, K, {IndexN, CurrentClock}} 
 aae_rebuildstore(Pid, SplitObjectFun) ->
-    gen_server:call(Pid, {rebuild_store, SplitObjectFun}).
+    gen_server:call(Pid,
+                    {rebuild_store, SplitObjectFun},
+                    infinity).
 
 -spec aae_loglevel(pid(), aae_util:log_levels()) -> ok.
 %% @doc
@@ -376,7 +384,7 @@ aae_loglevel(Pid, LogLevels) ->
 %% List buckets within the aae_keystore.  This will be efficient for native or
 %% key-prdered parallel stores - but not for segment-ordered stores.
 aae_bucketlist(Pid) ->
-    gen_server:call(Pid, bucket_list).
+    gen_server:call(Pid, bucket_list, ?SYNC_TIMEOUT).
 
 -spec aae_ping(pid(), erlang:timestamp(), pid()|{sync, pos_integer()})
                                                                 -> ok|timeout.
