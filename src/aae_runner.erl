@@ -14,8 +14,8 @@
             terminate/2,
             code_change/3]).
 
--export([runner_start/1, 
-            runner_clockfold/4,
+-export([runner_start/1,
+            runner_work/2,
             runner_stop/1]).
 
 -include_lib("eunit/include/eunit.hrl").
@@ -23,9 +23,12 @@
 -record(state, {result_size = 0 :: integer(),
                 query_count = 0 :: integer(),
                 query_time  = 0 :: integer(),
+                aae_controller :: pid()|undefined,
                 log_levels :: aae_util:log_levels()|undefined}).
 
--define(LOG_FREQUENCY, 100).
+-define(LOG_FREQUENCY, 10).
+
+-define(PROMPT_MILLISECONDS, 2000).
 
 %%%============================================================================
 %%% API
@@ -36,45 +39,70 @@
 %% @doc
 %% Start an AAE runner to manage folds 
 runner_start(LogLevels) ->
-    gen_server:start(?MODULE, [LogLevels], []).
+    gen_server:start_link(?MODULE, [LogLevels, self()], []).
 
+-spec runner_work(pid(), aae_controller:runner_work()|queue_empty) -> ok.
 %% @doc
-%% Pass some work to a runner
-runner_clockfold(Runner, Folder, ReturnFun, SizeFun) ->
-    gen_server:cast(Runner, {work, Folder, ReturnFun, SizeFun}).
+%% Be cast some work
+runner_work(Runner, Work) ->
+    gen_server:cast(Runner, Work).
+
+-spec runner_stop(pid()) -> ok.
 %% @doc
 %% Close the runner
 runner_stop(Runner) ->
-    gen_server:call(Runner, close).
+    gen_server:call(Runner, close, 30000).
 
 %%%============================================================================
 %%% gen_server callbacks
 %%%============================================================================
 
-init([LogLevels]) ->
-    {ok, #state{log_levels = LogLevels}}.
+init([LogLevels, Controller]) ->
+    {ok,
+        #state{log_levels = LogLevels, aae_controller = Controller},
+        ?PROMPT_MILLISECONDS}.
 
 handle_call(close, _From, State) ->
     {stop, normal, ok, State}.
 
+handle_cast(queue_empty, State) ->
+    {noreply, State, ?PROMPT_MILLISECONDS};
 handle_cast({work, Folder, ReturnFun, SizeFun}, State) ->
     SW = os:timestamp(),
-    Results = Folder(),
+    State0 =
+        try Folder() of
+            query_backlog ->
+                aae_util:log("R0002", [], logs(), State#state.log_levels),
+                ReturnFun({error, query_backlog}),
+                State;
+            Results ->
+                QueryTime = timer:now_diff(os:timestamp(), SW),
+                aae_util:log("R0003", [QueryTime], logs(),
+                                State#state.log_levels),
+                RS0 = State#state.result_size + SizeFun(Results),
+                QT0 = State#state.query_time + QueryTime,
+                QC0 = State#state.query_count + 1,
+                {RS1, QT1, QC1} =
+                    maybe_log(RS0, QT0, QC0,
+                                ?LOG_FREQUENCY, State#state.log_levels),
 
-    RS0 = State#state.result_size + SizeFun(Results),
-    QT0 = State#state.query_time + timer:now_diff(os:timestamp(), SW),
-    QC0 = State#state.query_count + 1,
-    {RS1, QT1, QC1} =
-        maybe_log(RS0, QT0, QC0, ?LOG_FREQUENCY, State#state.log_levels),
+                ReturnFun(Results),
 
-    ReturnFun(Results),
+                State#state{result_size = RS1,
+                            query_time = QT1,
+                            query_count = QC1}
+        catch
+            Error:Pattern ->
+                aae_util:log("R0005", [Error, Pattern], logs(),
+                                State#state.log_levels),
+                ReturnFun({error, Error}),
+                State
+        end,
+    {noreply, State0, 0}.
 
-    {noreply, State#state{result_size = RS1, 
-                            query_time = QT1, 
-                            query_count = QC1}}.
-
-
-handle_info(_Info, State) ->
+handle_info(timeout, State) ->
+    aae_util:log("R0004", [], logs(), State#state.log_levels),
+    ok = aae_controller:aae_runnerprompt(State#state.aae_controller),
     {noreply, State}.
 
 terminate(normal, State) ->
@@ -91,7 +119,6 @@ code_change(_OldVsn, State, _Extra) ->
 %%%============================================================================
 %%% Internal functions
 %%%============================================================================
-
 
 maybe_log(RS_Acc, QT_Acc, QC_Acc, LogFreq, _LogLs) when QC_Acc < LogFreq ->
     {RS_Acc, QT_Acc, QC_Acc};
@@ -110,7 +137,15 @@ maybe_log(RS_Acc, QT_Acc, QC_Acc, _LogFreq, LogLs) ->
 logs() ->
     [{"R0001", 
             {info, "AAE fetch clock runner has seen results=~w " ++ 
-                    "query_time=~w for a query_count=~w queries"}}
+                    "query_time=~w for a query_count=~w queries"}},
+        {"R0002",
+            {info, "Query backlog resulted in dummy fold"}},
+        {"R0003",
+            {debug, "Query complete in time ~w"}},
+        {"R0004",
+            {debug, "Prompting controller"}},
+        {"R0005",
+            {warn, "Query lead to error ~w pattern ~w"}}
     
     ].
 
@@ -121,12 +156,8 @@ logs() ->
 
 -ifdef(TEST).
 
-
 coverage_cheat_test() ->
-    {noreply, _State0} = handle_info(timeout, #state{}),
     {ok, _State1} = code_change(null, #state{}, null).
-
-
 
 -endif.
 

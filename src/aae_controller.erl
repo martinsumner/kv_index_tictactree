@@ -41,7 +41,8 @@
             aae_fold/8,
             aae_bucketlist/1,
             aae_loglevel/2,
-            aae_ping/3]).
+            aae_ping/3,
+            aae_runnerprompt/1]).
 
 -export([foldobjects_buildtrees/2,
             hash_clocks/2,
@@ -60,6 +61,7 @@
 -define(EMPTY_MD, term_to_binary([])).
 -define(SYNC_TIMEOUT, 60000).
     % May depend on x2 underlying 30s timeout
+-define(MAX_RUNNER_QUEUEDEPTH, 4).
 
 
 -record(state, {key_store :: pid()|undefined,
@@ -76,7 +78,9 @@
                 objectspecs_queue = [] :: list(),
                 root_path :: list()|undefined,
                 runner :: pid()|undefined,
-                log_levels :: aae_util:log_levels()|undefined}).
+                log_levels :: aae_util:log_levels()|undefined,
+                runner_queue = [] :: list(runner_work()),
+                queue_backlog = false :: boolean()}).
 
 -record(options, {keystore_type :: keystore_type(),
                     store_isempty :: boolean(),
@@ -121,12 +125,14 @@
         % be being replaced but the vnode does not know if it is being 
         % replaced.  In this case, it is the responsiblity of the controller 
         % to best determine what the previous version was.
-
+-type runner_work()
+        :: {work, fun(), fun(), fun()}.
 
 -export_type([responsible_preflist/0,
                 keystore_type/0,
                 rebuild_schedule/0,
-                version_vector/0]).
+                version_vector/0,
+                runner_work/0]).
 
 
 
@@ -403,6 +409,12 @@ aae_ping(Pid, RequestTime, {sync, Timeout}) ->
 aae_ping(Pid, RequestTime, From) ->
     gen_server:cast(Pid, {ping, RequestTime, From}).
 
+-spec aae_runnerprompt(pid()) -> ok.
+%% @doc
+%% Let runner prompt to see if there is work for it on the queue
+aae_runnerprompt(Pid) ->
+    gen_server:cast(Pid, runner_prompt).
+
 %%%============================================================================
 %%% gen_server callbacks
 %%%============================================================================
@@ -478,7 +490,7 @@ init([Opts]) ->
     {AllTreesOK, TreeCaches} = 
         lists:foldl(StartCacheFun, {true, []}, Opts#options.index_ns),
     
-    % Start clock runner
+    % Start fetch_clocks runner
     {ok, Runner} = aae_runner:runner_start(LogLevels),
 
     aae_util:log("AAE10", 
@@ -655,8 +667,20 @@ handle_call({fold, RLimiter, SLimiter, LMDLimiter, MaxObjectCount,
                                 InitAcc,
                                 Elements),
     {reply, R, State};
+handle_call({fetch_clocks, _IndexNs, _SegmentIDs, ReturnFun, _PreflFun},
+                                _From, State=#state{queue_backlog=QB}) 
+                                    when QB ->
+    %% There is a backlog of queries for the runner.  Add some dummy work to
+    %% the queue.  The dummy work will prevent a snapshot being taken which may
+    %% otherwise have to live the length of the queue.  It also makes sure the
+    %% exchange response is delayed by the length of the queue - so that the
+    %% exchange will still slow down.
+    Folder = fun() -> query_backlog end,
+    SizeFun = fun() -> 0 end,
+    Queue = State#state.runner_queue ++ [{work, Folder, ReturnFun, SizeFun}],
+    {reply, ok, State#state{runner_queue = Queue}};
 handle_call({fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PreflFun},
-                                                            _From, State) ->
+                                _From, State) ->
     SegmentMap = lists:map(fun(S) -> {S, 0} end, SegmentIDs),
     InitMap = 
         lists:map(fun(IdxN) -> 
@@ -696,14 +720,19 @@ handle_call({fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PreflFun},
             end 
         end,
     
+    ReplaceFun = 
+        fun({_IdxN, T, SegM}) ->
+            aae_treecache:cache_replacedirtysegments(T, SegM, GUID)
+        end,
     ReturnFun0 = 
-        fun({KeyClockList, SubTree}) ->
-            ReturnFun(KeyClockList),
-            ReplaceFun = 
-                fun({_IdxN, T, SegM}) ->
-                    aae_treecache:cache_replacedirtysegments(T, SegM, GUID)
-                end,
-            lists:foreach(ReplaceFun, SubTree)
+        fun(Response) ->
+            case Response of
+                {error, Reason} ->
+                    ReturnFun({error, Reason});
+                {KeyClockList, SubTree} ->
+                    ReturnFun(KeyClockList),
+                    lists:foreach(ReplaceFun, SubTree)
+            end
         end,
     SizeFun =
         fun({KeyClockList, _SubTree}) ->
@@ -724,11 +753,14 @@ handle_call({fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PreflFun},
                                     {clock, null},
                                     {aae_segment, null},
                                     {hash, null}]),
-    aae_runner:runner_clockfold(State#state.runner, 
-                                Folder, 
-                                ReturnFun0, 
-                                SizeFun),
-    {reply, ok, State};
+    Queue = State#state.runner_queue ++ [{work, Folder, ReturnFun0, SizeFun}],
+    Backlog = length(Queue) >= ?MAX_RUNNER_QUEUEDEPTH,
+    %% If there is a backlog, the queue will remain in backlog state until it
+    %% is empty.  Whilst in backlog state, query requests will result in dummy
+    %% work being added to the queue not real work (which may cause the queue
+    %% to continue to grow)
+    {reply, ok, State#state{queue_backlog = Backlog, runner_queue = Queue}};
+
 handle_call(bucket_list,  _From, State) ->
     ok = maybe_flush_puts(State#state.key_store, 
                             State#state.objectspecs_queue,
@@ -846,7 +878,18 @@ handle_cast({log_levels, LogLevels}, State) ->
     {noreply, State#state{log_levels = LogLevels}};
 handle_cast({ping, RequestTime, From}, State) ->
     From ! {aae_pong, max(0, timer:now_diff(os:timestamp(), RequestTime))},
-    {noreply, State}.    
+    {noreply, State};
+handle_cast(runner_prompt, State) ->
+    case State#state.runner_queue of
+        [] ->
+            %% Only the queue becoming empty can take the queue out of backlog
+            %% state
+            ok = aae_runner:runner_work(State#state.runner, queue_empty),
+            {noreply, State#state{queue_backlog = false}};
+        [WI|Tail] ->
+            ok = aae_runner:runner_work(State#state.runner, WI),
+            {noreply, State#state{runner_queue = Tail}}
+    end.
 
 
 handle_info(_Info, State) ->
@@ -1209,8 +1252,64 @@ shutdown_parallel_rebuild_test() ->
     aae_util:clean_subdir(RootPath).
 
 
+overload_runner_test_() ->
+    {timeout, 10, fun overloadrunner_tester/0}.
 
-shutdown_parallel_test() ->
+shudown_parallel_test_() ->
+    {timeout, 10, fun shutdown_parallel_tester/0}.
+
+wrong_indexn_test_() ->
+    {timeout, 10, fun wrong_indexn_tester/0}.
+
+rebuildso_test_() ->
+    {timeout, 10, fun() -> basic_cache_rebuild_tester(leveled_so) end}.
+
+rebuildko_test_() ->
+    {timeout, 10, fun() -> basic_cache_rebuild_tester(leveled_ko) end}.
+
+vary_indexnso_test_() ->
+    {timeout, 10, fun() -> varyindexn_cache_rebuild_tester(leveled_so) end}.
+
+vary_indexnlo_test_() ->
+    {timeout, 10, fun() -> varyindexn_cache_rebuild_tester(leveled_ko) end}.
+
+
+overloadrunner_tester() ->
+    RootPath = "test/overloadrunner/",
+    aae_util:clean_subdir(RootPath),
+    {ok, Cntrl0} = start_wrap(false, RootPath, leveled_so),
+    ok = aae_put(Cntrl0, {1, 3}, <<"B">>, <<"K">>, [{a, 1}], [], <<>>),
+    BinaryKey1 = aae_util:make_binarykey(<<"B">>, <<"K">>),
+    SegID1 = 
+        leveled_tictac:get_segment(leveled_tictac:keyto_segment32(BinaryKey1), 
+                                    ?TREE_SIZE),
+    
+    RPid = self(),
+    ReturnFun = fun(R) -> RPid ! {result, R} end,
+
+    FetchFun =
+        fun(_N) ->
+            ok = aae_fetchclocks(Cntrl0, [{1, 3}], [SegID1], ReturnFun, null)
+        end,
+    CatchFun =
+        fun(_N) ->
+            Result0 = start_receiver(),
+            io:format("Result0 of ~w~n", [Result0]),
+            ?assertMatch([{<<"B">>,<<"K">>,[{a,1}]}], Result0)
+        end,
+    lists:foreach(FetchFun, lists:seq(1, ?MAX_RUNNER_QUEUEDEPTH + 1)),
+    lists:foreach(CatchFun, lists:seq(1, ?MAX_RUNNER_QUEUEDEPTH)),
+    OverloadResult = start_receiver(),
+    ?assertMatch({error, query_backlog}, OverloadResult),
+
+    lists:foreach(FetchFun, lists:seq(1, ?MAX_RUNNER_QUEUEDEPTH)),
+    lists:foreach(CatchFun, lists:seq(1, ?MAX_RUNNER_QUEUEDEPTH)),
+
+    ok = aae_close(Cntrl0),
+    aae_util:clean_subdir(RootPath).
+
+
+shutdown_parallel_tester() ->
     RootPath = "test/shutdownpll/",
     aae_util:clean_subdir(RootPath),
     {ok, Cntrl0} = start_wrap(false, RootPath, leveled_so),
@@ -1258,7 +1357,7 @@ shutdown_parallel_test() ->
     aae_util:clean_subdir(RootPath).
 
 
-wrong_indexn_test() ->
+wrong_indexn_tester() ->
     RootPath = "test/emptycntrllr/",
     aae_util:clean_subdir(RootPath),
 
@@ -1330,12 +1429,6 @@ wrong_indexn_test() ->
     aae_util:clean_subdir(RootPath).
 
 
-basic_cache_rebuild_so_test() ->
-    basic_cache_rebuild_tester(leveled_so).
-
-basic_cache_rebuild_ko_test() ->
-    basic_cache_rebuild_tester(leveled_ko).
-
 basic_cache_rebuild_tester(StoreType) ->
     RootPath = "test/emptycntrllr/",
     aae_util:clean_subdir(RootPath),
@@ -1369,7 +1462,10 @@ basic_cache_rebuild_tester(StoreType) ->
                             false),
     ok = aae_fetchclocks(Cntrl0,
                             Preflists, lists:seq(1, 16),
-                            fun(_R) -> ok end, null),
+                            fun(_R) -> ok end,
+                            null),
+    timer:sleep(2100),
+        % Must wait the prompt for the fetch to happen (and a touch)
     ok = start_receiver(),
 
     ok = aae_fetchroot(Cntrl0, [{0, 3}], ReturnFun),
@@ -1390,12 +1486,6 @@ basic_cache_rebuild_tester(StoreType) ->
     ok = aae_destroy(Cntrl0),
     aae_util:clean_subdir(RootPath).
 
-
-varyindexn_cache_rebuild_so_test() ->
-    varyindexn_cache_rebuild_tester(leveled_so).
-
-varyindexn_cache_rebuild_ko_test() ->
-    varyindexn_cache_rebuild_tester(leveled_ko).
 
 varyindexn_cache_rebuild_tester(StoreType) ->
     RootPath = "test/emptycntrllr/",

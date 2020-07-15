@@ -80,7 +80,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     NullRepairFun = fun(_KL) -> ok end, 
     ReturnFun = fun(R) -> RPid ! {result, R} end,
 
-    % Exchange between empty vnodes
+    io:format("Exchange between empty vnodes~n"),
     {ok, _P0, GUID0} = 
         aae_exchange:start([{exchange_vnodesendfun(VNN), IndexNs}],
                                 [{exchange_vnodesendfun(VNP), IndexNs}],
@@ -90,7 +90,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     {ExchangeState0, 0} = testutil:start_receiver(),
     true = ExchangeState0 == root_compare,
 
-    % Same exchange - now using tree compare
+    io:format("Same exchange - now using tree compare~n"),
     GetBucketFun = 
         fun(I) ->
             case TupleBuckets of
@@ -178,7 +178,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
             end
         end,
     
-    % Load objects into both stores
+    io:format("Load objects into both stores~n"),
     PutFun1 = PutFun(VNN, VNP),
     PutFun2 = PutFun(VNP, VNN),
     {OL1, OL2A} = lists:split(InitialKeyCount div 2, ObjList),
@@ -192,7 +192,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     ok = lists:foreach(PutFun1, ReplaceList),
     ok = lists:foreach(DeleteFun([VNN, VNP]), DeleteList1),
     
-    % Exchange between equivalent vnodes
+    io:format("Exchange between equivalent vnodes~n"),
     {ok, _P1, GUID1} = 
         aae_exchange:start([{exchange_vnodesendfun(VNN), IndexNs}],
                                 [{exchange_vnodesendfun(VNP), IndexNs}],
@@ -202,8 +202,8 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     {ExchangeState1, 0} = testutil:start_receiver(),
     true = ExchangeState1 == root_compare,
 
-    % Rehash some entries and confirm root_compare still matches, as 
-    % rehash doesn't do anything
+    io:format("Rehash some entries and confirm root_compare " ++ 
+                "still matches, as rehash doesn't do anything~n"),
     ok = lists:foreach(RehashFun([VNN, VNP]), RehashList),
     {ok, _P1a, GUID1a} = 
         aae_exchange:start([{exchange_vnodesendfun(VNN), IndexNs}],
@@ -214,8 +214,8 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     {ExchangeState1a, 0} = testutil:start_receiver(),
     true = ExchangeState1a == root_compare,
 
-    % Compare the two stores using an AAE fold - and prove that AAE fold is
-    % working as expected
+    io:format("Compare the two stores using an AAE fold - " ++
+                "and prove that AAE fold is working as expected~n"),
     Bucket = 
         case TupleBuckets of
             true ->
@@ -293,11 +293,11 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     {[{K1, C1, H1}, {K2, C2, H2}], 2} = VNNF_SL(),
     {[{K1, C1, H1}, {K2, C2, H2}], 2} = VNPF_SL(),
 
-    % Make change to one vnode only (the parallel one)
+    io:format("Make change to one vnode only (the parallel one)~n"),
     Idx1 = erlang:phash2(RogueObj1#r_object.key) rem length(IndexNs),
     mock_kv_vnode:put(VNP, RogueObj1, lists:nth(Idx1 + 1, IndexNs), []),
 
-    % Exchange between nodes to expose difference
+    io:format("Exchange between nodes to expose difference~n"),
     {ok, _P2, GUID2} = 
         aae_exchange:start([{exchange_vnodesendfun(VNN), IndexNs}],
                                 [{exchange_vnodesendfun(VNP), IndexNs}],
@@ -307,11 +307,12 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     {ExchangeState2, 1} = testutil:start_receiver(),
     true = ExchangeState2 == clock_compare,
 
-    % Make change to one vnode only (the native one)
+    io:format("Make change to one vnode only (the native one)~n"),
     Idx2 = erlang:phash2(RogueObj2#r_object.key) rem length(IndexNs),
     mock_kv_vnode:put(VNN, RogueObj2, lists:nth(Idx2 + 1, IndexNs), []),
 
-    % Exchange between nodes to expose differences (one in VNN, one in VNP)
+    io:format("Exchange between nodes to expose differences" ++ 
+                "(one in VNN, one in VNP)~n"),
     {ok, _P3, GUID3} = 
         aae_exchange:start([{exchange_vnodesendfun(VNN), IndexNs}],
                                 [{exchange_vnodesendfun(VNP), IndexNs}],
@@ -323,8 +324,10 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
 
     {RebuildN, false} = mock_kv_vnode:rebuild(VNN, false),
     {RebuildP, false} = mock_kv_vnode:rebuild(VNP, false),
-    % Discover Next rebuild times - should be in the future as both stores
-    % were started empty, and hence without the need to rebuild
+    
+    io:format("Discover Next rebuild times - should be in the future " ++
+                "as both stores were started empty, and hence without " ++
+                "the need to rebuild~n"),
     io:format("Next rebuild vnn ~w vnp ~w~n", [RebuildN, RebuildP]),
     true = RebuildN > os:timestamp(),
     true = RebuildP > os:timestamp(),
@@ -332,8 +335,9 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     ok = mock_kv_vnode:close(VNN),
     ok = mock_kv_vnode:close(VNP),
 
-    % Restart the vnodes, confirm next rebuilds are still in the future 
-    % between startup and shutdown the next_rebuild will be rescheduled to
+    io:format("Restart the vnodes, " ++ 
+                "confirm next rebuilds are still in the future~n"),
+    % Between startup and shutdown the next_rebuild will be rescheduled to
     % a different time, as the look at the last rebuild time and schedule 
     % forward from there.
     {ok, VNNa} = mock_kv_vnode:open(MockPathN, native, IndexNs, PreflistFun),
@@ -345,7 +349,8 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     true = RebuildPa > os:timestamp(),
 
     % Exchange between nodes to expose differences (one in VNN, one in VNP)
-    % Should still discover the same difference as when they were closed.
+    io:format("Should still discover the same difference " ++ 
+                "as when they were close~n"),
     {ok, _P3a, GUID3a} = 
         aae_exchange:start([{exchange_vnodesendfun(VNNa), IndexNs}],
                                 [{exchange_vnodesendfun(VNPa), IndexNs}],
@@ -355,7 +360,8 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     {ExchangeState3a, 2} = testutil:start_receiver(),
     true = ExchangeState3a == clock_compare,
 
-    % Prompts for a rebuild of both stores.  The rebuild is a rebuild of both
+    io:format("Prompts for a rebuild of both stores~n"),
+    % The rebuild is a rebuild of both
     % the store and the tree in the case of the parallel vnode, and just the
     % tree in the case of the native rebuild
     {RebuildNb, true} = mock_kv_vnode:rebuild(VNNa, true),
@@ -365,7 +371,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
         % key thing that the ongoing rebuild status is now true (the second 
         % element of the rebuild response)
 
-    % Now poll to check to see when the rebuild is complete
+    io:format("Now poll to check to see when the rebuild is complete~n"),
     wait_for_rebuild(VNNa),
 
     % Next rebuild times should now still be in the future
@@ -373,8 +379,8 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     {RebuildPc, false} = mock_kv_vnode:rebuild(VNPa, false),
     true = RebuildPc == RebuildPa, % Should not have changed
 
-    % Following a completed rebuild - the exchange should still work as 
-    % before, spotting two differences
+    io:format("Following a completed rebuild - the exchange should still" ++
+                " work as  before, spotting two differences~n"),
     {ok, _P3b, GUID3b} = 
         aae_exchange:start([{exchange_vnodesendfun(VNNa), IndexNs}],
                                 [{exchange_vnodesendfun(VNPa), IndexNs}],
@@ -387,6 +393,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     {RebuildPb, true} = mock_kv_vnode:rebuild(VNPa, true),
     true = RebuildPb > os:timestamp(),
 
+    io:format("Rebuild in progress, exchange still working~n"),
     % There should now be a rebuild in progress - but immediately check that 
     % an exchange will still work (spotting the same two differences as before
     % following a clock_compare)
@@ -396,12 +403,12 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
                                 NullRepairFun,
                                 ReturnFun),
     io:format("Exchange id ~s~n", [GUID3c]),
-    % This could receive {timeout, 0}.  On complete of rebuild the leveled
+    % This could receive {error, 0}.  On complete of rebuild the leveled
     % store is shutdown - and by design this closes all iterators.  So this
     % may crash if in the fetch_clock state
     {ExchangeState3c, 2} = 
         case testutil:start_receiver() of
-            {timeout, 0} ->
+            {error, 0} ->
                 aae_exchange:start([{exchange_vnodesendfun(VNNa), IndexNs}],
                                     [{exchange_vnodesendfun(VNPa), IndexNs}],
                                     NullRepairFun,
@@ -414,13 +421,15 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
         end,
     true = ExchangeState3c == clock_compare,
 
+    io:format("Waiting for rebuild after exchange success~n"),
     wait_for_rebuild(VNPa),
     {RebuildNd, false} = mock_kv_vnode:rebuild(VNNa, false),
     {RebuildPd, false} = mock_kv_vnode:rebuild(VNPa, false),
     true = RebuildNd == RebuildNc,
     true = RebuildPd > os:timestamp(),
     
-    % Rebuild now complete - should get the same result for an exchange
+    io:format("Rebuild now complete - " ++ 
+                "should get the same result for an exchange~n"),
     {ok, _P3d, GUID3d} = 
         aae_exchange:start([{exchange_vnodesendfun(VNNa), IndexNs}],
                                 [{exchange_vnodesendfun(VNPa), IndexNs}],
@@ -430,7 +439,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     {ExchangeState3d, 2} = testutil:start_receiver(),
     true = ExchangeState3d == clock_compare,
 
-    % Delete some keys - and see the size of the delta increase
+    io:format("Delete some keys - and see the size of the delta increase~n"),
     ok = lists:foreach(DeleteFun([VNPa]), DeleteList2),
     {ok, _P4a, GUID4a} = 
         aae_exchange:start([{exchange_vnodesendfun(VNNa), IndexNs}],
@@ -451,7 +460,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     {ExchangeState4b, 2} = testutil:start_receiver(),
     true = ExchangeState4b == clock_compare,
 
-    % Same exchange - now using tree compare
+    io:format("Same exchange - now using tree compare~n"),
     CheckBucketList = [Bucket1, Bucket2],
     CheckBucketFun = 
         fun(CheckBucket, Acc) ->
@@ -473,6 +482,8 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
         end,
     true = 2 == lists:foldl(CheckBucketFun, 0, CheckBucketList),
 
+
+    io:format("Tree compare section - with large deltas~n"),
     % Next section is going to test tree_compare with large deltas, and
     % with a genuine repair fun (one which actually repairs).  Repairs
     % should happen in stages as the mismatched segment list will at first
@@ -583,7 +594,8 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
                 [TotalRepairs4, length(RepairListTC4)]),
     true = length(RepairListTC4) == TotalRepairs4,
 
-    % Check with a key range.  Testing with a modified range requires more
+    io:format("Check with a key range~n"),
+    % Testing with a modified range requires more
     % effort as the objects don't have a last modified date
 
     LimiterCheckBucketFun = 
@@ -643,6 +655,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     true = length(RplObjListKR3) - 50 == AllRepairsKR3,
 
 
+    io:format("Tests with a modified range~n"),
     % Some tests with a modified range.  Split a bunch of changes into two
     % lots.  Apply those two lots in two distinct time ranges.  Find the 
     % deltas by time range
