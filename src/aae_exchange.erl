@@ -551,6 +551,8 @@ waiting_all_results({reply, not_supported, Colour}, State) ->
                     logs(),
                     State#state.log_levels),
     {stop, normal, State#state{pending_state = not_supported}};
+waiting_all_results({reply, {error, Reason}, _Colour}, State) ->
+    waiting_all_results({error, Reason}, State);
 waiting_all_results({reply, Result, Colour}, State) ->
     aae_util:log("EX007",
                     [Colour, State#state.exchange_id],
@@ -1079,6 +1081,12 @@ connect_error_test() ->
                                 [1000, 1000, 1000])),
     ?assertMatch(false, is_process_alive(Test)).
     
+waiting_for_error_test() ->
+    {stop, normal, _S0} =
+        waiting_all_results({reply, {error, query_backlog}, blue},
+                            #state{exchange_type = full,
+                                    merge_fun = fun merge_clocks/2}).
+
 
 coverage_cheat_test() ->
     {next_state, prepare, _State0} =

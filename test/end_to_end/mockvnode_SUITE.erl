@@ -28,15 +28,19 @@ all() -> [
 
 
 loadexchangeandrebuild_stbucketko(_Config) ->
+    mock_vnode_loadexchangeandrebuild_tester(false, parallel_ko),
     mock_vnode_loadexchangeandrebuild_tester(false, parallel_ko).
 
 loadexchangeandrebuild_stbucketso(_Config) ->
+    mock_vnode_loadexchangeandrebuild_tester(false, parallel_so),
     mock_vnode_loadexchangeandrebuild_tester(false, parallel_so).
 
 loadexchangeandrebuild_tuplebucketko(_Config) ->
+    mock_vnode_loadexchangeandrebuild_tester(true, parallel_ko),
     mock_vnode_loadexchangeandrebuild_tester(true, parallel_ko).
 
 loadexchangeandrebuild_tuplebucketso(_Config) ->
+    mock_vnode_loadexchangeandrebuild_tester(true, parallel_so),
     mock_vnode_loadexchangeandrebuild_tester(true, parallel_so).
 
 mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
