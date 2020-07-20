@@ -156,6 +156,28 @@ logs() ->
 
 -ifdef(TEST).
 
+runner_fail_test() ->
+    {ok, R} = runner_start(undefined),
+    TestProcess = self(),
+    CheckFun =
+        fun(ReturnTuple) ->
+            ?assertMatch(error, element(1, ReturnTuple)),
+            TestProcess ! error
+        end,
+    ReturnFun = aae_controller:generate_returnfun("ABCD", CheckFun),
+    FoldFun = fun() -> throw(noproc) end,
+    SizeFun = fun(_Results) -> 0 end,
+    runner_work(R, {work, FoldFun, ReturnFun, SizeFun}),
+    ?assertMatch(error, start_receiver()),
+    ok = runner_stop(R).
+    
+start_receiver() ->
+    receive
+        Reply ->
+            Reply 
+    end.
+
+
 coverage_cheat_test() ->
     {ok, _State1} = code_change(null, #state{}, null).
 

@@ -50,6 +50,8 @@
 
 -export([rebuild_worker/1, wait_on_sync/3]).
 
+-export([generate_returnfun/2]).
+
 -include_lib("eunit/include/eunit.hrl").
 
 -define(STORE_PATH, "keystore/").
@@ -80,7 +82,8 @@
                 runner :: pid()|undefined,
                 log_levels :: aae_util:log_levels()|undefined,
                 runner_queue = [] :: list(runner_work()),
-                queue_backlog = false :: boolean()}).
+                queue_backlog = false :: boolean(),
+                block_next_put = false :: boolean()}).
 
 -record(options, {keystore_type :: keystore_type(),
                     store_isempty :: boolean(),
@@ -511,7 +514,8 @@ handle_call(rebuild_time, _From, State) ->
 handle_call(close, _From, State) ->
     ok = maybe_flush_puts(State#state.key_store, 
                             State#state.objectspecs_queue,
-                            State#state.parallel_keystore),
+                            State#state.parallel_keystore,
+                            true),
     ok = aae_keystore:store_close(State#state.key_store),
     CloseTCFun = 
         fun({_IndexN, TreeCache}) ->
@@ -542,7 +546,8 @@ handle_call({rebuild_trees, IndexNs, PreflistFun, OnlyIfBroken},
             % Before the fold flush all the PUTs (if a parallel store)
             ok = maybe_flush_puts(State#state.key_store, 
                                     State#state.objectspecs_queue,
-                                    State#state.parallel_keystore),
+                                    State#state.parallel_keystore,
+                                    true),
             
             % Setup a fold over the store
             {FoldFun, InitAcc} = foldobjects_buildtrees(IndexNs, LogLevels),
@@ -617,7 +622,8 @@ handle_call({rebuild_store, SplitObjFun}, _From, State)->
                     logs(), State#state.log_levels),
     ok = maybe_flush_puts(State#state.key_store, 
                             State#state.objectspecs_queue,
-                            State#state.parallel_keystore),
+                            State#state.parallel_keystore,
+                            true),
     ok = aae_keystore:store_prompt(State#state.key_store, rebuild_start),
     case State#state.parallel_keystore of 
         true ->
@@ -657,7 +663,8 @@ handle_call({fold, RLimiter, SLimiter, LMDLimiter, MaxObjectCount,
                     FoldObjectsFun, InitAcc, Elements},  _From, State) ->
     ok = maybe_flush_puts(State#state.key_store, 
                             State#state.objectspecs_queue,
-                            State#state.parallel_keystore),
+                            State#state.parallel_keystore,
+                            true),
     R = aae_keystore:store_fold(State#state.key_store, 
                                 RLimiter,
                                 SLimiter,
@@ -720,20 +727,7 @@ handle_call({fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PreflFun},
             end 
         end,
     
-    ReplaceFun = 
-        fun({_IdxN, T, SegM}) ->
-            aae_treecache:cache_replacedirtysegments(T, SegM, GUID)
-        end,
-    ReturnFun0 = 
-        fun(Response) ->
-            case Response of
-                {error, Reason} ->
-                    ReturnFun({error, Reason});
-                {KeyClockList, SubTree} ->
-                    ReturnFun(KeyClockList),
-                    lists:foreach(ReplaceFun, SubTree)
-            end
-        end,
+    ReturnFun0 = generate_returnfun(GUID, ReturnFun),
     SizeFun =
         fun({KeyClockList, _SubTree}) ->
             length(KeyClockList)
@@ -741,7 +735,8 @@ handle_call({fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PreflFun},
 
     ok = maybe_flush_puts(State#state.key_store, 
                             State#state.objectspecs_queue,
-                            State#state.parallel_keystore),
+                            State#state.parallel_keystore,
+                            true),
     {async, Folder} = 
         aae_keystore:store_fold(State#state.key_store, 
                                 all,
@@ -764,13 +759,14 @@ handle_call({fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PreflFun},
 handle_call(bucket_list,  _From, State) ->
     ok = maybe_flush_puts(State#state.key_store, 
                             State#state.objectspecs_queue,
-                            State#state.parallel_keystore),
+                            State#state.parallel_keystore,
+                            true),
     R = aae_keystore:store_bucketlist(State#state.key_store),
     {reply, R, State};
 handle_call({ping, RequestTime}, _From, State) ->
     T = max(0, timer:now_diff(os:timestamp(), RequestTime)),
     aae_util:log("AAE15", [T div 1000], logs(), State#state.log_levels),
-    {reply, ok, State}.
+    {reply, ok, State#state{block_next_put = true}}.
 
 
 handle_cast({put, IndexN, Bucket, Key, Clock, PrevClock, BinaryObj}, State) ->
@@ -828,8 +824,12 @@ handle_cast({put, IndexN, Bucket, Key, Clock, PrevClock, BinaryObj}, State) ->
             case length(UpdSpecL) >= ?BATCH_LENGTH of 
                 true ->
                     % Push to the KeyStore as batch is now at least full
-                    maybe_flush_puts(State0#state.key_store, UpdSpecL, true),
-                    {noreply, State0#state{objectspecs_queue = []}};
+                    maybe_flush_puts(State0#state.key_store,
+                                        UpdSpecL,
+                                        true,
+                                        State#state.block_next_put),
+                    {noreply, State0#state{objectspecs_queue = [],
+                                            block_next_put = false}};
                 false ->
                     {noreply, State0#state{objectspecs_queue = UpdSpecL}}
             end;
@@ -878,7 +878,7 @@ handle_cast({log_levels, LogLevels}, State) ->
     {noreply, State#state{log_levels = LogLevels}};
 handle_cast({ping, RequestTime, From}, State) ->
     From ! {aae_pong, max(0, timer:now_diff(os:timestamp(), RequestTime))},
-    {noreply, State};
+    {noreply, State#state{block_next_put = true}};
 handle_cast(runner_prompt, State) ->
     case State#state.runner_queue of
         [] ->
@@ -965,6 +965,23 @@ wrapped_splitobjfun(ObjectSplitFun) ->
 %%%============================================================================
 
 
+-spec generate_returnfun(string(), fun((any()) -> ok)) ->
+            fun(({error, term()}|{list(), list()}) -> ok).
+generate_returnfun(GUID, ReturnFun) ->
+    ReplaceFun = 
+        fun({_IdxN, T, SegM}) ->
+            aae_treecache:cache_replacedirtysegments(T, SegM, GUID)
+        end,
+    fun(Response) ->
+        case Response of
+            {error, Reason} ->
+                ReturnFun({error, Reason});
+            {KeyClockList, SubTree} ->
+                ReturnFun(KeyClockList),
+                lists:foreach(ReplaceFun, SubTree)
+        end
+    end.
+
 -spec get_treecache(responsible_preflist(), controller_state()) -> pid().
 %% @doc
 %% Fetch the tree cache from state, creating a new tree cache if it isn't 
@@ -1008,13 +1025,13 @@ check_queuefun(ObjectSpec, {Bucket, Key, false}) ->
 check_queuefun(_ObjectSpec, {Bucket, Key, Value}) ->
     {Bucket, Key, Value}.
 
--spec maybe_flush_puts(pid(), list(), boolean()) -> ok.
+-spec maybe_flush_puts(pid(), list(), boolean(), boolean()) -> ok.
 %% @doc
 %% Flush all the puts into the store.  The Puts have been queued with the most
 %% recent PUT at the head.  
-maybe_flush_puts(Store, ObjSpecL, true) ->
-    aae_keystore:store_mput(Store, ObjSpecL);
-maybe_flush_puts(_Store, _ObjSpecL, false) ->
+maybe_flush_puts(Store, ObjSpecL, true, Blocking) ->
+    aae_keystore:store_mput(Store, ObjSpecL, Blocking);
+maybe_flush_puts(_Store, _ObjSpecL, false, _Blocking) ->
     ok.
 
 
@@ -1672,6 +1689,12 @@ rebuild_worker(ReturnFun) ->
             FinishFun(FoldFun()),
             ReturnFun(ok)
     end.
+
+returnfun_test() ->
+    CheckFun =
+        fun(ReturnTuple) -> ?assertMatch(error, element(1, ReturnTuple)) end,
+    ReturnFun = generate_returnfun("ABCD", CheckFun),
+    ok = ReturnFun({error, queue_backlog}).
 
 wrap_splitfun_test() ->
     SplitObjFun = 
