@@ -279,9 +279,13 @@ store_destroy(Pid) ->
 %% Bucket/Key :: binary() 
 %% Value :: {Version, ...} - Tuples may chnage between different version
 %% Block can be set to true should a sync version be required to force the
-%% calling process to wait for the queue to be empty
+%% calling process to wait some time for the queue to be empty
 store_mput(Pid, ObjectSpecs, true) ->
-    pong = gen_fsm:sync_send_all_state_event(Pid, ping, ?SYNC_TIMEOUT),
+    aae_controller:wait_on_sync(gen_fsm,
+                                sync_send_all_state_event,
+                                Pid,
+                                ping,
+                                min(20 * ?LOAD_PAUSE, ?SYNC_TIMEOUT)),
     gen_fsm:send_event(Pid, {mput, ObjectSpecs});
 store_mput(Pid, ObjectSpecs, false) ->
     % As the calling process is not waiting hold the keystore up if the backend

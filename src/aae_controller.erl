@@ -48,7 +48,7 @@
             hash_clocks/2,
             wrapped_splitobjfun/1]).
 
--export([rebuild_worker/1, wait_on_sync/3]).
+-export([rebuild_worker/1, wait_on_sync/5]).
 
 -export([generate_returnfun/2]).
 
@@ -408,7 +408,7 @@ aae_bucketlist(Pid) ->
 %% the controller.
 %% The sync ping will return 'ok'.
 aae_ping(Pid, RequestTime, {sync, Timeout}) ->
-    wait_on_sync(Pid, {ping, RequestTime}, Timeout);
+    wait_on_sync(gen_server, call, Pid, {ping, RequestTime}, Timeout);
 aae_ping(Pid, RequestTime, From) ->
     gen_server:cast(Pid, {ping, RequestTime, From}).
 
@@ -1121,11 +1121,12 @@ hash_clock(none) ->
 hash_clock(Clock) ->
     erlang:phash2(lists:sort(Clock)).
 
--spec wait_on_sync(pid(), tuple(), pos_integer()) -> any().
+-spec wait_on_sync(atom(), atom(), pid(), tuple()|atom(), pos_integer())
+                                                                    -> any().
 %% @doc
 %% Wait on a sync call until timeout - but don't crash on the timeout
-wait_on_sync(Pid, Call, Timeout) ->
-    try gen_server:call(Pid, Call, Timeout)
+wait_on_sync(Mod, Fun, Pid, Call, Timeout) ->
+    try Mod:Fun(Pid, Call, Timeout)
     catch exit:{timeout, _} -> timeout
     end.
 
