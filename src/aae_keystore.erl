@@ -52,6 +52,7 @@
             store_mput/3,
             store_mload/2,
             store_prompt/2,
+            store_currentstatus/1,
             store_fold/8,
             store_fetchclock/3,
             store_bucketlist/1,
@@ -300,7 +301,7 @@ store_mput(Pid, ObjectSpecs, false) ->
 %% ObjectOp :: add|remove
 %% Segment :: binary() [<<SegmentID:32/integer>>]
 %% Bucket/Key :: binary() 
-%% Value :: {Version, ...} - Tuples may chnage between different version
+%% Value :: {Version, ...} - Tuples may change between different version
 %%
 %% Load requests are only expected whilst loading, and are pushed to the store
 %% while put requests are cached
@@ -319,6 +320,12 @@ store_mload(Pid, ObjectSpecs) ->
 %% calling NotifyFun(Prompt) -> ok.
 store_prompt(Pid, Prompt) ->
     gen_fsm:send_event(Pid, {prompt, Prompt}).
+
+-spec store_currentstatus(pid()) -> {atom(), list()}.
+%% @doc
+%% Get the state and the current GUID
+store_currentstatus(Pid) ->
+    gen_fsm:sync_send_all_state_event(Pid, current_status, ?SYNC_TIMEOUT).
 
 
 -spec store_fold(pid(), 
@@ -1236,13 +1243,6 @@ logs() ->
 store_fold(Pid, RLimiter, SLimiter, FoldObjectsFun, InitAcc, Elements) ->
     store_fold(Pid, RLimiter, SLimiter, all, false, 
                 FoldObjectsFun, InitAcc, Elements).
-
--spec store_currentstatus(pid()) -> {atom(), list()}.
-%% @doc
-%% Included for test functions only - get the manifest
-store_currentstatus(Pid) ->
-    gen_fsm:sync_send_all_state_event(Pid, current_status).
-
 
 leveled_so_emptybuildandclose_test() ->
     empty_buildandclose_tester(leveled_so).

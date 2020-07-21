@@ -330,7 +330,7 @@ aae_destroy(Pid) ->
 
 -spec aae_rebuildtrees(pid(), 
                         list(responsible_preflist()), fun()|null, fun(),
-                        boolean()) -> ok|skipped. 
+                        boolean()) -> ok|skipped|loading. 
 %% @doc
 %% Rebuild the tree caches for a store.  Note that this rebuilds the caches
 %% but not the actual key_store itself (required in the case of parallel 
@@ -351,14 +351,14 @@ aae_rebuildtrees(Pid, IndexNs, PreflistFun, WorkerFun, OnlyIfBroken) ->
         {ok, FoldFun, FinishFun} ->
             WorkerFun(FoldFun, FinishFun),
             ok;
-        skipped ->
-            skipped
+        R ->
+            R
     end.
 
 -spec aae_rebuildtrees(pid(), 
                         list(responsible_preflist()), fun()|null,
                         boolean()) -> 
-                            {ok, fun(), fun()}|skipped.
+                            {ok, fun(), fun()}|skipped|loading.
 %% @doc
 %% Call aae_rebuildtrees/4 to avoid use of a passed in WorkerFun
 aae_rebuildtrees(Pid, IndexNs, PreflistFun, OnlyIfBroken) ->
@@ -535,16 +535,21 @@ handle_call(destroy, _From, State) ->
     {stop, normal, ok, State};
 handle_call({rebuild_trees, IndexNs, PreflistFun, OnlyIfBroken},
                 _From, State) ->
-    DontRebuild = OnlyIfBroken and not State#state.broken_trees,
+    KeyStore = State#state.key_store,
     LogLevels = State#state.log_levels,
-    case DontRebuild of
-        true ->
+    DontRebuild = (OnlyIfBroken and not State#state.broken_trees),
+    case {DontRebuild,
+            element(1, aae_keystore:store_currentstatus(KeyStore))} of
+        {_, loading} ->
+            aae_util:log("AAE16", [], logs(), LogLevels),
+            {reply, loading, State};
+        {true, _} ->
             {reply, skipped, State};
-        false ->
+        {false, _} ->
             aae_util:log("AAE06", [IndexNs], logs(), LogLevels),
             SW = os:timestamp(),
             % Before the fold flush all the PUTs (if a parallel store)
-            ok = maybe_flush_puts(State#state.key_store, 
+            ok = maybe_flush_puts(KeyStore, 
                                     State#state.objectspecs_queue,
                                     State#state.parallel_keystore,
                                     true),
@@ -552,7 +557,7 @@ handle_call({rebuild_trees, IndexNs, PreflistFun, OnlyIfBroken},
             % Setup a fold over the store
             {FoldFun, InitAcc} = foldobjects_buildtrees(IndexNs, LogLevels),
             {async, Folder} = 
-                aae_keystore:store_fold(State#state.key_store, 
+                aae_keystore:store_fold(KeyStore, 
                                         all, all,
                                         all, false,
                                         FoldFun, InitAcc, 
@@ -1173,7 +1178,9 @@ logs() ->
         {"AAE14",
             {debug, "Mismatch finding unexpected IndexN in fold of ~w"}},
         {"AAE15",
-            {info, "Ping showed time difference of ~w ms"}}
+            {info, "Ping showed time difference of ~w ms"}},
+        {"AAE16",
+            {info, "Keystore loading when tree rebuild requested"}}
     
     ].
 
