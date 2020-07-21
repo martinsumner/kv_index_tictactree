@@ -125,6 +125,7 @@
 -define(USE_SET_FOR_SPEED, 64).
 -define(SYNC_TIMEOUT, 30000).
 -define(LOAD_PAUSE, 1000). % On backlog when loading a parallel store
+-define(LOAD_BUFFER, 5).
 
 -type bucket() :: binary()|{binary(),binary()}.
 -type key() :: binary().
@@ -158,7 +159,7 @@
     %% may be a set if the segment_limiter is beyond a size optimal for lists
     %% membership checks
 -type rebuild_prompts()
-    :: rebuild_start|rebuild_complete.
+    :: rebuild_start|rebuild_complete|queue_complete.
     % Prompts to be used when rebuilding the key store (note this is rebuild
     % of the key store not just the aae trees)
 -type metadata() 
@@ -408,10 +409,7 @@ init([Opts]) ->
     end.
 
 loading({mload, ObjectSpecs}, _From, State) ->
-    ok = do_load(State#state.store_type,
-                    State#state.load_store,
-                    ObjectSpecs,
-                    true),
+    ok = do_load(State#state.store_type, State#state.load_store, ObjectSpecs),
     LoadCount0 = State#state.load_counter,
     LoadCount1 = State#state.load_counter + length(ObjectSpecs),
     ToLog = 
@@ -475,10 +473,7 @@ native(Shutdown, _From, State) when Shutdown == close; Shutdown == destroy ->
 
 
 loading({mput, ObjectSpecs}, State) ->
-    ok = do_load(State#state.store_type,
-                    State#state.store,
-                    ObjectSpecs,
-                    true),
+    ok = do_load(State#state.store_type, State#state.store, ObjectSpecs),
     ChangeQueue1 = [ObjectSpecs|State#state.change_queue],
     ObjectCount0 = State#state.change_queue_counter,
     ObjectCount1 = State#state.change_queue_counter + length(ObjectSpecs),
@@ -496,36 +491,47 @@ loading({mput, ObjectSpecs}, State) ->
     {next_state, loading, State#state{change_queue_counter = ObjectCount1, 
                                         change_queue = ChangeQueue1}};
 loading({prompt, rebuild_complete}, State) ->
-    StoreType = State#state.store_type,
-    LoadStore = State#state.load_store,
-    GUID = State#state.load_guid,
-    aae_util:log("KS007",
+    aae_util:log("KS008",
+                    [length(State#state.change_queue), State#state.change_queue_counter],
+                    logs(),
+                    State#state.log_levels),
+    store_prompt(self(), queue_complete),
+    {next_state, loading, State};
+loading({prompt, queue_complete}, State) ->
+    case length(State#state.change_queue) of
+        0 ->
+            GUID = State#state.load_guid,
+            LoadStore = State#state.load_store,
+            LastRebuild = os:timestamp(),
+            aae_util:log("KS007",
                     [rebuild_complete, GUID],
                     logs(),
                     State#state.log_levels),
-    LoadFun = fun(OS) -> do_load(StoreType, LoadStore, OS, false) end,
-    aae_util:log("KS008",
-                    [length(State#state.change_queue)],
-                    logs(),
-                    State#state.log_levels),
-    lists:foreach(LoadFun, lists:reverse(State#state.change_queue)),
-    LastRebuild = os:timestamp(),
-    ok = store_manifest(State#state.root_path, 
-                        #manifest{current_guid = GUID,
-                                    last_rebuild = LastRebuild},
-                        State#state.log_levels),
-    ok = delete_store(StoreType, State#state.store),
-    {next_state, 
-        parallel, 
-        State#state{change_queue = [], 
-                    change_queue_counter = 0,
-                    load_counter = 0,
-                    store = LoadStore,
-                    current_guid = GUID,
-                    last_rebuild = LastRebuild}}.
+            ok = store_manifest(State#state.root_path, 
+                                #manifest{current_guid = GUID,
+                                            last_rebuild = LastRebuild},
+                                State#state.log_levels),
+            ok = delete_store(State#state.store_type, State#state.store),
+            {next_state, 
+                parallel, 
+                State#state{store = LoadStore,
+                            current_guid = GUID,
+                            last_rebuild = LastRebuild}};
+        L ->
+            BatchL = max((?SYNC_TIMEOUT div ?LOAD_PAUSE) - ?LOAD_BUFFER, 1),
+            {LeftQ, RightQ} =
+                lists:split(max(L - BatchL, 0), State#state.change_queue),
+            SendFun = fun(OS) -> gen_fsm:send_event(self(), {qload, OS}) end,
+            lists:foreach(SendFun, lists:reverse(RightQ)),
+            store_prompt(self(), queue_complete),
+            {next_state, loading, State#state{change_queue = LeftQ}}
+    end;
+loading({qload, ObjectSpecs}, State) ->
+    do_load(State#state.store_type, State#state.load_store, ObjectSpecs),
+    {next_state, loading, State}.
 
 parallel({mput, ObjectSpecs}, State) ->
-    ok = do_load(State#state.store_type, State#state.store, ObjectSpecs, true),
+    ok = do_load(State#state.store_type, State#state.store, ObjectSpecs),
     TrimCount = State#state.trim_count + 1,
     ok = maybe_trim(State#state.store_type, TrimCount, State#state.store),
     {next_state, parallel, State#state{trim_count = TrimCount}};
@@ -859,25 +865,21 @@ delete_store(leveled_so, Store) ->
 delete_store(leveled_ko, Store) ->
     leveled_bookie:book_destroy(Store).
 
--spec do_load(parallel_stores(), pid(), list(tuple()), boolean()) -> ok.
+-spec do_load(parallel_stores(), pid(), list(tuple())) -> ok.
 %% @doc
 %% Load a batch of object specifications into the store.  If the store has a
-%% backlog of compaction work it may request a pause.  If this is an async
-%% call or a sync call we wish to throttle (e.g. during rebuild) then pause -
-%% otherwise proceed with no pause.
-do_load(leveled_so, Store, ObjectSpecs, PauseOnRequest) ->
+%% backlog of compaction work it may request a pause.
+do_load(leveled_so, Store, ObjectSpecs) ->
     load_pause(
-        leveled_bookie:book_mput(Store, dedup_map(leveled_so, ObjectSpecs)),
-        PauseOnRequest);
-do_load(leveled_ko, Store, ObjectSpecs, PauseOnRequest) ->
+        leveled_bookie:book_mput(Store, dedup_map(leveled_so, ObjectSpecs)));
+do_load(leveled_ko, Store, ObjectSpecs) ->
     load_pause(
-        leveled_bookie:book_mput(Store, dedup_map(leveled_ko, ObjectSpecs)),
-        PauseOnRequest).
+        leveled_bookie:book_mput(Store, dedup_map(leveled_ko, ObjectSpecs))).
 
--spec load_pause(ok|pause, boolean()) -> ok.
-load_pause(pause, true) ->
+-spec load_pause(ok|pause) -> ok.
+load_pause(pause) ->
     timer:sleep(?LOAD_PAUSE);
-load_pause(_Response, _PauseOnRequest) ->
+load_pause(_Response) ->
     ok.
 
 -spec dedup_map(parallel_stores(), list(objectspec())) -> list(tuple()).
@@ -1219,7 +1221,7 @@ logs() ->
         {"KS007",
             {info, "Rebuild prompt ~w with GUID ~s"}},
         {"KS008",
-            {info, "Rebuild complete with change_backlog=~w items"}}
+            {info, "Rebuild queue load backlog_batches=~w backlog_items=~w"}}
 
         ].
 
@@ -1483,7 +1485,7 @@ fetch_clock_test() ->
                                 RootPath,
                                 leveled_util:generate_uuid()),
 
-    do_load(leveled_so, Store0, [Spc1, Spc2, Spc3, Spc4], false),
+    do_load(leveled_so, Store0, [Spc1, Spc2, Spc3, Spc4]),
 
     ?assertMatch([{"a", 1}], 
                     do_fetchclock(leveled_so, Store0, <<"B1">>, <<"K2">>, 1)),
@@ -1615,7 +1617,7 @@ timed_bulk_put(Store, ObjectSpecs, StoreType) ->
     SubLists.
 
 coverage_cheat_test() ->
-    ok = load_pause(pause, true),
+    ok = load_pause(pause),
     State = #state{store_type = leveled_so},
     {next_state, native, _State} = handle_info(null, native, State),
     {ok, native, _State} = code_change(null, native, State, null).
