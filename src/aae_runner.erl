@@ -105,7 +105,7 @@ handle_info(timeout, State) ->
     ok = aae_controller:aae_runnerprompt(State#state.aae_controller),
     {noreply, State}.
 
-terminate(normal, State) ->
+terminate(_Reason, State) ->
     _ = maybe_log(State#state.result_size, 
                     State#state.query_time, 
                     State#state.query_count, 

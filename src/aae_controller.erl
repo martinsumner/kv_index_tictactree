@@ -63,7 +63,7 @@
 -define(EMPTY_MD, term_to_binary([])).
 -define(SYNC_TIMEOUT, 60000).
     % May depend on x2 underlying 30s timeout
--define(MAX_RUNNER_QUEUEDEPTH, 4).
+-define(MAX_RUNNER_QUEUEDEPTH, 2).
 
 
 -record(state, {key_store :: pid()|undefined,

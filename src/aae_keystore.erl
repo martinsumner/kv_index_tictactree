@@ -600,17 +600,16 @@ handle_event({log_level, LogLevels}, StateName, State) ->
 handle_info(_Msg, StateName, State) ->
     {next_state, StateName, State}.
 
-terminate(_Reason, native, _State) ->
-    ok;
-terminate(normal, _StateName, State) ->
+terminate(normal, StateName, State) when StateName =/= native->
     store_manifest(State#state.root_path, 
                     #manifest{current_guid = State#state.current_guid,
                                 last_rebuild = State#state.last_rebuild},
-                    State#state.log_levels).
+                    State#state.log_levels);
+terminate(_Reason, _StateName, _State) ->
+    ok.
 
 code_change(_OldVsn, StateName, State, _Extra) ->
     {ok, StateName, State}.
-
 
 
 %%%============================================================================
