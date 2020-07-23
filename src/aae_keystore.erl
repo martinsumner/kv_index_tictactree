@@ -23,6 +23,7 @@
                 {gen_fsm, sync_send_event, 2},
                 {gen_fsm, sync_send_event, 3},
                 {gen_fsm, sync_send_all_state_event, 2},
+                {gen_fsm, sync_send_all_state_event, 3},
                 {gen_fsm, send_all_state_event, 2}
                 ]}).
 -endif.
@@ -48,9 +49,10 @@
             store_startupdata/1,
             store_close/1,
             store_destroy/1,
-            store_mput/2,
+            store_mput/3,
             store_mload/2,
             store_prompt/2,
+            store_currentstatus/1,
             store_fold/8,
             store_fetchclock/3,
             store_bucketlist/1,
@@ -99,7 +101,7 @@
                                     {max_journalsize, 10000000},
                                     {compression_method, native},
                                     {compression_point, on_compact}]).
--define(CHANGEQ_LOGFREQ, 10000).
+-define(CHANGEQ_LOGFREQ, 100000).
 -define(STATE_BUCKET, <<"state">>).
 -define(MANIFEST_FN, "keystore"). 
     % filename for Keystore manifes
@@ -122,6 +124,9 @@
     % so the fold will represent the state of the store when the request was
     % processed, and not when the fold was run
 -define(USE_SET_FOR_SPEED, 64).
+-define(SYNC_TIMEOUT, 30000).
+-define(LOAD_PAUSE, 1000). % On backlog when loading a parallel store
+-define(LOAD_BUFFER, 5).
 
 -type bucket() :: binary()|{binary(),binary()}.
 -type key() :: binary().
@@ -155,7 +160,7 @@
     %% may be a set if the segment_limiter is beyond a size optimal for lists
     %% membership checks
 -type rebuild_prompts()
-    :: rebuild_start|rebuild_complete.
+    :: rebuild_start|rebuild_complete|queue_complete.
     % Prompts to be used when rebuilding the key store (note this is rebuild
     % of the key store not just the aae trees)
 -type metadata() 
@@ -243,7 +248,8 @@ store_nativestart(Path, NativeStoreType, BackendPid, LogLevels) ->
 %% @doc
 %% Get the startup metadata from the store
 store_startupdata(Pid) ->
-    {LastRebuild, IsEmpty} = gen_fsm:sync_send_event(Pid, startup_metadata),
+    {LastRebuild, IsEmpty} =
+        gen_fsm:sync_send_event(Pid, startup_metadata, ?SYNC_TIMEOUT),
     {ok, {LastRebuild, IsEmpty}, Pid}.
 
 
@@ -257,16 +263,16 @@ store_startupdata(Pid) ->
 %%
 %% Startup should always delete the Shutdown GUID in both stores.
 store_close(Pid) ->
-    gen_fsm:sync_send_event(Pid, close, 10000).
+    gen_fsm:sync_send_event(Pid, close, ?SYNC_TIMEOUT).
 
 
 -spec store_destroy(pid()) -> ok.
 %% @doc
 %% Close the store and clear the data if parallel
 store_destroy(Pid) ->
-    gen_fsm:sync_send_event(Pid, destroy, 30000).
+    gen_fsm:sync_send_event(Pid, destroy, ?SYNC_TIMEOUT).
 
--spec store_mput(pid(), list()) -> ok.
+-spec store_mput(pid(), list(), boolean()) -> ok.
 %% @doc
 %% Put multiple objectspecs into the store.  The object specs should be of the
 %% form {ObjectOp, Segment, Bucket, Key, Value}.
@@ -274,7 +280,18 @@ store_destroy(Pid) ->
 %% Segment :: binary() [<<SegmentID:32/integer>>]
 %% Bucket/Key :: binary() 
 %% Value :: {Version, ...} - Tuples may chnage between different version
-store_mput(Pid, ObjectSpecs) ->
+%% Block can be set to true should a sync version be required to force the
+%% calling process to wait some time for the queue to be empty
+store_mput(Pid, ObjectSpecs, true) ->
+    aae_controller:wait_on_sync(gen_fsm,
+                                sync_send_all_state_event,
+                                Pid,
+                                ping,
+                                min(20 * ?LOAD_PAUSE, ?SYNC_TIMEOUT)),
+    gen_fsm:send_event(Pid, {mput, ObjectSpecs});
+store_mput(Pid, ObjectSpecs, false) ->
+    % As the calling process is not waiting hold the keystore up if the backend
+    % is behind
     gen_fsm:send_event(Pid, {mput, ObjectSpecs}).
 
 -spec store_mload(pid(), list(objectspec())) -> ok.
@@ -284,12 +301,12 @@ store_mput(Pid, ObjectSpecs) ->
 %% ObjectOp :: add|remove
 %% Segment :: binary() [<<SegmentID:32/integer>>]
 %% Bucket/Key :: binary() 
-%% Value :: {Version, ...} - Tuples may chnage between different version
+%% Value :: {Version, ...} - Tuples may change between different version
 %%
 %% Load requests are only expected whilst loading, and are pushed to the store
 %% while put requests are cached
 store_mload(Pid, ObjectSpecs) ->
-    gen_fsm:send_event(Pid, {mload, ObjectSpecs}).
+    gen_fsm:sync_send_event(Pid, {mload, ObjectSpecs}, ?SYNC_TIMEOUT).
 
 -spec store_prompt(pid(), rebuild_prompts())  -> ok.
 %% @doc
@@ -303,6 +320,12 @@ store_mload(Pid, ObjectSpecs) ->
 %% calling NotifyFun(Prompt) -> ok.
 store_prompt(Pid, Prompt) ->
     gen_fsm:send_event(Pid, {prompt, Prompt}).
+
+-spec store_currentstatus(pid()) -> {atom(), list()}.
+%% @doc
+%% Get the state and the current GUID
+store_currentstatus(Pid) ->
+    gen_fsm:sync_send_all_state_event(Pid, current_status, ?SYNC_TIMEOUT).
 
 
 -spec store_fold(pid(), 
@@ -337,7 +360,7 @@ store_fetchclock(Pid, Bucket, Key) ->
 %% @doc
 %% List all the buckets in the keystore
 store_bucketlist(Pid) ->
-    gen_fsm:sync_send_all_state_event(Pid, bucket_list).
+    gen_fsm:sync_send_all_state_event(Pid, bucket_list, infinity).
 
 -spec store_loglevel(pid(), aae_util:log_levels()) -> ok.
 %% @doc
@@ -392,6 +415,22 @@ init([Opts]) ->
                         log_levels = LogLevels}}
     end.
 
+loading({mload, ObjectSpecs}, _From, State) ->
+    ok = do_load(State#state.store_type, State#state.load_store, ObjectSpecs),
+    LoadCount0 = State#state.load_counter,
+    LoadCount1 = State#state.load_counter + length(ObjectSpecs),
+    ToLog = 
+        LoadCount1 div ?CHANGEQ_LOGFREQ > LoadCount0 div ?CHANGEQ_LOGFREQ,
+    case ToLog of 
+        true ->
+            aae_util:log("KS004",
+                            [State#state.id, LoadCount1],
+                            logs(),
+                            State#state.log_levels);
+        false ->
+            ok
+    end,
+    {reply, ok, loading, State#state{load_counter = LoadCount1}};
 loading({fold, Range, Segments, LMD, Count, FoldFun, InitAcc, Elements},
                                                             _From, State) ->
     Result = do_fold(State#state.store_type, State#state.store,
@@ -458,46 +497,45 @@ loading({mput, ObjectSpecs}, State) ->
     end,
     {next_state, loading, State#state{change_queue_counter = ObjectCount1, 
                                         change_queue = ChangeQueue1}};
-loading({mload, ObjectSpecs}, State) ->
-    ok = do_load(State#state.store_type, State#state.load_store, ObjectSpecs),
-    LoadCount0 = State#state.load_counter,
-    LoadCount1 = State#state.load_counter + length(ObjectSpecs),
-    ToLog = 
-        LoadCount1 div ?CHANGEQ_LOGFREQ > LoadCount0 div ?CHANGEQ_LOGFREQ,
-    case ToLog of 
-        true ->
-            aae_util:log("KS004",
-                            [State#state.id, LoadCount1],
-                            logs(),
-                            State#state.log_levels);
-        false ->
-            ok
-    end,
-    {next_state, loading, State#state{load_counter = LoadCount1}};
 loading({prompt, rebuild_complete}, State) ->
-    StoreType = State#state.store_type,
-    LoadStore = State#state.load_store,
-    GUID = State#state.load_guid,
-    aae_util:log("KS007",
+    aae_util:log("KS008",
+                    [length(State#state.change_queue), State#state.change_queue_counter],
+                    logs(),
+                    State#state.log_levels),
+    store_prompt(self(), queue_complete),
+    {next_state, loading, State};
+loading({prompt, queue_complete}, State) ->
+    case length(State#state.change_queue) of
+        0 ->
+            GUID = State#state.load_guid,
+            LoadStore = State#state.load_store,
+            LastRebuild = os:timestamp(),
+            aae_util:log("KS007",
                     [rebuild_complete, GUID],
                     logs(),
                     State#state.log_levels),
-    LoadFun = fun(OS) -> do_load(StoreType, LoadStore, OS) end,
-    lists:foreach(LoadFun, lists:reverse(State#state.change_queue)),
-    LastRebuild = os:timestamp(),
-    ok = store_manifest(State#state.root_path, 
-                        #manifest{current_guid = GUID,
-                                    last_rebuild = LastRebuild},
-                        State#state.log_levels),
-    ok = delete_store(StoreType, State#state.store),
-    {next_state, 
-        parallel, 
-        State#state{change_queue = [], 
-                    change_queue_counter = 0,
-                    load_counter = 0,
-                    store = LoadStore,
-                    current_guid = GUID,
-                    last_rebuild = LastRebuild}}.
+            ok = store_manifest(State#state.root_path, 
+                                #manifest{current_guid = GUID,
+                                            last_rebuild = LastRebuild},
+                                State#state.log_levels),
+            ok = delete_store(State#state.store_type, State#state.store),
+            {next_state, 
+                parallel, 
+                State#state{store = LoadStore,
+                            current_guid = GUID,
+                            last_rebuild = LastRebuild}};
+        L ->
+            BatchL = max((?SYNC_TIMEOUT div ?LOAD_PAUSE) - ?LOAD_BUFFER, 1),
+            {LeftQ, RightQ} =
+                lists:split(max(L - BatchL, 0), State#state.change_queue),
+            SendFun = fun(OS) -> gen_fsm:send_event(self(), {qload, OS}) end,
+            lists:foreach(SendFun, lists:reverse(RightQ)),
+            store_prompt(self(), queue_complete),
+            {next_state, loading, State#state{change_queue = LeftQ}}
+    end;
+loading({qload, ObjectSpecs}, State) ->
+    do_load(State#state.store_type, State#state.load_store, ObjectSpecs),
+    {next_state, loading, State}.
 
 parallel({mput, ObjectSpecs}, State) ->
     ok = do_load(State#state.store_type, State#state.store, ObjectSpecs),
@@ -547,7 +585,9 @@ handle_sync_event(bucket_list, _From, StateName, State) ->
     Folder = bucket_list(State#state.store_type, State#state.store),
     {reply, Folder, StateName, State};
 handle_sync_event(current_status, _From, StateName, State) ->
-    {reply, {StateName, State#state.current_guid}, StateName, State}.
+    {reply, {StateName, State#state.current_guid}, StateName, State};
+handle_sync_event(ping, _From, StateName, State) ->
+    {reply, pong, StateName, State}.
 
 handle_event({log_level, LogLevels}, StateName, State) ->
     MinLevel = aae_util:min_loglevel(LogLevels),
@@ -560,17 +600,16 @@ handle_event({log_level, LogLevels}, StateName, State) ->
 handle_info(_Msg, StateName, State) ->
     {next_state, StateName, State}.
 
-terminate(normal, native, _State) ->
-    ok;
-terminate(normal, _StateName, State) ->
+terminate(normal, StateName, State) when StateName =/= native->
     store_manifest(State#state.root_path, 
                     #manifest{current_guid = State#state.current_guid,
                                 last_rebuild = State#state.last_rebuild},
-                    State#state.log_levels).
+                    State#state.log_levels);
+terminate(_Reason, _StateName, _State) ->
+    ok.
 
 code_change(_OldVsn, StateName, State, _Extra) ->
     {ok, StateName, State}.
-
 
 
 %%%============================================================================
@@ -834,12 +873,19 @@ delete_store(leveled_ko, Store) ->
 
 -spec do_load(parallel_stores(), pid(), list(tuple())) -> ok.
 %% @doc
-%% Load a batch of object specifications into the store
+%% Load a batch of object specifications into the store.  If the store has a
+%% backlog of compaction work it may request a pause.
 do_load(leveled_so, Store, ObjectSpecs) ->
-    leveled_bookie:book_mput(Store, dedup_map(leveled_so, ObjectSpecs)),
-    ok;
+    load_pause(
+        leveled_bookie:book_mput(Store, dedup_map(leveled_so, ObjectSpecs)));
 do_load(leveled_ko, Store, ObjectSpecs) ->
-    leveled_bookie:book_mput(Store, dedup_map(leveled_ko, ObjectSpecs)),
+    load_pause(
+        leveled_bookie:book_mput(Store, dedup_map(leveled_ko, ObjectSpecs))).
+
+-spec load_pause(ok|pause) -> ok.
+load_pause(pause) ->
+    timer:sleep(?LOAD_PAUSE);
+load_pause(_Response) ->
     ok.
 
 -spec dedup_map(parallel_stores(), list(objectspec())) -> list(tuple()).
@@ -1179,7 +1225,9 @@ logs() ->
         {"KS006",
             {warn, "Pending store is garbage and should be deleted at ~s"}},
         {"KS007",
-            {info, "Rebuild prompt ~w with GUID ~s"}}
+            {info, "Rebuild prompt ~w with GUID ~s"}},
+        {"KS008",
+            {info, "Rebuild queue load backlog_batches=~w backlog_items=~w"}}
 
         ].
 
@@ -1194,13 +1242,6 @@ logs() ->
 store_fold(Pid, RLimiter, SLimiter, FoldObjectsFun, InitAcc, Elements) ->
     store_fold(Pid, RLimiter, SLimiter, all, false, 
                 FoldObjectsFun, InitAcc, Elements).
-
--spec store_currentstatus(pid()) -> {atom(), list()}.
-%% @doc
-%% Included for test functions only - get the manifest
-store_currentstatus(Pid) ->
-    gen_fsm:sync_send_all_state_event(Pid, current_status).
-
 
 leveled_so_emptybuildandclose_test() ->
     empty_buildandclose_tester(leveled_so).
@@ -1293,9 +1334,9 @@ load_tester(StoreType) ->
 
     {ok, {never, true}, Store0} =
         store_parallelstart(RootPath, StoreType, undefined),
-    ok = store_mput(Store0, L1),
-    ok = store_mput(Store0, L2),
-    ok = store_mput(Store0, L3),
+    ok = store_mput(Store0, L1, false),
+    ok = store_mput(Store0, L2, false),
+    ok = store_mput(Store0, L3, false),
 
     FoldObjectsFun =
         fun(B, K, V, Acc) ->
@@ -1320,7 +1361,7 @@ load_tester(StoreType) ->
     Res1 = lists:usort(Folder1()),
     ?assertMatch(Res0, Res1),
 
-    ok = store_mput(Store0, L4),
+    ok = store_mput(Store0, L4, true),
 
     % 4 adds, 20 alterations, 8 removes -> 92 entries
     {async, Folder2} = 
@@ -1346,7 +1387,7 @@ load_tester(StoreType) ->
     Res4 = lists:usort(Folder4()),
     ?assertMatch(Res2, Res4),
 
-    ok = store_mput(Store0, L5),
+    ok = store_mput(Store0, L5, false),
 
     % Removes now complete so only 80 entries
     {async, Folder5} = 
@@ -1568,13 +1609,14 @@ timed_bulk_put(Store, ObjectSpecs, StoreType) ->
     FirstList0 = FirstList ++ [FirstSpec],
     SubLists0 = [FirstList0|RestLists],
     SW = os:timestamp(),
-    ok = lists:foreach(fun(L) -> store_mput(Store, L) end, SubLists0),
+    ok = lists:foreach(fun(L) -> store_mput(Store, L, false) end, SubLists0),
     io:format("Load took ~w for StoreType ~w~n", 
                 [timer:now_diff(os:timestamp(), SW), StoreType]),
     % Return the sublists without the duplicate
     SubLists.
 
 coverage_cheat_test() ->
+    ok = load_pause(pause),
     State = #state{store_type = leveled_so},
     {next_state, native, _State} = handle_info(null, native, State),
     {ok, native, _State} = code_change(null, native, State, null).

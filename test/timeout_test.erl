@@ -23,8 +23,10 @@ terminate(_Reason, _State) -> ok.
 
 wait_on_sync_test() ->
     {ok, P} = start_link(),
-    ?assertMatch(timeout, aae_controller:wait_on_sync(P, {test}, 100)),
-    ?assertMatch(ok, aae_controller:wait_on_sync(P, {test}, 2000)),
+    ?assertMatch(timeout,
+        aae_controller:wait_on_sync(gen_server, call, P, {test}, 100)),
+    ?assertMatch(ok,
+        aae_controller:wait_on_sync(gen_server, call, P, {test}, 2000)),
     stop().
 
 -endif.
