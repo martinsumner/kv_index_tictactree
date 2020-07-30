@@ -249,7 +249,7 @@ store_nativestart(Path, NativeStoreType, BackendPid, LogLevels) ->
 %% Get the startup metadata from the store
 store_startupdata(Pid) ->
     {LastRebuild, IsEmpty} =
-        gen_fsm:sync_send_event(Pid, startup_metadata, ?SYNC_TIMEOUT),
+        gen_fsm:sync_send_event(Pid, startup_metadata, infinity),
     {ok, {LastRebuild, IsEmpty}, Pid}.
 
 
@@ -258,7 +258,7 @@ store_startupdata(Pid) ->
 %% Close the store neatly.  If a GUID is past it will be returned when the 
 %% Store is opened.  This can be used to ensure that the backend and the AAE
 %% KeyStore both closed neatly (by making the storing of the GUID in the 
-%% vnode backend the lasta ct before closing), if both vnode and aae backends
+%% vnode backend the last act before closing), if both vnode and aae backends
 %% report the same GUID at startup.
 %%
 %% Startup should always delete the Shutdown GUID in both stores.
@@ -270,7 +270,7 @@ store_close(Pid) ->
 %% @doc
 %% Close the store and clear the data if parallel
 store_destroy(Pid) ->
-    gen_fsm:sync_send_event(Pid, destroy, ?SYNC_TIMEOUT).
+    gen_fsm:sync_send_event(Pid, destroy, infinity).
 
 -spec store_mput(pid(), list(), boolean()) -> ok.
 %% @doc
@@ -279,7 +279,7 @@ store_destroy(Pid) ->
 %% ObjectOp :: add|remove
 %% Segment :: binary() [<<SegmentID:32/integer>>]
 %% Bucket/Key :: binary() 
-%% Value :: {Version, ...} - Tuples may chnage between different version
+%% Value :: {Version, ...} - Tuples may change between different version
 %% Block can be set to true should a sync version be required to force the
 %% calling process to wait some time for the queue to be empty
 store_mput(Pid, ObjectSpecs, true) ->
@@ -306,7 +306,7 @@ store_mput(Pid, ObjectSpecs, false) ->
 %% Load requests are only expected whilst loading, and are pushed to the store
 %% while put requests are cached
 store_mload(Pid, ObjectSpecs) ->
-    gen_fsm:sync_send_event(Pid, {mload, ObjectSpecs}, ?SYNC_TIMEOUT).
+    gen_fsm:sync_send_event(Pid, {mload, ObjectSpecs}, infinity).
 
 -spec store_prompt(pid(), rebuild_prompts())  -> ok.
 %% @doc
@@ -321,11 +321,15 @@ store_mload(Pid, ObjectSpecs) ->
 store_prompt(Pid, Prompt) ->
     gen_fsm:send_event(Pid, {prompt, Prompt}).
 
--spec store_currentstatus(pid()) -> {atom(), list()}.
+-spec store_currentstatus(pid()) -> {atom(), list()}|timeout.
 %% @doc
 %% Get the state and the current GUID
 store_currentstatus(Pid) ->
-    gen_fsm:sync_send_all_state_event(Pid, current_status, ?SYNC_TIMEOUT).
+    aae_controller:wait_on_sync(gen_fsm,
+                                sync_send_all_state_event,
+                                Pid,
+                                current_status,
+                                ?SYNC_TIMEOUT).
 
 
 -spec store_fold(pid(), 
