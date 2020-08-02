@@ -702,7 +702,20 @@ handle_call({fetch_clocks, _IndexNs, _SegmentIDs, ReturnFun, _PreflFun},
     Queue = State#state.runner_queue ++ [{work, Folder, ReturnFun, SizeFun}],
     {reply, ok, State#state{runner_queue = Queue}};
 handle_call({fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PreflFun},
-                                _From, State) ->
+                                From, State) ->
+    ImmediateReply = State#state.parallel_keystore,
+    case ImmediateReply of
+        true ->
+            %% When this is a parallel store, there is no need benefit on
+            %% waiting before replying - as no race conditions will be
+            %% avoided.
+            gen_server:reply(From, ok);
+        _ ->
+            %% In native mode, don't want a new PUT to be received before the
+            %% snapshot has been taken, so block until the snapshot has been
+            %% taken
+            ok
+    end,
     SegmentMap = lists:map(fun(S) -> {S, 0} end, SegmentIDs),
     InitMap = 
         lists:map(fun(IdxN) -> 
@@ -769,7 +782,13 @@ handle_call({fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PreflFun},
     %% is empty.  Whilst in backlog state, query requests will result in dummy
     %% work being added to the queue not real work (which may cause the queue
     %% to continue to grow)
-    {reply, ok, State#state{queue_backlog = Backlog, runner_queue = Queue}};
+    S0 = State#state{queue_backlog = Backlog, runner_queue = Queue},
+    case ImmediateReply of
+        true ->
+            {noreply, S0};
+        _ ->
+            {reply, ok, S0}
+    end;
 
 handle_call(bucket_list,  _From, State) ->
     ok = maybe_flush_puts(State#state.key_store, 
