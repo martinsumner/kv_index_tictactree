@@ -63,7 +63,7 @@
 -define(EMPTY_MD, term_to_binary([])).
 -define(SYNC_TIMEOUT, 60000).
     % May depend on x2 underlying 30s timeout
--define(MAX_RUNNER_QUEUEDEPTH, 2).
+-define(MAX_RUNNER_QUEUEDEPTH, 4).
 
 
 -record(state, {key_store :: pid()|undefined,
@@ -204,7 +204,7 @@ aae_put(Pid, IndexN, Bucket, Key, CurrentVV, PrevVV, BinaryObj) ->
 %% indexed list of results using ReturnFun - with a result of `false` in the 
 %% special case where no TreeCache exists for that preflist
 %%
-%% The tree cache could be doing a rbeuild, and so may not respond immediately
+%% The tree cache could be doing a rebuild, and so may not respond immediately
 %% and hence the use of cast/ReturnFun.  Assume that ReturnFun would be a wrap
 %% around reply/2 in riak_kv_vnode.
 aae_fetchroot(Pid, IndexNs, ReturnFun) ->
