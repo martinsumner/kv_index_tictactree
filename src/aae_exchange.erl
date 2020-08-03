@@ -175,7 +175,8 @@
                 branch_compares = 0 :: integer(),
                 transition_pause_ms = ?TRANSITION_PAUSE_MS :: pos_integer(),
                 log_levels :: aae_util:log_levels()|undefined,
-                scan_timeout = ?SCAN_TIMEOUT_MS :: non_neg_integer()
+                scan_timeout = ?SCAN_TIMEOUT_MS :: non_neg_integer(),
+                max_results = ?MAX_RESULTS :: pos_integer()
                 }).
 
 -type branch_results() :: list({integer(), binary()}).
@@ -413,7 +414,7 @@ tree_compare(timeout, State) ->
             % Compare clocks.  Note if there are no Mismatched segment IDs the
             % stop condition in trigger_next will be met
             SegmentIDs = select_ids(StillDirtyLeaves, 
-                                    ?MAX_RESULTS,
+                                    State#state.max_results,
                                     tree_compare, 
                                     State#state.exchange_id,
                                     State#state.log_levels),
@@ -464,7 +465,7 @@ root_compare(timeout, State) ->
                                         root_compares = RootCompares});
         false ->
             BranchesToFetch = select_ids(BranchIDs, 
-                                            ?MAX_RESULTS, 
+                                            State#state.max_results, 
                                             root_confirm, 
                                             State#state.exchange_id,
                                             State#state.log_levels),
@@ -510,7 +511,7 @@ branch_compare(timeout, State) ->
                                         branch_compares = BranchCompares});
         false ->
             SegstoFetch = select_ids(SegmentIDs, 
-                                        ?MAX_RESULTS,
+                                        State#state.max_results,
                                         branch_confirm, 
                                         State#state.exchange_id,
                                         State#state.log_levels),
@@ -713,7 +714,9 @@ process_options([{transition_pause_ms, PauseMS}|Tail], State) ->
 process_options([{log_levels, LogLevels}|Tail], State) ->
     process_options(Tail, State#state{log_levels = LogLevels});
 process_options([{scan_timeout, Timeout}|Tail], State) ->
-    process_options(Tail, State#state{scan_timeout = Timeout}).
+    process_options(Tail, State#state{scan_timeout = Timeout});
+process_options([{max_results, MaxResults}|Tail], State) ->
+    process_options(Tail, State#state{max_results = MaxResults}).
 
 -spec trigger_next(any(), atom(), fun(), any(), boolean(), 
                                         integer(), exchange_state()) -> any().
