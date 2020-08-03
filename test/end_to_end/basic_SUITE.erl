@@ -262,7 +262,7 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
                             RepairFun,
                             ReturnFun,
                             none,
-                            [{scan_timeout, 0}]),
+                            [{scan_timeout, 0}, {max_results, 256}]),
     io:format("Exchange id ~s~n", [GUID6b]),
     {timeout, 0} = testutil:start_receiver(),
 
