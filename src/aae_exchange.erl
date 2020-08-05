@@ -829,9 +829,9 @@ compare_branches(BlueBranches, PinkBranches) ->
 compare_clocks(BlueList, PinkList) ->
     % Two lists of {B, K, VC} want to remove everything where {B, K, VC} is
     % the same in both lists
-
-    BlueSet = ordsets:from_list(BlueList),
-    PinkSet = ordsets:from_list(PinkList),
+    SortClockFun = fun({B, K, VC}) -> {B, K, lists:usort(VC)} end,
+    BlueSet = ordsets:from_list(lists:map(SortClockFun, BlueList)),
+    PinkSet = ordsets:from_list(lists:map(SortClockFun, PinkList)),
 
     BlueDelta = ordsets:subtract(BlueSet, PinkSet),
     PinkDelta = ordsets:subtract(PinkSet, BlueSet),
@@ -1043,6 +1043,11 @@ compare_clocks_test() ->
                         {{<<"B1">>, <<"K3">>}, 
                             {[{a, 2}], none}}], 
                     compare_clocks(BL1, PL2)).
+
+compare_unsorted_clocks_test()->
+    KV1 = {<<"B1">>, <<"K1">>, [{a, 1}, {b, 2}]},
+    KV2 = {<<"B1">>, <<"K1">>, [{b, 2}, {a, 1}]},
+    ?assertMatch([], compare_clocks([KV1], [KV2])).
 
 clean_exit_ontimeout_test() ->
     State0 = #state{pink_returns={4, 5}, blue_returns={8, 8},
