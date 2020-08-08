@@ -503,11 +503,13 @@ loading({mput, ObjectSpecs}, State) ->
                                         change_queue = ChangeQueue1}};
 loading({prompt, rebuild_complete}, State) ->
     aae_util:log("KS008",
-                    [length(State#state.change_queue), State#state.change_queue_counter],
+                    [length(State#state.change_queue),
+                        State#state.change_queue_counter,
+                        State#state.load_counter],
                     logs(),
                     State#state.log_levels),
     store_prompt(self(), queue_complete),
-    {next_state, loading, State};
+    {next_state, loading, State#state{load_counter = 0}};
 loading({prompt, queue_complete}, State) ->
     case length(State#state.change_queue) of
         0 ->
@@ -527,7 +529,8 @@ loading({prompt, queue_complete}, State) ->
                 parallel, 
                 State#state{store = LoadStore,
                             current_guid = GUID,
-                            last_rebuild = LastRebuild}};
+                            last_rebuild = LastRebuild,
+                            change_queue_counter = 0}};
         L ->
             BatchL = max((?SYNC_TIMEOUT div ?LOAD_PAUSE) - ?LOAD_BUFFER, 1),
             {LeftQ, RightQ} =
@@ -1223,7 +1226,7 @@ logs() ->
             {info, "Storing manifest with current GUID ~s"}},
         {"KS004", 
             {info, "Key Store building with id=~w has reached " 
-                    ++ "loaded count=~w"}},
+                    ++ "loaded_count=~w"}},
         {"KS005",
             {info, "Clean opening of manifest with current GUID ~s"}},
         {"KS006",
@@ -1231,7 +1234,8 @@ logs() ->
         {"KS007",
             {info, "Rebuild prompt ~w with GUID ~s"}},
         {"KS008",
-            {info, "Rebuild queue load backlog_batches=~w backlog_items=~w"}}
+            {info, "Rebuild queue load backlog_batches=~w backlog_items=~w "
+                    ++ "loaded_count=~w"}}
 
         ].
 
