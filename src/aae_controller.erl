@@ -654,9 +654,12 @@ handle_call({rebuild_store, SplitObjFun}, _From, State)->
                                             V, VC, CH, 
                                             State#state.object_splitfun),
                     UpdSpecL = [ObjSpec|Acc],
-                    case length(Acc) >= ?BATCH_LENGTH of
+                    L = length(UpdSpecL),
+                    case L >= ?BATCH_LENGTH of
                         true ->
+                            Count = get_rebuild_count(),
                             flush_load(State#state.key_store, UpdSpecL),
+                            put_rebuild_count(Count + L),
                             [];
                         false ->
                             [ObjSpec|UpdSpecL]
@@ -665,6 +668,12 @@ handle_call({rebuild_store, SplitObjFun}, _From, State)->
             FinishFun =
                 fun(Acc) ->
                     flush_load(State#state.key_store, Acc),
+                    FinalCount = get_rebuild_count() + length(Acc),
+                    put_rebuild_count(0),
+                    aae_util:log("AAE17",
+                                    [State#state.key_store, FinalCount],
+                                    logs(),
+                                    State#state.log_levels),
                     ok = aae_keystore:store_prompt(State#state.key_store,
                                                     rebuild_complete)
                 end,
@@ -1164,6 +1173,19 @@ wait_on_sync(Mod, Fun, Pid, Call, Timeout) ->
     catch exit:{timeout, _} -> timeout
     end.
 
+-spec get_rebuild_count() -> non_neg_integer().
+get_rebuild_count() ->
+    case get(rebuild_count) of
+        undefined ->
+            0;
+        C ->
+            C
+    end.
+
+-spec put_rebuild_count(non_neg_integer()) -> ok.
+put_rebuild_count(UpdCount)->
+    put(rebuild_count, UpdCount),
+    ok.
 %%%============================================================================
 %%% log definitions
 %%%============================================================================
@@ -1209,7 +1231,9 @@ logs() ->
         {"AAE15",
             {info, "Ping showed time difference of ~w ms"}},
         {"AAE16",
-            {info, "Keystore ~w when tree rebuild requested"}}
+            {info, "Keystore ~w when tree rebuild requested"}},
+        {"AAE17",
+            {info, "Fold to pid=~w counted fold_count=~w objects"}}
     
     ].
 
