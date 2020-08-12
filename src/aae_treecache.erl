@@ -34,6 +34,7 @@
 -define(PENDING_EXT, ".pnd").
 -define(FINAL_EXT, ".aae").
 -define(START_SQN, 1).
+-define(SYNC_TIMEOUT, 30000).
 
 -record(state, {save_sqn = 0 :: integer(),
                 is_restored = false :: boolean(),
@@ -88,7 +89,7 @@ cache_destroy(AAECache) ->
 %% @doc
 %% Close a cache with saving
 cache_close(AAECache) ->
-    gen_server:call(AAECache, close, 30000).
+    gen_server:call(AAECache, close, ?SYNC_TIMEOUT).
 
 -spec cache_alter(pid(), binary(), integer(), integer()) -> ok.
 %% @doc

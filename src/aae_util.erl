@@ -58,9 +58,9 @@ log(LogRef, Subs, LogBase, SupportedLogLevels) ->
     {LogRef0, {LogLevel, LogText}} = get_logreference(LogRef, LogBase),
     case lists:member(LogLevel, SupportedLogLevels) of
         true ->
-            io:format(format_time() ++ " "
-                        ++ atom_to_list(LogLevel) ++ " "
-                        ++ LogRef0 ++ " ~w "
+            io:format(format_time() ++ "  log_level="
+                        ++ atom_to_list(LogLevel) ++ " log_ref="
+                        ++ LogRef0 ++ " pid=~w "
                         ++ LogText ++ "~n",
                         [self()|Subs]);
         false ->
@@ -90,9 +90,9 @@ log_timer(LogRef, Subs, StartTime, LogBase, SupportedLogLevels) ->
                     US ->
                         " with us_duration=" ++ integer_to_list(US)
                 end,
-            io:format(format_time() ++ " "
-                        ++ atom_to_list(LogLevel) ++ " "
-                        ++ LogRef0 ++ " ~w "
+            io:format(format_time() ++ "  log_level="
+                        ++ atom_to_list(LogLevel) ++ " log_ref="
+                        ++ LogRef0 ++ " pid=~w "
                         ++ LogText
                         ++ DurationText ++ "~n",
                         [self()|Subs]);

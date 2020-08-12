@@ -480,16 +480,19 @@ handle_cast({rebuild_complete, store}, State) ->
         fun(ok) ->
             ok = rebuild_complete(Vnode, tree)
         end,
-    
     Worker = workerfun({rebuild_worker, [ReturnFun]}),
-
-    ok = aae_controller:aae_rebuildtrees(State#state.aae_controller, 
+    case aae_controller:aae_rebuildtrees(State#state.aae_controller, 
                                             State#state.index_ns,
                                             State#state.preflist_fun,
                                             Worker,
-                                            false),
-
-    {noreply, State#state{aae_rebuild = true}};
+                                            false) of
+        ok ->
+            {noreply, State#state{aae_rebuild = true}};
+        loading ->
+            gen_server:cast(self(), {rebuild_complete, store}),
+            timer:sleep(1000),
+            {noreply, State}
+    end;
 handle_cast({rebuild_complete, tree}, State) ->
     {noreply, State#state{aae_rebuild = false}}.
 

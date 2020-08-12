@@ -253,6 +253,19 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
     {ExchangeState6a, 10} = testutil:start_receiver(),
     true = ExchangeState6a == clock_compare,
 
+    {ok, _P6b, GUID6b} = 
+        aae_exchange:start(full,
+                            [{exchange_sendfun(Cntrl1), [{2,0}]}, 
+                                {exchange_sendfun(Cntrl1), [{2,1}]}],
+                            [{exchange_sendfun(Cntrl2), 
+                                [{3, 0}, {3, 1}, {3, 2}, {3, 3}]}],
+                            RepairFun,
+                            ReturnFun,
+                            none,
+                            [{scan_timeout, 0}, {max_results, 256}]),
+    io:format("Exchange id ~s~n", [GUID6b]),
+    {timeout, 0} = testutil:start_receiver(),
+
     % Nothing repaired last time.  The deltas are all new keys though, so
     % We can repair by adding them in to the other vnode
 

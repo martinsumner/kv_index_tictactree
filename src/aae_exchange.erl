@@ -104,8 +104,8 @@
     % 60 seconds (used in fetch root/branches)
 -define(SCAN_TIMEOUT_MS, 600000). 
     % 10 minutes (used in fetch clocks)
--define(UNFILTERED_SCAN_TIMEOUT_MS, 3600000).
-    % 60 minutes (used in fetch trees with no filters)
+-define(UNFILTERED_SCAN_TIMEOUT_MS, 14400000).
+    % 4 hours (used in fetch trees with no filters)
 -define(MAX_RESULTS, 128). 
     % Maximum number of results to request in one round of
 -define(WORTHWHILE_REDUCTION, 0.3).
@@ -174,7 +174,9 @@
                 root_compares = 0 :: integer(),
                 branch_compares = 0 :: integer(),
                 transition_pause_ms = ?TRANSITION_PAUSE_MS :: pos_integer(),
-                log_levels :: aae_util:log_levels()|undefined
+                log_levels :: aae_util:log_levels()|undefined,
+                scan_timeout = ?SCAN_TIMEOUT_MS :: non_neg_integer(),
+                max_results = ?MAX_RESULTS :: pos_integer()
                 }).
 
 -type branch_results() :: list({integer(), binary()}).
@@ -204,7 +206,10 @@
         segment_filter(), modified_range(),
         hash_method()}|none.
     % filter to be used in partial exchanges
--type option_item() :: {transition_pause_ms, pos_integer()}.
+-type option_item() ::
+        {transition_pause_ms, pos_integer()}|
+        {scan_timeout, non_neg_integer()}|
+        {log_levels, aae_util:log_levels()}.
 -type options() :: list(option_item()).
 -type send_message() ::
         fetch_root |
@@ -349,7 +354,7 @@ prepare_partial_exchange(timeout, State) ->
                     logs(),
                     State#state.log_levels),
     Filters = State#state.exchange_filters,
-    ScanTimeout = filtered_timeout(Filters),
+    ScanTimeout = filtered_timeout(Filters, State#state.scan_timeout),
     TreeSize = element(?FILTERIDX_TRS, Filters),
     trigger_next({merge_tree_range, Filters},
                     tree_compare,
@@ -396,7 +401,7 @@ tree_compare(timeout, State) ->
                     false ->
                         Filters
                 end,
-            ScanTimeout = filtered_timeout(Filters0),
+            ScanTimeout = filtered_timeout(Filters0, State#state.scan_timeout),
             trigger_next({merge_tree_range, Filters0},
                             tree_compare,
                             fun merge_tree/2,
@@ -409,7 +414,7 @@ tree_compare(timeout, State) ->
             % Compare clocks.  Note if there are no Mismatched segment IDs the
             % stop condition in trigger_next will be met
             SegmentIDs = select_ids(StillDirtyLeaves, 
-                                    ?MAX_RESULTS,
+                                    State#state.max_results,
                                     tree_compare, 
                                     State#state.exchange_id,
                                     State#state.log_levels),
@@ -423,7 +428,7 @@ tree_compare(timeout, State) ->
                             fun merge_clocks/2, 
                             [],
                             length(SegmentIDs) == 0, 
-                            ?SCAN_TIMEOUT_MS, 
+                            State#state.scan_timeout, 
                             State#state{tree_compare_deltas = StillDirtyLeaves,
                                         tree_compares = TreeCompares})
     end.
@@ -460,7 +465,7 @@ root_compare(timeout, State) ->
                                         root_compares = RootCompares});
         false ->
             BranchesToFetch = select_ids(BranchIDs, 
-                                            ?MAX_RESULTS, 
+                                            State#state.max_results, 
                                             root_confirm, 
                                             State#state.exchange_id,
                                             State#state.log_levels),
@@ -506,7 +511,7 @@ branch_compare(timeout, State) ->
                                         branch_compares = BranchCompares});
         false ->
             SegstoFetch = select_ids(SegmentIDs, 
-                                        ?MAX_RESULTS,
+                                        State#state.max_results,
                                         branch_confirm, 
                                         State#state.exchange_id,
                                         State#state.log_levels),
@@ -515,7 +520,7 @@ branch_compare(timeout, State) ->
                             fun merge_clocks/2, 
                             [],
                             length(SegmentIDs) == 0, 
-                            ?SCAN_TIMEOUT_MS, 
+                            State#state.scan_timeout, 
                             State#state{branch_compare_deltas = SegstoFetch,
                                         branch_compares = BranchCompares})
     end.
@@ -547,6 +552,8 @@ waiting_all_results({reply, not_supported, Colour}, State) ->
                     logs(),
                     State#state.log_levels),
     {stop, normal, State#state{pending_state = not_supported}};
+waiting_all_results({reply, {error, Reason}, _Colour}, State) ->
+    waiting_all_results({error, Reason}, State);
 waiting_all_results({reply, Result, Colour}, State) ->
     aae_util:log("EX007",
                     [Colour, State#state.exchange_id],
@@ -705,7 +712,11 @@ process_options([], State) ->
 process_options([{transition_pause_ms, PauseMS}|Tail], State) ->
     process_options(Tail, State#state{transition_pause_ms = PauseMS});
 process_options([{log_levels, LogLevels}|Tail], State) ->
-    process_options(Tail, State#state{log_levels = LogLevels}).
+    process_options(Tail, State#state{log_levels = LogLevels});
+process_options([{scan_timeout, Timeout}|Tail], State) ->
+    process_options(Tail, State#state{scan_timeout = Timeout});
+process_options([{max_results, MaxResults}|Tail], State) ->
+    process_options(Tail, State#state{max_results = MaxResults}).
 
 -spec trigger_next(any(), atom(), fun(), any(), boolean(), 
                                         integer(), exchange_state()) -> any().
@@ -818,9 +829,9 @@ compare_branches(BlueBranches, PinkBranches) ->
 compare_clocks(BlueList, PinkList) ->
     % Two lists of {B, K, VC} want to remove everything where {B, K, VC} is
     % the same in both lists
-
-    BlueSet = ordsets:from_list(BlueList),
-    PinkSet = ordsets:from_list(PinkList),
+    SortClockFun = fun({B, K, VC}) -> {B, K, refine_clock(VC)} end,
+    BlueSet = ordsets:from_list(lists:map(SortClockFun, BlueList)),
+    PinkSet = ordsets:from_list(lists:map(SortClockFun, PinkList)),
 
     BlueDelta = ordsets:subtract(BlueSet, PinkSet),
     PinkDelta = ordsets:subtract(PinkSet, BlueSet),
@@ -892,14 +903,16 @@ intersect_ids(IDs0, IDs1) ->
 select_ids(IDList, MaxOutput, StateName, ExchangeID, LogLevels) ->
     IDList0 = lists:usort(IDList),
     FoldFun =
-        fun(Idx, {BestIdx, MinOutput}) ->
+        fun(Idx, {BestIdxs, MinOutput}) ->
             Space = lists:nth(MaxOutput + Idx - 1, IDList0) 
                         - lists:nth(Idx, IDList0),
-            case Space < MinOutput of 
-                true ->
-                    {Idx, Space};
-                false ->
-                    {BestIdx, MinOutput}
+            case Space of
+                MinOutput ->
+                    {[Idx|BestIdxs], MinOutput};
+                S when S < MinOutput ->
+                    {[Idx], Space};
+                _ ->
+                    {BestIdxs, MinOutput}
             end
         end,
     case length(IDList0) > MaxOutput of 
@@ -908,10 +921,13 @@ select_ids(IDList, MaxOutput, StateName, ExchangeID, LogLevels) ->
                             [ExchangeID, length(IDList0), StateName],
                             logs(),
                             LogLevels),
-            {BestSliceStart, _Score} = 
+            {BestSliceStarts, _Score} = 
                 lists:foldl(FoldFun, 
-                            {0, infinity}, 
+                            {[0], infinity}, 
                             lists:seq(1, 1 + length(IDList0) - MaxOutput)),
+            BestSliceStart = 
+                lists:nth(leveled_rand:uniform(length(BestSliceStarts)),
+                            BestSliceStarts),
             lists:sublist(IDList0, BestSliceStart, MaxOutput);
         false ->
             IDList0
@@ -931,17 +947,28 @@ jitter_pause(Timeout) ->
 %% Rest the count back to 0
 reset({Target, Target}) -> {0, Target}. 
 
--spec filtered_timeout(filters()) -> pos_integer().
+-spec filtered_timeout(filters(), pos_integer()) -> pos_integer().
 %% @doc
 %% Has a filter been applied to the scan (true), or are we scanning the whole
 %% bucket (false)
-filtered_timeout({filter, _B, KeyRange, _TS, SegFilter, ModRange, _HM}) ->
+filtered_timeout({filter, _B, KeyRange, _TS, SegFilter, ModRange, _HM},
+                    ScanTimeout) ->
     case ((KeyRange == all) and (SegFilter == all) and (ModRange == all)) of
         true ->
             ?UNFILTERED_SCAN_TIMEOUT_MS;
         false ->
-            ?SCAN_TIMEOUT_MS
+            ScanTimeout
     end.
+
+-spec refine_clock(list()|binary()) -> list()|binary().
+%% @doc
+%% When the lock is a list, always sort the list so as not to confuse clocks
+%% differentiated only by sorting
+refine_clock(Clock) when is_list(Clock) ->
+    lists:sort(Clock);
+refine_clock(Clock) ->
+    Clock.
+
 
 %%%============================================================================
 %%% log definitions
@@ -994,19 +1021,39 @@ select_id_test() ->
     L1 = [1, 2, 3, 5],
     ?assertMatch(L0, select_ids(L1, 3, root_confirm, "t1", undefined)),
     L2 = [1, 2, 3, 5, 6, 7, 8],
-    ?assertMatch(L0, select_ids(L2, 3, root_confirm, "t2", undefined)),
     ?assertMatch([5, 6, 7, 8],
                     select_ids(L2, 4, root_confirm, "t3", undefined)),
     ?assertMatch(L0,
                     select_ids(intersect_ids(L1, L2),
                                 3, root_confirm, "t4", undefined)),
     L3 = [8, 7, 1, 3, 2, 5, 6],
-    ?assertMatch(L0, select_ids(L3, 3, root_confirm, "t5", undefined)),
     ?assertMatch([5, 6, 7, 8],
                     select_ids(L3, 4, root_confirm, "t6", undefined)),
     ?assertMatch(L0,
                     select_ids(intersect_ids(L1, L3),
                                 3, root_confirm, "t7", undefined)).
+
+select_best_id_rand_test() ->
+    L2 = [1, 2, 3, 5, 6, 7, 8],
+    F =
+        fun(_N, {S1, S2, S3}) ->
+            case {S1, S2, S3} of
+                {true, true, true} ->
+                    {true, true, true};
+                _ ->
+                    case select_ids(L2, 3, root_confirm,
+                                    "r3", undefined) of
+                        [1, 2, 3] ->
+                            {true, S2, S3};
+                        [5, 6, 7] ->
+                            {S1, true, S3};
+                        [6, 7, 8] ->
+                            {S1, S2, true}
+                    end
+            end
+        end,
+    ?assertMatch({true, true, true},
+                    lists:foldl(F, {false, false, false}, lists:seq(1, 1000))).
 
 compare_clocks_test() ->
     KV1 = {<<"B1">>, <<"K1">>, [{a, 1}]},
@@ -1031,6 +1078,15 @@ compare_clocks_test() ->
                         {{<<"B1">>, <<"K3">>}, 
                             {[{a, 2}], none}}], 
                     compare_clocks(BL1, PL2)).
+
+compare_unsorted_clocks_test()->
+    KV1 = {<<"B1">>, <<"K1">>, [{a, 1}, {b, 2}]},
+    KV2 = {<<"B1">>, <<"K1">>, [{b, 2}, {a, 1}]},
+    KV1b = {<<"B1">>, <<"K1">>, term_to_binary([{a, 1}, {b, 2}])},
+    KV2b = {<<"B1">>, <<"K1">>, term_to_binary([{b, 2}, {a, 1}])},
+    ?assertMatch([], compare_clocks([KV1], [KV2])),
+    KL = compare_clocks([KV1b], [KV2b]),
+    ?assertMatch(1, length(KL)).
 
 clean_exit_ontimeout_test() ->
     State0 = #state{pink_returns={4, 5}, blue_returns={8, 8},
@@ -1072,6 +1128,12 @@ connect_error_test() ->
                                 [1000, 1000, 1000])),
     ?assertMatch(false, is_process_alive(Test)).
     
+waiting_for_error_test() ->
+    {stop, normal, _S0} =
+        waiting_all_results({reply, {error, query_backlog}, blue},
+                            #state{exchange_type = full,
+                                    merge_fun = fun merge_clocks/2}).
+
 
 coverage_cheat_test() ->
     {next_state, prepare, _State0} =
