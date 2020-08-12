@@ -98,9 +98,9 @@
 -define(LEVELED_BACKEND_OPTS, [{max_pencillercachesize, 32000},
                                     {cache_size, 4000},
                                     {sync_strategy, none},
-                                    {max_journalsize, 10000000},
+                                    {max_journalsize, 100000000},
                                     {compression_method, native},
-                                    {compression_point, on_compact}]).
+                                    {compression_point, on_receipt}]).
 -define(CHANGEQ_LOGFREQ, 100000).
 -define(STATE_BUCKET, <<"state">>).
 -define(MANIFEST_FN, "keystore"). 
