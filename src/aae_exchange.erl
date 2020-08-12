@@ -903,14 +903,16 @@ intersect_ids(IDs0, IDs1) ->
 select_ids(IDList, MaxOutput, StateName, ExchangeID, LogLevels) ->
     IDList0 = lists:usort(IDList),
     FoldFun =
-        fun(Idx, {BestIdx, MinOutput}) ->
+        fun(Idx, {BestIdxs, MinOutput}) ->
             Space = lists:nth(MaxOutput + Idx - 1, IDList0) 
                         - lists:nth(Idx, IDList0),
-            case Space < MinOutput of 
-                true ->
-                    {Idx, Space};
-                false ->
-                    {BestIdx, MinOutput}
+            case Space of
+                MinOutput ->
+                    {[Idx|BestIdxs], MinOutput};
+                S when S < MinOutput ->
+                    {[Idx], Space};
+                _ ->
+                    {BestIdxs, MinOutput}
             end
         end,
     case length(IDList0) > MaxOutput of 
@@ -919,10 +921,13 @@ select_ids(IDList, MaxOutput, StateName, ExchangeID, LogLevels) ->
                             [ExchangeID, length(IDList0), StateName],
                             logs(),
                             LogLevels),
-            {BestSliceStart, _Score} = 
+            {BestSliceStarts, _Score} = 
                 lists:foldl(FoldFun, 
-                            {0, infinity}, 
+                            {[0], infinity}, 
                             lists:seq(1, 1 + length(IDList0) - MaxOutput)),
+            BestSliceStart = 
+                lists:nth(leveled_rand:uniform(length(BestSliceStarts)),
+                            BestSliceStarts),
             lists:sublist(IDList0, BestSliceStart, MaxOutput);
         false ->
             IDList0
@@ -1016,19 +1021,39 @@ select_id_test() ->
     L1 = [1, 2, 3, 5],
     ?assertMatch(L0, select_ids(L1, 3, root_confirm, "t1", undefined)),
     L2 = [1, 2, 3, 5, 6, 7, 8],
-    ?assertMatch(L0, select_ids(L2, 3, root_confirm, "t2", undefined)),
     ?assertMatch([5, 6, 7, 8],
                     select_ids(L2, 4, root_confirm, "t3", undefined)),
     ?assertMatch(L0,
                     select_ids(intersect_ids(L1, L2),
                                 3, root_confirm, "t4", undefined)),
     L3 = [8, 7, 1, 3, 2, 5, 6],
-    ?assertMatch(L0, select_ids(L3, 3, root_confirm, "t5", undefined)),
     ?assertMatch([5, 6, 7, 8],
                     select_ids(L3, 4, root_confirm, "t6", undefined)),
     ?assertMatch(L0,
                     select_ids(intersect_ids(L1, L3),
                                 3, root_confirm, "t7", undefined)).
+
+select_best_id_rand_test() ->
+    L2 = [1, 2, 3, 5, 6, 7, 8],
+    F =
+        fun(_N, {S1, S2, S3}) ->
+            case {S1, S2, S3} of
+                {true, true, true} ->
+                    {true, true, true};
+                _ ->
+                    case select_ids(L2, 3, root_confirm,
+                                    "r3", undefined) of
+                        [1, 2, 3] ->
+                            {true, S2, S3};
+                        [5, 6, 7] ->
+                            {S1, true, S3};
+                        [6, 7, 8] ->
+                            {S1, S2, true}
+                    end
+            end
+        end,
+    ?assertMatch({true, true, true},
+                    lists:foldl(F, {false, false, false}, lists:seq(1, 1000))).
 
 compare_clocks_test() ->
     KV1 = {<<"B1">>, <<"K1">>, [{a, 1}]},
