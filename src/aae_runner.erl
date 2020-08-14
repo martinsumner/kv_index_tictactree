@@ -168,13 +168,13 @@ runner_fail_test() ->
     FoldFun = fun() -> throw(noproc) end,
     SizeFun = fun(_Results) -> 0 end,
     runner_work(R, {work, FoldFun, ReturnFun, SizeFun}),
-    ?assertMatch(error, start_receiver()),
+    error = start_receiver(),
     ok = runner_stop(R).
     
 start_receiver() ->
     receive
-        Reply ->
-            Reply 
+        error ->
+            error 
     end.
 
 
