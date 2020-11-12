@@ -364,6 +364,40 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     {ExchangeState3a, 2} = testutil:start_receiver(),
     true = ExchangeState3a == clock_compare,
 
+    % Exchange with a one hour modified range - should see same differences
+    io:format("Repeat exchange with 1 hour modified range~n"),
+    MRH = convert_ts(os:timestamp()),
+    {ok, _P3mr1, GUID3mr1} = 
+        aae_exchange:start(full,
+                                [{exchange_vnodesendfun(VNNa), IndexNs}],
+                                [{exchange_vnodesendfun(VNPa), IndexNs}],
+                                NullRepairFun,
+                                ReturnFun,
+                                {filter, all, all, large, all,
+                                    {MRH - (60 * 60), MRH},
+                                    pre_hash},
+                                []),
+    io:format("Exchange id ~s~n", [GUID3mr1]),
+    {ExchangeState3mr1, 2} = testutil:start_receiver(),
+    true = ExchangeState3mr1 == clock_compare,
+
+    % Exchnage with an older modified range - see clock_compare but no
+    % differences
+    io:format("Repeat exchange, but with change outside of modified range~n"),
+    {ok, _P3mr2, GUID3mr2} = 
+        aae_exchange:start(full,
+                                [{exchange_vnodesendfun(VNNa), IndexNs}],
+                                [{exchange_vnodesendfun(VNPa), IndexNs}],
+                                NullRepairFun,
+                                ReturnFun,
+                                {filter, all, all, large, all,
+                                    {MRH - (2 * 60 * 60), MRH - (60 * 60)},
+                                    pre_hash},
+                                []),
+    io:format("Exchange id ~s~n", [GUID3mr2]),
+    {ExchangeState3mr2, 0} = testutil:start_receiver(),
+    true = ExchangeState3mr2 == clock_compare,
+
     io:format("Prompts for a rebuild of both stores~n"),
     % The rebuild is a rebuild of both
     % the store and the tree in the case of the parallel vnode, and just the
@@ -681,7 +715,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
         % updating the other vnode
     
     % check between TS3 and TS4 - should only see 'b' changes
-    TS3_4_Range = {date, convert_ts(MDR_TS3), convert_ts(MDR_TS4)},
+    TS3_4_Range = {convert_ts(MDR_TS3), convert_ts(MDR_TS4)},
     CheckFiltersMRb = 
         {filter, Bucket3, all, small, all, TS3_4_Range, prehash},
         % verify no hangover going into the key range test
@@ -692,7 +726,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     
     % check between TS1 and TS2 - should only see 'a' changes, but
     % not 'b' chnages as they have a higher last modified date
-    TS1_2_Range = {date, convert_ts(MDR_TS1), convert_ts(MDR_TS2)},
+    TS1_2_Range = {convert_ts(MDR_TS1), convert_ts(MDR_TS2)},
     CheckFiltersMRa = 
         {filter, Bucket3, all, small, all, TS1_2_Range, prehash},
         % verify no hangover going into the key range test

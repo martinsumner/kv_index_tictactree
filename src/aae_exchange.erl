@@ -190,7 +190,7 @@
 -type closing_state() ::
     compare_state()|timeout|error|not_supported.
 -type bucket() :: 
-    {binary(), binary()}|binary().
+    {binary(), binary()}|binary()|all.
 -type key_range() :: 
     {binary(), binary()}|all.
 -type modified_range() :: 
@@ -262,19 +262,10 @@ start(BlueList, PinkList, RepairFun, ReplyFun) ->
 %%
 %% The ReplyFun should be a 1 arity function that expects a tuple with the
 %% closing state and the cout of deltas.  
-start(full, BlueList, PinkList, RepairFun, ReplyFun, none, Opts) ->
+start(Type, BlueList, PinkList, RepairFun, ReplyFun, Filters, Opts) ->
     ExchangeID = leveled_util:generate_uuid(),
     {ok, ExPID} = gen_fsm:start(?MODULE, 
-                                [{full, none}, 
-                                    BlueList, PinkList, RepairFun, ReplyFun,
-                                    ExchangeID,
-                                    Opts], 
-                                []),
-    {ok, ExPID, ExchangeID};
-start(partial, BlueList, PinkList, RepairFun, ReplyFun, Filters, Opts) ->
-    ExchangeID = leveled_util:generate_uuid(),
-    {ok, ExPID} = gen_fsm:start(?MODULE, 
-                                [{partial, Filters}, 
+                                [{Type, Filters}, 
                                     BlueList, PinkList, RepairFun, ReplyFun,
                                     ExchangeID,
                                     Opts], 
@@ -294,7 +285,7 @@ reply(Exchange, Result, Colour) ->
 %%% gen_fsm callbacks
 %%%============================================================================
 
-init([{full, none},
+init([{Type, Filters},
         BlueList, PinkList, RepairFun, ReplyFun, ExChID, Opts]) ->
     leveled_rand:seed(),
     PinkTarget = length(PinkList),
@@ -306,33 +297,19 @@ init([{full, none},
                     exchange_id = ExChID,
                     pink_returns = {PinkTarget, PinkTarget},
                     blue_returns = {BlueTarget, BlueTarget},
-                    exchange_type = full},
-    State0 = process_options(Opts, State),
-    aae_util:log("EX001",
-                    [ExChID, PinkTarget + BlueTarget],
-                    logs(),
-                    State0#state.log_levels),
-    {ok, prepare_full_exchange, State0, 0};
-init([{partial, Filters},
-        BlueList, PinkList, RepairFun, ReplyFun, ExChID, Opts]) ->
-    leveled_rand:seed(),
-    PinkTarget = length(PinkList),
-    BlueTarget = length(BlueList),
-    State = #state{blue_list = BlueList, 
-                    pink_list = PinkList,
-                    repair_fun = RepairFun,
-                    reply_fun = ReplyFun,
-                    exchange_id = ExChID,
-                    pink_returns = {PinkTarget, PinkTarget},
-                    blue_returns = {BlueTarget, BlueTarget},
-                    exchange_type = partial,
+                    exchange_type = Type,
                     exchange_filters = Filters},
     State0 = process_options(Opts, State),
     aae_util:log("EX001",
                     [ExChID, PinkTarget + BlueTarget],
                     logs(),
                     State0#state.log_levels),
-    {ok, prepare_partial_exchange, State0, 0}.
+    InitState =
+        case Type of
+            full -> prepare_full_exchange;
+            partial -> prepare_partial_exchange
+        end,
+    {ok, InitState, State0, 0}.
 
 
 prepare_full_exchange(timeout, State) ->
@@ -515,7 +492,9 @@ branch_compare(timeout, State) ->
                                         branch_confirm, 
                                         State#state.exchange_id,
                                         State#state.log_levels),
-            trigger_next({fetch_clocks, SegstoFetch}, 
+            trigger_next({fetch_clocks,
+                                SegstoFetch,
+                                State#state.exchange_filters}, 
                             clock_compare, 
                             fun merge_clocks/2, 
                             [],
@@ -768,6 +747,13 @@ send_requests({fetch_clocks_range, {filter, B, KR, _TS, SF, MR, _HM}},
     % unpack the filter into a single tuple msg or merge_tree_range
     send_requests({fetch_clocks_range, B, KR, SF, MR},
                     BlueList, PinkList, Always);
+send_requests({fetch_clocks, SegIDs, none}, BlueList, PinkList, Always) ->
+    send_requests({fetch_clocks, SegIDs}, BlueList, PinkList, Always);
+send_requests({fetch_clocks,
+                    SegIDs,
+                    {filter, all, all, large, all, MR, pre_hash}},
+                BlueList, PinkList, Always) ->
+    send_requests({fetch_clocks, SegIDs, MR}, BlueList, PinkList, Always);
 send_requests(_Msg, [], [], _Always) ->
     ok;
 send_requests(Msg, [{SendFun, Preflists}|Rest], PinkList, always_blue) ->
