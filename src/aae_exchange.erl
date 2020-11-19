@@ -120,6 +120,7 @@
     % all but one block in most slots (with the sst file).  I suspect the
     % optimal number is more likely to be higher than lower.
 
+
 -export([init/1,
             handle_sync_event/4,
             handle_event/3,
@@ -885,39 +886,33 @@ intersect_ids(IDs0, IDs1) ->
 %% Select a cluster of IDs if the list of IDs is smaller than the maximum 
 %% output size.  The lookup based on these IDs will be segment based, so it 
 %% is expected that the tightest clustering will yield the most efficient 
-%% results. 
-select_ids(IDList, MaxOutput, StateName, ExchangeID, LogLevels) ->
+%% results.  However, if we always get the same list, then concurrent exchanges
+%% will wastefully correct the same data - so randomly chose one of the better
+%% lists
+select_ids(IDList, MaxOutput, StateName, ExchangeID, LogLevels)
+                                            when length(IDList) > MaxOutput ->
     IDList0 = lists:usort(IDList),
+    aae_util:log("EX005", 
+                    [ExchangeID, length(IDList0), StateName],
+                    logs(),
+                    LogLevels),
+    IDList1 =
+        lists:sublist(IDList0, 1 + length(IDList0) - MaxOutput),
+    IDList2 =
+        lists:sublist(IDList0, MaxOutput, 1 + length(IDList0) - MaxOutput),
     FoldFun =
-        fun(Idx, {BestIdxs, MinOutput}) ->
-            Space = lists:nth(MaxOutput + Idx - 1, IDList0) 
-                        - lists:nth(Idx, IDList0),
-            case Space of
-                MinOutput ->
-                    {[Idx|BestIdxs], MinOutput};
-                S when S < MinOutput ->
-                    {[Idx], Space};
-                _ ->
-                    {BestIdxs, MinOutput}
-            end
+        fun({Start, End}, {Idx, Acc}) ->
+            {Idx + 1, [{End - Start, Idx}|Acc]}
         end,
-    case length(IDList0) > MaxOutput of 
-        true ->
-            aae_util:log("EX005", 
-                            [ExchangeID, length(IDList0), StateName],
-                            logs(),
-                            LogLevels),
-            {BestSliceStarts, _Score} = 
-                lists:foldl(FoldFun, 
-                            {[0], infinity}, 
-                            lists:seq(1, 1 + length(IDList0) - MaxOutput)),
-            BestSliceStart = 
-                lists:nth(leveled_rand:uniform(length(BestSliceStarts)),
-                            BestSliceStarts),
-            lists:sublist(IDList0, BestSliceStart, MaxOutput);
-        false ->
-            IDList0
-    end.
+    {_EndIdx, SpaceIdxL} =
+        lists:foldl(FoldFun, {1, []}, lists:zip(IDList1, IDList2)),
+    Selections = 
+        lists:sublist(lists:sort(SpaceIdxL), MaxOutput),
+    {_ChosenSpace, ChosenIdx} =
+        lists:nth(leveled_rand:uniform(length(Selections)), Selections),
+    lists:sublist(IDList0, ChosenIdx, MaxOutput);
+select_ids(IDList, _MaxOutput, _StateName, _ExchangeID, _LogLevels) ->
+    lists:usort(IDList).
     
 -spec jitter_pause(pos_integer()) -> pos_integer().
 %% @doc
@@ -1004,23 +999,12 @@ logs() ->
 select_id_test() ->
     L0 = [1, 2, 3],
     ?assertMatch(L0, select_ids(L0, 3, root_confirm, "t0", undefined)),
-    L1 = [1, 2, 3, 5],
-    ?assertMatch(L0, select_ids(L1, 3, root_confirm, "t1", undefined)),
-    L2 = [1, 2, 3, 5, 6, 7, 8],
-    ?assertMatch([5, 6, 7, 8],
-                    select_ids(L2, 4, root_confirm, "t3", undefined)),
-    ?assertMatch(L0,
-                    select_ids(intersect_ids(L1, L2),
-                                3, root_confirm, "t4", undefined)),
-    L3 = [8, 7, 1, 3, 2, 5, 6],
-    ?assertMatch([5, 6, 7, 8],
-                    select_ids(L3, 4, root_confirm, "t6", undefined)),
-    ?assertMatch(L0,
-                    select_ids(intersect_ids(L1, L3),
-                                3, root_confirm, "t7", undefined)).
+    L1 = [3, 2, 1],
+    ?assertMatch(L0, select_ids(L1, 3, root_confirm, "t0", undefined)),
+    ?assertMatch(2, length(select_ids(L1, 2, root_confirm, "t0", undefined))).
 
 select_best_id_rand_test() ->
-    L2 = [1, 2, 3, 5, 6, 7, 8],
+    L2 = [1, 2, 3, 5, 16, 17, 18],
     F =
         fun(_N, {S1, S2, S3}) ->
             case {S1, S2, S3} of
@@ -1031,9 +1015,9 @@ select_best_id_rand_test() ->
                                     "r3", undefined) of
                         [1, 2, 3] ->
                             {true, S2, S3};
-                        [5, 6, 7] ->
+                        [2, 3, 5] ->
                             {S1, true, S3};
-                        [6, 7, 8] ->
+                        [16, 17, 18] ->
                             {S1, S2, true}
                     end
             end
