@@ -511,7 +511,7 @@ clock_compare(timeout, State) ->
                     logs(),
                     State#state.log_levels),
     aae_util:log("EX008",
-                    [State#state.blue_acc, State#state.pink_acc],
+                    [length(State#state.blue_acc), length(State#state.pink_acc)],
                     logs(),
                     State#state.log_levels),
     RepairKeys = compare_clocks(State#state.blue_acc, State#state.pink_acc),
@@ -975,11 +975,11 @@ logs() ->
         {"EX005",
             {info, "Exchange id=~s throttled count=~w at state=~w"}},
         {"EX006",
-            {debug, "State change to ~w for exchange id=~s"}},
+            {info, "State change to ~w for exchange id=~s"}},
         {"EX007", 
-            {debug, "Reply received for colour=~w in exchange id=~s"}},
+            {info, "Reply received for colour=~w in exchange id=~s"}},
         {"EX008", 
-            {debug, "Comparison between BlueList ~w and PinkList ~w"}},
+            {info, "Comparison between BlueList size ~w and PinkList size ~w"}},
         {"EX009",
             {info, "Normal exit for partial (dynamic) exchange at"
                         ++ " pending_state=~w for exchange_id=~s"
