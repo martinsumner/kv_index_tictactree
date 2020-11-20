@@ -969,7 +969,7 @@ logs() ->
                         ++ " pending_state=~w for exchange_id=~s"
                         ++ " root_compare_deltas=~w root_compares=~w"
                         ++ " branch_compare_deltas=~w branch_compares=~w"
-                        ++ " keys_passed_for_compare=~w"}},
+                        ++ " keys_passed_for_repair=~w"}},
         {"EX004",
             {info, "Exchange id=~s led to prompting of repair_count=~w"}},
         {"EX005",
