@@ -398,6 +398,51 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     {ExchangeState3mr2, 0} = testutil:start_receiver(),
     true = ExchangeState3mr2 == clock_compare,
 
+    io:format("Repeat exchange with modified range and Bucket constraint~n"),
+    {ok, _P3bmr1, GUID3bmr1} = 
+        aae_exchange:start(full,
+                                [{exchange_vnodesendfun(VNNa), IndexNs}],
+                                [{exchange_vnodesendfun(VNPa), IndexNs}],
+                                NullRepairFun,
+                                ReturnFun,
+                                {filter, Bucket1, all, large, all,
+                                    {MRH - (60 * 60), MRH},
+                                    pre_hash},
+                                []),
+    io:format("Exchange id ~s~n", [GUID3bmr1]),
+    {ExchangeState3bmr1, 1} = testutil:start_receiver(),
+
+    true = ExchangeState3bmr1 == clock_compare,
+    io:format("Repeat exchange with modified range and Bucket constraint~n"),
+    {ok, _P3bmr2, GUID3bmr2} = 
+        aae_exchange:start(full,
+                                [{exchange_vnodesendfun(VNNa), IndexNs}],
+                                [{exchange_vnodesendfun(VNPa), IndexNs}],
+                                NullRepairFun,
+                                ReturnFun,
+                                {filter, Bucket2, all, large, all,
+                                    {MRH - (60 * 60), MRH},
+                                    pre_hash},
+                                []),
+    io:format("Exchange id ~s~n", [GUID3bmr2]),
+    {ExchangeState3bmr2, 1} = testutil:start_receiver(),
+    true = ExchangeState3bmr2 == clock_compare,
+
+    io:format("Repeat exchange with modified range and unmodified Bucket~n"),
+    {ok, _P3bmr3, GUID3bmr3} = 
+        aae_exchange:start(full,
+                                [{exchange_vnodesendfun(VNNa), IndexNs}],
+                                [{exchange_vnodesendfun(VNPa), IndexNs}],
+                                NullRepairFun,
+                                ReturnFun,
+                                {filter, Bucket, all, large, all,
+                                    {MRH - (60 * 60), MRH},
+                                    pre_hash},
+                                []),
+    io:format("Exchange id ~s~n", [GUID3bmr3]),
+    {ExchangeState3bmr3, 0} = testutil:start_receiver(),
+    true = ExchangeState3bmr3 == clock_compare,
+
     io:format("Prompts for a rebuild of both stores~n"),
     % The rebuild is a rebuild of both
     % the store and the tree in the case of the parallel vnode, and just the

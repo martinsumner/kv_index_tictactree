@@ -174,6 +174,8 @@
                 tree_compares = 0 :: integer(),
                 root_compares = 0 :: integer(),
                 branch_compares = 0 :: integer(),
+                prethrottle_branches = 0 :: non_neg_integer(),
+                prethrottle_leaves = 0 :: non_neg_integer(),
                 transition_pause_ms = ?TRANSITION_PAUSE_MS :: pos_integer(),
                 log_levels :: aae_util:log_levels()|undefined,
                 scan_timeout = ?SCAN_TIMEOUT_MS :: non_neg_integer(),
@@ -408,7 +410,9 @@ tree_compare(timeout, State) ->
                             length(SegmentIDs) == 0, 
                             State#state.scan_timeout, 
                             State#state{tree_compare_deltas = StillDirtyLeaves,
-                                        tree_compares = TreeCompares})
+                                        tree_compares = TreeCompares,
+                                        prethrottle_leaves =
+                                            length(StillDirtyLeaves)})
     end.
 
 
@@ -454,7 +458,9 @@ root_compare(timeout, State) ->
                             length(BranchIDs) == 0, 
                             ?CACHE_TIMEOUT_MS, 
                             State#state{root_compare_deltas = BranchesToFetch,
-                                        root_compares = RootCompares})
+                                        root_compares = RootCompares,
+                                        prethrottle_branches =
+                                            length(BranchIDs)})
     end.
 
 
@@ -493,6 +499,7 @@ branch_compare(timeout, State) ->
                                         branch_confirm, 
                                         State#state.exchange_id,
                                         State#state.log_levels),
+            
             trigger_next({fetch_clocks,
                                 SegstoFetch,
                                 State#state.exchange_filters}, 
@@ -502,7 +509,9 @@ branch_compare(timeout, State) ->
                             length(SegmentIDs) == 0, 
                             State#state.scan_timeout, 
                             State#state{branch_compare_deltas = SegstoFetch,
-                                        branch_compares = BranchCompares})
+                                        branch_compares = BranchCompares,
+                                        prethrottle_leaves =
+                                            length(SegmentIDs)})
     end.
 
 clock_compare(timeout, State) ->
@@ -602,25 +611,59 @@ handle_info(_Msg, StateName, State) ->
 terminate(normal, StateName, State) ->
     case State#state.exchange_type of
         full ->
-            aae_util:log("EX003", 
-                            [StateName,
-                                State#state.exchange_id,
-                                length(State#state.root_compare_deltas),
-                                State#state.root_compares,
-                                length(State#state.branch_compare_deltas),
-                                State#state.branch_compares,
-                                length(State#state.key_deltas)], 
-                            logs(),
-                            State#state.log_levels);
+            case StateName of
+                StateName when
+                        StateName == root_compare;
+                        StateName == branch_compare ->
+                    aae_util:log("EX003",
+                                    [true,
+                                        StateName,
+                                        State#state.exchange_id,
+                                        0,
+                                        State#state.root_compares,
+                                        State#state.branch_compares,
+                                        length(State#state.key_deltas)],
+                                    logs(),
+                                    State#state.log_levels);
+                BrokenState ->
+                    EstDamage =
+                        estimated_damage(State#state.prethrottle_branches,
+                                            State#state.prethrottle_leaves,
+                                            State#state.max_results),
+                    aae_util:log("EX003",
+                                    [false,
+                                        BrokenState,
+                                        State#state.exchange_id,
+                                        EstDamage,
+                                        State#state.root_compares,
+                                        State#state.branch_compares,
+                                        length(State#state.key_deltas)],
+                                    logs(),
+                                    State#state.log_levels)
+            end;
         partial ->
-            aae_util:log("EX009", 
-                            [StateName,
-                                State#state.exchange_id,
-                                length(State#state.tree_compare_deltas),
-                                State#state.tree_compares,
-                                length(State#state.key_deltas)], 
-                            logs(),
-                            State#state.log_levels)
+            case StateName of
+                tree_compare ->
+                    aae_util:log("EX009",
+                                    [true,
+                                        tree_compare,
+                                        State#state.exchange_id,
+                                        0,
+                                        State#state.tree_compares,
+                                        length(State#state.key_deltas)],
+                                    logs(),
+                                    State#state.log_levels);
+                BrokenState ->
+                    aae_util:log("EX009",
+                                    [false,
+                                        BrokenState,
+                                        State#state.exchange_id,
+                                        State#state.prethrottle_leaves,
+                                        State#state.tree_compares,
+                                        length(State#state.key_deltas)],
+                                    logs(),
+                                    State#state.log_levels)
+            end
     end,
     ReplyFun = State#state.reply_fun,
     ReplyFun({State#state.pending_state, length(State#state.key_deltas)}).
@@ -683,6 +726,11 @@ merge_tree(Tree0, Tree1) ->
 %%%============================================================================
 %%% Internal Functions
 %%%============================================================================
+
+-spec estimated_damage(pos_integer(), pos_integer(), pos_integer()) ->
+                        non_neg_integer().
+estimated_damage(BranchCount, LeafCount, MaxResults) ->
+    round(BranchCount * LeafCount / MaxResults).
 
 -spec process_options(options(), exchange_state()) -> exchange_state().
 %% @doc
@@ -755,6 +803,12 @@ send_requests({fetch_clocks,
                     {filter, all, all, large, all, MR, pre_hash}},
                 BlueList, PinkList, Always) ->
     send_requests({fetch_clocks, SegIDs, MR}, BlueList, PinkList, Always);
+send_requests({fetch_clocks,
+                    SegIDs,
+                    {filter, B, KR, large, all, MR, pre_hash}},
+                BlueList, PinkList, Always) ->
+    F0 = {filter, B, KR, large, {segments, SegIDs, large}, MR, pre_hash},
+    send_requests({fetch_clocks_range, F0}, BlueList, PinkList, Always);
 send_requests(_Msg, [], [], _Always) ->
     ok;
 send_requests(Msg, [{SendFun, Preflists}|Rest], PinkList, always_blue) ->
@@ -965,10 +1019,11 @@ logs() ->
             {error, "~w with pending_state=~w and missing_count=~w" 
                         ++ " for exchange id=~s"}},
         {"EX003",
-            {info, "Normal exit for full exchange at"
-                        ++ " pending_state=~w for exchange_id=~s"
-                        ++ " root_compare_deltas=~w root_compares=~w"
-                        ++ " branch_compare_deltas=~w branch_compares=~w"
+            {info, "Normal exit for full exchange in_sync=~w"
+                        ++ " pending_state=~w for exchange id=~s"
+                        ++ " scope of mismatched_segments=~w"
+                        ++ " root_compare_loops=~w "
+                        ++ " branch_compare_loops=~w "
                         ++ " keys_passed_for_repair=~w"}},
         {"EX004",
             {info, "Exchange id=~s led to prompting of repair_count=~w"}},
@@ -981,10 +1036,11 @@ logs() ->
         {"EX008", 
             {debug, "Comparison between BlueList ~w and PinkList ~w"}},
         {"EX009",
-            {info, "Normal exit for partial (dynamic) exchange at"
-                        ++ " pending_state=~w for exchange_id=~s"
-                        ++ " tree_compare_deltas=~w after tree_compares=~w"
-                        ++ " keys_passed_for_compare=~w"}},
+            {info, "Normal exit for full exchange in_sync=~w"
+                        ++ " pending_state=~w for exchange id=~s"
+                        ++ " scope of mismatched_segments=~w"
+                        ++ " tree_compare_loops=~w "
+                        ++ " keys_passed_for_repair=~w"}},
         {"EX010", 
             {warn, "Exchange not_supported for colour=~w in exchange id=~s"}}
         ].
