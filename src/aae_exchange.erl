@@ -179,7 +179,8 @@
                 transition_pause_ms = ?TRANSITION_PAUSE_MS :: pos_integer(),
                 log_levels :: aae_util:log_levels()|undefined,
                 scan_timeout = ?SCAN_TIMEOUT_MS :: non_neg_integer(),
-                max_results = ?MAX_RESULTS :: pos_integer()
+                max_results = ?MAX_RESULTS :: pos_integer(),
+                purpose :: atom()|undefined
                 }).
 
 -type branch_results() :: list({integer(), binary()}).
@@ -304,7 +305,7 @@ init([{Type, Filters},
                     exchange_filters = Filters},
     State0 = process_options(Opts, State),
     aae_util:log("EX001",
-                    [ExChID, PinkTarget + BlueTarget],
+                    [ExChID, PinkTarget + BlueTarget, State#state.purpose],
                     logs(),
                     State0#state.log_levels),
     InitState =
@@ -526,7 +527,7 @@ clock_compare(timeout, State) ->
     RepairKeys = compare_clocks(State#state.blue_acc, State#state.pink_acc),
     RepairFun = State#state.repair_fun,
     aae_util:log("EX004", 
-                    [State#state.exchange_id, length(RepairKeys)], 
+                    [State#state.exchange_id, State#state.purpose, length(RepairKeys)], 
                     logs(),
                     State#state.log_levels),
     RepairFun(RepairKeys),
@@ -537,7 +538,7 @@ clock_compare(timeout, State) ->
 
 waiting_all_results({reply, not_supported, Colour}, State) ->
     aae_util:log("EX010",
-                    [Colour, State#state.exchange_id],
+                    [Colour, State#state.exchange_id, State#state.purpose],
                     logs(),
                     State#state.log_levels),
     {stop, normal, State#state{pending_state = not_supported}};
@@ -586,7 +587,8 @@ waiting_all_results(UnexpectedResponse, State) ->
                     [UnexpectedResponse,
                         State#state.pending_state, 
                         MissingCount, 
-                        State#state.exchange_id], 
+                        State#state.exchange_id,
+                        State#state.purpose], 
                         logs(),
                         State#state.log_levels),
     ReplyState =
@@ -616,7 +618,8 @@ terminate(normal, StateName, State) ->
                         StateName == root_compare;
                         StateName == branch_compare ->
                     aae_util:log("EX003",
-                                    [true,
+                                    [State#state.purpose,
+                                        true,
                                         StateName,
                                         State#state.exchange_id,
                                         0,
@@ -631,7 +634,8 @@ terminate(normal, StateName, State) ->
                                             State#state.prethrottle_leaves,
                                             State#state.max_results),
                     aae_util:log("EX003",
-                                    [false,
+                                    [State#state.purpose,
+                                        false,
                                         BrokenState,
                                         State#state.exchange_id,
                                         EstDamage,
@@ -645,7 +649,8 @@ terminate(normal, StateName, State) ->
             case StateName of
                 tree_compare ->
                     aae_util:log("EX009",
-                                    [true,
+                                    [State#state.purpose,
+                                        true,
                                         tree_compare,
                                         State#state.exchange_id,
                                         0,
@@ -655,7 +660,8 @@ terminate(normal, StateName, State) ->
                                     State#state.log_levels);
                 BrokenState ->
                     aae_util:log("EX009",
-                                    [false,
+                                    [State#state.purpose,
+                                        false,
                                         BrokenState,
                                         State#state.exchange_id,
                                         State#state.prethrottle_leaves,
@@ -737,14 +743,21 @@ estimated_damage(BranchCount, LeafCount, MaxResults) ->
 %% Alter state reflecting any passed in options
 process_options([], State) ->
     State;
-process_options([{transition_pause_ms, PauseMS}|Tail], State) ->
+process_options([{transition_pause_ms, PauseMS}|Tail], State)
+                                                when is_integer(PauseMS) ->
     process_options(Tail, State#state{transition_pause_ms = PauseMS});
-process_options([{log_levels, LogLevels}|Tail], State) ->
+process_options([{log_levels, LogLevels}|Tail], State)
+                                                when is_list(LogLevels) ->
     process_options(Tail, State#state{log_levels = LogLevels});
-process_options([{scan_timeout, Timeout}|Tail], State) ->
+process_options([{scan_timeout, Timeout}|Tail], State)
+                                                when is_integer(Timeout) ->
     process_options(Tail, State#state{scan_timeout = Timeout});
-process_options([{max_results, MaxResults}|Tail], State) ->
-    process_options(Tail, State#state{max_results = MaxResults}).
+process_options([{max_results, MaxResults}|Tail], State)
+                                                when is_integer(MaxResults) ->
+    process_options(Tail, State#state{max_results = MaxResults});
+process_options([{purpose, Purpose}|Tail], State) 
+                                                when is_atom(Purpose) ->
+    process_options(Tail, State#state{purpose = Purpose}).
 
 -spec trigger_next(any(), atom(), fun(), any(), boolean(), 
                                         integer(), exchange_state()) -> any().
@@ -1014,19 +1027,20 @@ refine_clock(Clock) ->
 %% Define log lines for this module
 logs() ->
     [{"EX001", 
-            {info, "Exchange id=~s with target_count=~w expected"}},
+            {info, "Exchange id=~s with target_count=~w expected purpose=~w"}},
         {"EX002",
             {error, "~w with pending_state=~w and missing_count=~w" 
-                        ++ " for exchange id=~s"}},
+                        ++ " for exchange id=~s purpose=~w"}},
         {"EX003",
-            {info, "Normal exit for full exchange in_sync=~w"
+            {info, "Normal exit for full exchange purpose=~w in_sync=~w "
                         ++ " pending_state=~w for exchange id=~s"
                         ++ " scope of mismatched_segments=~w"
                         ++ " root_compare_loops=~w "
                         ++ " branch_compare_loops=~w "
                         ++ " keys_passed_for_repair=~w"}},
         {"EX004",
-            {info, "Exchange id=~s led to prompting of repair_count=~w"}},
+            {info, "Exchange id=~s purpose=~w led to prompting"
+                        ++ " of repair_count=~w"}},
         {"EX005",
             {info, "Exchange id=~s throttled count=~w at state=~w"}},
         {"EX006",
@@ -1036,13 +1050,14 @@ logs() ->
         {"EX008", 
             {debug, "Comparison between BlueList ~w and PinkList ~w"}},
         {"EX009",
-            {info, "Normal exit for full exchange in_sync=~w"
+            {info, "Normal exit for full exchange purpose=~w in_sync=~w"
                         ++ " pending_state=~w for exchange id=~s"
                         ++ " scope of mismatched_segments=~w"
                         ++ " tree_compare_loops=~w "
                         ++ " keys_passed_for_repair=~w"}},
         {"EX010", 
-            {warn, "Exchange not_supported for colour=~w in exchange id=~s"}}
+            {warn, "Exchange not_supported for colour=~w"
+                        ++ " in exchange id=~s purpose=~w"}}
         ].
 
 
