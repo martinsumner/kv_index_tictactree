@@ -214,7 +214,7 @@
         {transition_pause_ms, pos_integer()}|
         {scan_timeout, non_neg_integer()}|
         {log_levels, aae_util:log_levels()}|
-        {max_results, non-neg_integer()}|
+        {max_results, non_neg_integer()}|
         {purpose, atom()}.
 -type options() :: list(option_item()).
 -type send_message() ::
