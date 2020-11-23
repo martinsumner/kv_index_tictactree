@@ -307,7 +307,7 @@ init([{Type, Filters},
                     exchange_filters = Filters},
     State0 = process_options(Opts, State),
     aae_util:log("EX001",
-                    [ExChID, PinkTarget + BlueTarget, State#state.purpose],
+                    [ExChID, PinkTarget + BlueTarget, State0#state.purpose],
                     logs(),
                     State0#state.log_levels),
     InitState =
