@@ -556,9 +556,21 @@ handle_call({rebuild_trees, IndexNs, PreflistFun, OnlyIfBroken},
                     % Setup a fold over the store
                     {FoldFun, InitAcc} =
                         foldobjects_buildtrees(IndexNs, LogLevels),
+                    CheckPresence = (StateName == native) and not OnlyIfBroken,
+                    % If we're performing a shceduled rebuild on a native store
+                    % then the fold needs to check for the presence of the key
+                    % in the journal, not just the ledger.  Special range value
+                    % is used to trigger CheckPresence 
+                    Range =
+                        case CheckPresence of
+                            true ->
+                                all_check;
+                            false ->
+                                all
+                        end,
                     {async, Folder} = 
                         aae_keystore:store_fold(KeyStore, 
-                                                all, all,
+                                                Range, all,
                                                 all, false,
                                                 FoldFun, InitAcc, 
                                                 [{preflist, PreflistFun}, 
