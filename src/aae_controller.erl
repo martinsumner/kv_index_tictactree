@@ -772,6 +772,16 @@ handle_call({fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PreflFun},
         fun({KeyClockList, _SubTree}) ->
             length(KeyClockList)
         end,
+    
+    Range =
+        case State#state.parallel_keystore of
+            false ->
+                % If we discover a broken journal file via a rebuild, don't
+                % want to falsley repair it through the fetch_clocks process.
+                all_check;
+            _ ->
+                all
+        end,
 
     ok = maybe_flush_puts(State#state.key_store, 
                             State#state.objectspecs_queue,
@@ -779,7 +789,7 @@ handle_call({fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PreflFun},
                             true),
     {async, Folder} = 
         aae_keystore:store_fold(State#state.key_store, 
-                                all,
+                                Range,
                                 {segments, SegmentIDs, ?TREE_SIZE},
                                 all, false, 
                                 FoldObjFun, 
