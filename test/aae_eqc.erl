@@ -7,8 +7,10 @@
 
 -module(aae_eqc).
 
+-ifdef(EQC).
 -include_lib("eqc/include/eqc.hrl").
 -include_lib("eqc/include/eqc_statem.hrl").
+
 
 -compile([export_all, nowarn_export_all]).
 -compile({nowarn_deprecated_function, [{erlang, now, 0}]}).
@@ -413,3 +415,4 @@ started_controllers(S) ->
     Controllers = maps:get(aae_controllers, S, []),
     lists:filter(fun({_, M}) -> maps:is_key(aae_controller, M) end, Controllers).
 
+-endif.
