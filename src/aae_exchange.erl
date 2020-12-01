@@ -112,6 +112,10 @@
     % If the last comparison of trees has reduced the size of the dirty leaves
     % by 30%, probably worth comparing again before a clock fetch is run. 
     % Number a suck-teeth estimate, not even a fag-packet calculation involved.
+-define(WORTHWHILE_REDUCTION_CACHED, 0).
+    % When checking a cached tree - then even a small reduction is worth
+    % another check, as the cost per check is so small.  This changed after
+    % seeing cost of false negative results in large stores.
 -define(WORTHWHILE_FILTER, 256).
     % If the number of segment IDs to pass into a filter is too large, the
     % filter is probably not worthwhile - more effort checking the filter, than
@@ -193,7 +197,7 @@
     root_compare|tree_compare|branch_compare|clock_compare.
 -type closing_state() ::
     compare_state()|timeout|error|not_supported.
--type bucket() :: 
+-type bucket_range() :: 
     {binary(), binary()}|binary()|all.
 -type key_range() :: 
     {binary(), binary()}|all.
@@ -205,7 +209,7 @@
     pre_hash|{rehash, non_neg_integer()}.
 -type filters() :: 
     {filter,
-        bucket(), key_range(),
+        bucket_range(), key_range(),
         leveled_tictac:tree_size(),
         segment_filter(), modified_range(),
         hash_method()}|none.
@@ -429,16 +433,16 @@ root_compare(timeout, State) ->
     {BranchIDs, Reduction} = 
         case State#state.last_root_compare of
             none ->
-                {DirtyBranches, 1.0};
+                {DirtyBranches, DirtyBranches};
             PreviouslyDirtyBranches ->
                 BDL = intersect_ids(PreviouslyDirtyBranches, DirtyBranches),
-                {BDL, 1.0 - length(BDL) / length(PreviouslyDirtyBranches)}
+                {BDL, length(BDL) - length(PreviouslyDirtyBranches)}
         end,
     % Should we loop again on root_compare?  As longs as root_compare is
     % reducing the result set sufficiently, keep doing it until we switch to
     % branch_compare
     case ((length(BranchIDs) > 0)
-            and (Reduction > ?WORTHWHILE_REDUCTION)) of
+            and (Reduction > ?WORTHWHILE_REDUCTION_CACHED)) of
         true ->
             trigger_next(fetch_root, 
                             root_compare, 
@@ -477,16 +481,16 @@ branch_compare(timeout, State) ->
     {SegmentIDs, Reduction} = 
         case State#state.last_branch_compare of
             none ->
-                {DirtySegments, 1.0};
+                {DirtySegments, DirtySegments};
             PreviouslyDirtySegments ->
                 SDL = intersect_ids(PreviouslyDirtySegments, DirtySegments),
-                {SDL, 1.0 - length(SDL) / length(PreviouslyDirtySegments)}
+                {SDL, length(SDL) - length(PreviouslyDirtySegments)}
         end,
     % Should we loop again on root_compare?  As longs as root_compare is
     % reducing the result set sufficiently, keep doing it until we switch to
     % branch_compare
     case ((length(SegmentIDs) > 0)
-            and (Reduction > ?WORTHWHILE_REDUCTION)) of
+            and (Reduction > ?WORTHWHILE_REDUCTION_CACHED)) of
         true ->
             trigger_next({fetch_branches, State#state.root_compare_deltas}, 
                             branch_compare, 
@@ -540,7 +544,7 @@ clock_compare(timeout, State) ->
 
 waiting_all_results({reply, not_supported, Colour}, State) ->
     aae_util:log("EX010",
-                    [Colour, State#state.exchange_id, State#state.purpose],
+                    [State#state.exchange_id, Colour, State#state.purpose],
                     logs(),
                     State#state.log_levels),
     {stop, normal, State#state{pending_state = not_supported}};
@@ -960,7 +964,7 @@ intersect_ids(IDs0, IDs1) ->
 %% lists
 select_ids(IDList, MaxOutput, StateName, ExchangeID, LogLevels)
                                             when length(IDList) > MaxOutput ->
-    IDList0 = lists:usort(IDList),
+    IDList0 = lists:sort(IDList),
     aae_util:log("EX005", 
                     [ExchangeID, length(IDList0), StateName],
                     logs(),
@@ -981,7 +985,7 @@ select_ids(IDList, MaxOutput, StateName, ExchangeID, LogLevels)
         lists:nth(leveled_rand:uniform(length(Selections)), Selections),
     lists:sublist(IDList0, ChosenIdx, MaxOutput);
 select_ids(IDList, _MaxOutput, _StateName, _ExchangeID, _LogLevels) ->
-    lists:usort(IDList).
+    lists:sort(IDList).
     
 -spec jitter_pause(pos_integer()) -> pos_integer().
 %% @doc
@@ -1058,8 +1062,8 @@ logs() ->
                         ++ " tree_compare_loops=~w "
                         ++ " keys_passed_for_repair=~w"}},
         {"EX010", 
-            {warn, "Exchange not_supported for colour=~w"
-                        ++ " in exchange id=~s purpose=~w"}}
+            {warn, "Exchange not_supported in exchange id=~s"
+                        ++ " for colour=~w purpose=~w"}}
         ].
 
 
