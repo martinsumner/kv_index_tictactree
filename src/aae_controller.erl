@@ -557,7 +557,7 @@ handle_call({rebuild_trees, IndexNs, PreflistFun, OnlyIfBroken},
                     {FoldFun, InitAcc} =
                         foldobjects_buildtrees(IndexNs, LogLevels),
                     CheckPresence = (StateName == native) and not OnlyIfBroken,
-                    % If we're performing a shceduled rebuild on a native store
+                    % If we're performing a scheduled rebuild on a native store
                     % then the fold needs to check for the presence of the key
                     % in the journal, not just the ledger.  Special range value
                     % is used to trigger CheckPresence 
@@ -777,7 +777,7 @@ handle_call({fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PreflFun},
         case State#state.parallel_keystore of
             false ->
                 % If we discover a broken journal file via a rebuild, don't
-                % want to falsley repair it through the fetch_clocks process.
+                % want to falsely repair it through the fetch_clocks process.
                 all_check;
             _ ->
                 all
@@ -1765,5 +1765,4 @@ wrap_splitfun_test() ->
     ?assertMatch(undefined, element(4, SplitObj)). 
 
 -endif.
-
 
