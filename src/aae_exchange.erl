@@ -741,8 +741,9 @@ merge_tree(Tree0, Tree1) ->
 
 -spec estimated_damage(pos_integer(), pos_integer(), pos_integer()) ->
                         non_neg_integer().
-estimated_damage(BranchCount, LeafCount, MaxResults) ->
-    round(BranchCount * LeafCount / MaxResults).
+estimated_damage(BrokenBranches, BrokenLeaves, MaxResults) ->
+    Mult = max(1.0, BrokenBranches / MaxResults),
+    round(Mult * BrokenLeaves).
 
 -spec process_options(options(), exchange_state()) -> exchange_state().
 %% @doc

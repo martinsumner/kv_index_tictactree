@@ -557,7 +557,7 @@ handle_call({rebuild_trees, IndexNs, PreflistFun, OnlyIfBroken},
                     {FoldFun, InitAcc} =
                         foldobjects_buildtrees(IndexNs, LogLevels),
                     CheckPresence = (StateName == native) and not OnlyIfBroken,
-                    % If we're performing a scheduled rebuild on a native store
+                    % If performing a scheduled rebuild on a native store
                     % then the fold needs to check for the presence of the key
                     % in the journal, not just the ledger.  Special range value
                     % is used to trigger CheckPresence 
