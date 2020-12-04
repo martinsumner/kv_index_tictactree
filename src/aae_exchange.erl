@@ -147,6 +147,8 @@
             compare_clocks/2,
             compare_trees/2]).
 
+-export([insync_responses/0]).
+
 -export([start/4,
             start/7,
             reply/3]).
@@ -689,6 +691,14 @@ code_change(_OldVsn, StateName, State, _Extra) ->
 %%% External Functions
 %%%============================================================================
 
+-spec insync_responses() -> list(compare_state()).
+%% @doc
+%% To help external applications understand the states returned in replies,
+%% a list of those response that imply that the systems are in sync.  Note,
+%% that with branch_compare this is possibly not true if not all branch deltas
+%% were checked (e.g. branch IDs > max_results).
+insync_responses() ->
+    [root_compare, branch_compare].
 
 -spec merge_binary(binary(), binary()) -> binary().
 %% @doc
@@ -1191,7 +1201,8 @@ coverage_cheat_test() ->
     {next_state, prepare, _State2} =
         handle_info(null, prepare, #state{exchange_type = full}),
     {ok, prepare, _State3} =
-        code_change(null, prepare, #state{exchange_type = full}, null).
+        code_change(null, prepare, #state{exchange_type = full}, null),
+    [root_compare, branch_compare] = insync_responses().
 
 
 -endif.
