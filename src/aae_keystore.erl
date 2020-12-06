@@ -139,9 +139,13 @@
 -type objectspec() :: #objectspec{}.
     % Object specification required by the store within mputs
 -type range_limiter()
-    :: all|{buckets, list(bucket())}|{key_range, bucket(), key(), key()}.
+    :: all|all_check|
+        {buckets, list(bucket())}|
+        {key_range, bucket(), key(), key()}.
     % Limit the scope of the fold, to specific segments or to specific 
-    % buckets (and otherwise state all).
+    % buckets (and otherwise state all).  all_check is used for scheduled
+    % rebuilds of native stores - will prompt a journal presence check for
+    % each key
 -type segment_limiter()
     :: all|{segments, list(integer()), small|medium|large}.
 -type modified_limiter()
@@ -1121,14 +1125,16 @@ do_fold(leveled_nko, Store, Range, SegFilter, LMDRange, MaxObjects,
             {buckets, BucketList} ->
                 {{bucket_list, BucketList}, ?NOCHECK_PRESENCE};
             all ->
-                % Rebuilds should check presence
+                {all, ?NOCHECK_PRESENCE};
+            all_check ->
                 {all, ?CHECK_NATIVE_PRESENCE}
         end,
+    ModifiedRange = modify_modifiedrange(LMDRange),
     leveled_bookie:book_headfold(Store,
                                     ?RIAK_TAG, ReformattedRange,
                                     {FoldElementsFun, InitAcc}, 
                                     CheckPresence, ?SNAP_PREFOLD, 
-                                    SegList, modify_modifiedrange(LMDRange),
+                                    SegList, ModifiedRange,
                                     MaxObjects).
 
 
