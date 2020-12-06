@@ -369,6 +369,13 @@ handle_call({aae, Msg, IndexNs, ReturnFun}, _From, State) ->
                                                 SegmentIDs,
                                                 ReturnFun,
                                                 State#state.preflist_fun);
+        {fetch_clocks, SegmentIDs, MR} ->
+            io:format("Switching to fetch_clock_range with MR ~p~n", [MR]),
+            handle_call({aae, 
+                            {fetch_clocks_range,
+                                all, all, {segments, SegmentIDs, large}, MR},
+                            IndexNs,
+                            ReturnFun}, _From, State);
         {merge_tree_range, B, KR, TS, SF, MR, HM} ->
             NullExtractFun = 
                 fun({B0, K0}, V0) -> 
@@ -614,6 +621,8 @@ from_aae_binary(AAEBin) ->
 
 %% @doc
 %% Convert the format of the range limiter to one compatible with the aae store
+aaefold_setrangelimiter(all, all) ->
+    all;
 aaefold_setrangelimiter(Bucket, all) ->
     {buckets, [Bucket]};
 aaefold_setrangelimiter(Bucket, {StartKey, EndKey}) ->
@@ -621,7 +630,7 @@ aaefold_setrangelimiter(Bucket, {StartKey, EndKey}) ->
 
 %% @doc
 %% Convert the format of the date limiter to one compatible with the aae store
-aaefold_setmodifiedlimiter({date, LowModDate, HighModDate}) 
+aaefold_setmodifiedlimiter({LowModDate, HighModDate}) 
                         when is_integer(LowModDate), is_integer(HighModDate) ->
     {LowModDate, HighModDate};
 aaefold_setmodifiedlimiter(_) ->

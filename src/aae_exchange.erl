@@ -112,6 +112,10 @@
     % If the last comparison of trees has reduced the size of the dirty leaves
     % by 30%, probably worth comparing again before a clock fetch is run. 
     % Number a suck-teeth estimate, not even a fag-packet calculation involved.
+-define(WORTHWHILE_REDUCTION_CACHED, 0).
+    % When checking a cached tree - then even a small reduction is worth
+    % another check, as the cost per check is so small.  This changed after
+    % seeing cost of false negative results in large stores.
 -define(WORTHWHILE_FILTER, 256).
     % If the number of segment IDs to pass into a filter is too large, the
     % filter is probably not worthwhile - more effort checking the filter, than
@@ -119,6 +123,7 @@
     % what this value is, at this level with a small tree it will save opening
     % all but one block in most slots (with the sst file).  I suspect the
     % optimal number is more likely to be higher than lower.
+
 
 -export([init/1,
             handle_sync_event/4,
@@ -141,6 +146,8 @@
             compare_branches/2,
             compare_clocks/2,
             compare_trees/2]).
+
+-export([insync_responses/0]).
 
 -export([start/4,
             start/7,
@@ -173,10 +180,13 @@
                 tree_compares = 0 :: integer(),
                 root_compares = 0 :: integer(),
                 branch_compares = 0 :: integer(),
+                prethrottle_branches = 0 :: non_neg_integer(),
+                prethrottle_leaves = 0 :: non_neg_integer(),
                 transition_pause_ms = ?TRANSITION_PAUSE_MS :: pos_integer(),
                 log_levels :: aae_util:log_levels()|undefined,
                 scan_timeout = ?SCAN_TIMEOUT_MS :: non_neg_integer(),
-                max_results = ?MAX_RESULTS :: pos_integer()
+                max_results = ?MAX_RESULTS :: pos_integer(),
+                purpose :: atom()|undefined
                 }).
 
 -type branch_results() :: list({integer(), binary()}).
@@ -189,8 +199,8 @@
     root_compare|tree_compare|branch_compare|clock_compare.
 -type closing_state() ::
     compare_state()|timeout|error|not_supported.
--type bucket() :: 
-    {binary(), binary()}|binary().
+-type bucket_range() :: 
+    {binary(), binary()}|binary()|all.
 -type key_range() :: 
     {binary(), binary()}|all.
 -type modified_range() :: 
@@ -201,7 +211,7 @@
     pre_hash|{rehash, non_neg_integer()}.
 -type filters() :: 
     {filter,
-        bucket(), key_range(),
+        bucket_range(), key_range(),
         leveled_tictac:tree_size(),
         segment_filter(), modified_range(),
         hash_method()}|none.
@@ -209,7 +219,9 @@
 -type option_item() ::
         {transition_pause_ms, pos_integer()}|
         {scan_timeout, non_neg_integer()}|
-        {log_levels, aae_util:log_levels()}.
+        {log_levels, aae_util:log_levels()}|
+        {max_results, non_neg_integer()}|
+        {purpose, atom()}.
 -type options() :: list(option_item()).
 -type send_message() ::
         fetch_root |
@@ -262,19 +274,10 @@ start(BlueList, PinkList, RepairFun, ReplyFun) ->
 %%
 %% The ReplyFun should be a 1 arity function that expects a tuple with the
 %% closing state and the cout of deltas.  
-start(full, BlueList, PinkList, RepairFun, ReplyFun, none, Opts) ->
+start(Type, BlueList, PinkList, RepairFun, ReplyFun, Filters, Opts) ->
     ExchangeID = leveled_util:generate_uuid(),
     {ok, ExPID} = gen_fsm:start(?MODULE, 
-                                [{full, none}, 
-                                    BlueList, PinkList, RepairFun, ReplyFun,
-                                    ExchangeID,
-                                    Opts], 
-                                []),
-    {ok, ExPID, ExchangeID};
-start(partial, BlueList, PinkList, RepairFun, ReplyFun, Filters, Opts) ->
-    ExchangeID = leveled_util:generate_uuid(),
-    {ok, ExPID} = gen_fsm:start(?MODULE, 
-                                [{partial, Filters}, 
+                                [{Type, Filters}, 
                                     BlueList, PinkList, RepairFun, ReplyFun,
                                     ExchangeID,
                                     Opts], 
@@ -294,7 +297,7 @@ reply(Exchange, Result, Colour) ->
 %%% gen_fsm callbacks
 %%%============================================================================
 
-init([{full, none},
+init([{Type, Filters},
         BlueList, PinkList, RepairFun, ReplyFun, ExChID, Opts]) ->
     leveled_rand:seed(),
     PinkTarget = length(PinkList),
@@ -306,33 +309,19 @@ init([{full, none},
                     exchange_id = ExChID,
                     pink_returns = {PinkTarget, PinkTarget},
                     blue_returns = {BlueTarget, BlueTarget},
-                    exchange_type = full},
-    State0 = process_options(Opts, State),
-    aae_util:log("EX001",
-                    [ExChID, PinkTarget + BlueTarget],
-                    logs(),
-                    State0#state.log_levels),
-    {ok, prepare_full_exchange, State0, 0};
-init([{partial, Filters},
-        BlueList, PinkList, RepairFun, ReplyFun, ExChID, Opts]) ->
-    leveled_rand:seed(),
-    PinkTarget = length(PinkList),
-    BlueTarget = length(BlueList),
-    State = #state{blue_list = BlueList, 
-                    pink_list = PinkList,
-                    repair_fun = RepairFun,
-                    reply_fun = ReplyFun,
-                    exchange_id = ExChID,
-                    pink_returns = {PinkTarget, PinkTarget},
-                    blue_returns = {BlueTarget, BlueTarget},
-                    exchange_type = partial,
+                    exchange_type = Type,
                     exchange_filters = Filters},
     State0 = process_options(Opts, State),
     aae_util:log("EX001",
-                    [ExChID, PinkTarget + BlueTarget],
+                    [ExChID, PinkTarget + BlueTarget, State0#state.purpose],
                     logs(),
                     State0#state.log_levels),
-    {ok, prepare_partial_exchange, State0, 0}.
+    InitState =
+        case Type of
+            full -> prepare_full_exchange;
+            partial -> prepare_partial_exchange
+        end,
+    {ok, InitState, State0, 0}.
 
 
 prepare_full_exchange(timeout, State) ->
@@ -430,7 +419,9 @@ tree_compare(timeout, State) ->
                             length(SegmentIDs) == 0, 
                             State#state.scan_timeout, 
                             State#state{tree_compare_deltas = StillDirtyLeaves,
-                                        tree_compares = TreeCompares})
+                                        tree_compares = TreeCompares,
+                                        prethrottle_leaves =
+                                            length(StillDirtyLeaves)})
     end.
 
 
@@ -444,16 +435,16 @@ root_compare(timeout, State) ->
     {BranchIDs, Reduction} = 
         case State#state.last_root_compare of
             none ->
-                {DirtyBranches, 1.0};
+                {DirtyBranches, DirtyBranches};
             PreviouslyDirtyBranches ->
                 BDL = intersect_ids(PreviouslyDirtyBranches, DirtyBranches),
-                {BDL, 1.0 - length(BDL) / length(PreviouslyDirtyBranches)}
+                {BDL, length(BDL) - length(PreviouslyDirtyBranches)}
         end,
     % Should we loop again on root_compare?  As longs as root_compare is
     % reducing the result set sufficiently, keep doing it until we switch to
     % branch_compare
     case ((length(BranchIDs) > 0)
-            and (Reduction > ?WORTHWHILE_REDUCTION)) of
+            and (Reduction > ?WORTHWHILE_REDUCTION_CACHED)) of
         true ->
             trigger_next(fetch_root, 
                             root_compare, 
@@ -476,7 +467,9 @@ root_compare(timeout, State) ->
                             length(BranchIDs) == 0, 
                             ?CACHE_TIMEOUT_MS, 
                             State#state{root_compare_deltas = BranchesToFetch,
-                                        root_compares = RootCompares})
+                                        root_compares = RootCompares,
+                                        prethrottle_branches =
+                                            length(BranchIDs)})
     end.
 
 
@@ -490,16 +483,16 @@ branch_compare(timeout, State) ->
     {SegmentIDs, Reduction} = 
         case State#state.last_branch_compare of
             none ->
-                {DirtySegments, 1.0};
+                {DirtySegments, DirtySegments};
             PreviouslyDirtySegments ->
                 SDL = intersect_ids(PreviouslyDirtySegments, DirtySegments),
-                {SDL, 1.0 - length(SDL) / length(PreviouslyDirtySegments)}
+                {SDL, length(SDL) - length(PreviouslyDirtySegments)}
         end,
     % Should we loop again on root_compare?  As longs as root_compare is
     % reducing the result set sufficiently, keep doing it until we switch to
     % branch_compare
     case ((length(SegmentIDs) > 0)
-            and (Reduction > ?WORTHWHILE_REDUCTION)) of
+            and (Reduction > ?WORTHWHILE_REDUCTION_CACHED)) of
         true ->
             trigger_next({fetch_branches, State#state.root_compare_deltas}, 
                             branch_compare, 
@@ -515,14 +508,19 @@ branch_compare(timeout, State) ->
                                         branch_confirm, 
                                         State#state.exchange_id,
                                         State#state.log_levels),
-            trigger_next({fetch_clocks, SegstoFetch}, 
+            
+            trigger_next({fetch_clocks,
+                                SegstoFetch,
+                                State#state.exchange_filters}, 
                             clock_compare, 
                             fun merge_clocks/2, 
                             [],
                             length(SegmentIDs) == 0, 
                             State#state.scan_timeout, 
                             State#state{branch_compare_deltas = SegstoFetch,
-                                        branch_compares = BranchCompares})
+                                        branch_compares = BranchCompares,
+                                        prethrottle_leaves =
+                                            length(SegmentIDs)})
     end.
 
 clock_compare(timeout, State) ->
@@ -537,7 +535,7 @@ clock_compare(timeout, State) ->
     RepairKeys = compare_clocks(State#state.blue_acc, State#state.pink_acc),
     RepairFun = State#state.repair_fun,
     aae_util:log("EX004", 
-                    [State#state.exchange_id, length(RepairKeys)], 
+                    [State#state.exchange_id, State#state.purpose, length(RepairKeys)], 
                     logs(),
                     State#state.log_levels),
     RepairFun(RepairKeys),
@@ -548,7 +546,7 @@ clock_compare(timeout, State) ->
 
 waiting_all_results({reply, not_supported, Colour}, State) ->
     aae_util:log("EX010",
-                    [Colour, State#state.exchange_id],
+                    [State#state.exchange_id, Colour, State#state.purpose],
                     logs(),
                     State#state.log_levels),
     {stop, normal, State#state{pending_state = not_supported}};
@@ -597,7 +595,8 @@ waiting_all_results(UnexpectedResponse, State) ->
                     [UnexpectedResponse,
                         State#state.pending_state, 
                         MissingCount, 
-                        State#state.exchange_id], 
+                        State#state.exchange_id,
+                        State#state.purpose], 
                         logs(),
                         State#state.log_levels),
     ReplyState =
@@ -622,25 +621,63 @@ handle_info(_Msg, StateName, State) ->
 terminate(normal, StateName, State) ->
     case State#state.exchange_type of
         full ->
-            aae_util:log("EX003", 
-                            [StateName,
-                                State#state.exchange_id,
-                                length(State#state.root_compare_deltas),
-                                State#state.root_compares,
-                                length(State#state.branch_compare_deltas),
-                                State#state.branch_compares,
-                                length(State#state.key_deltas)], 
-                            logs(),
-                            State#state.log_levels);
+            case StateName of
+                StateName when
+                        StateName == root_compare;
+                        StateName == branch_compare ->
+                    aae_util:log("EX003",
+                                    [State#state.purpose,
+                                        true,
+                                        StateName,
+                                        State#state.exchange_id,
+                                        0,
+                                        State#state.root_compares,
+                                        State#state.branch_compares,
+                                        length(State#state.key_deltas)],
+                                    logs(),
+                                    State#state.log_levels);
+                BrokenState ->
+                    EstDamage =
+                        estimated_damage(State#state.prethrottle_branches,
+                                            State#state.prethrottle_leaves,
+                                            State#state.max_results),
+                    aae_util:log("EX003",
+                                    [State#state.purpose,
+                                        false,
+                                        BrokenState,
+                                        State#state.exchange_id,
+                                        EstDamage,
+                                        State#state.root_compares,
+                                        State#state.branch_compares,
+                                        length(State#state.key_deltas)],
+                                    logs(),
+                                    State#state.log_levels)
+            end;
         partial ->
-            aae_util:log("EX009", 
-                            [StateName,
-                                State#state.exchange_id,
-                                length(State#state.tree_compare_deltas),
-                                State#state.tree_compares,
-                                length(State#state.key_deltas)], 
-                            logs(),
-                            State#state.log_levels)
+            case StateName of
+                tree_compare ->
+                    aae_util:log("EX009",
+                                    [State#state.purpose,
+                                        true,
+                                        tree_compare,
+                                        State#state.exchange_id,
+                                        0,
+                                        State#state.tree_compares,
+                                        length(State#state.key_deltas)],
+                                    logs(),
+                                    State#state.log_levels);
+                BrokenState ->
+                    aae_util:log("EX009",
+                                    [State#state.purpose,
+                                        false,
+                                        BrokenState,
+                                        State#state.exchange_id,
+                                        State#state.prethrottle_leaves,
+                                        State#state.tree_compares,
+                                        length(State#state.key_deltas)],
+                                    logs(),
+                                    State#state.log_levels)
+            end
     end,
     ReplyFun = State#state.reply_fun,
     ReplyFun({State#state.pending_state, length(State#state.key_deltas)}).
@@ -654,6 +691,14 @@ code_change(_OldVsn, StateName, State, _Extra) ->
 %%% External Functions
 %%%============================================================================
 
+-spec insync_responses() -> list(compare_state()).
+%% @doc
+%% To help external applications understand the states returned in replies,
+%% a list of those response that imply that the systems are in sync.  Note,
+%% that with branch_compare this is possibly not true if not all branch deltas
+%% were checked (e.g. branch IDs > max_results).
+insync_responses() ->
+    [root_compare, branch_compare].
 
 -spec merge_binary(binary(), binary()) -> binary().
 %% @doc
@@ -704,19 +749,32 @@ merge_tree(Tree0, Tree1) ->
 %%% Internal Functions
 %%%============================================================================
 
+-spec estimated_damage(pos_integer(), pos_integer(), pos_integer()) ->
+                        non_neg_integer().
+estimated_damage(BrokenBranches, BrokenLeaves, MaxResults) ->
+    Mult = max(1.0, BrokenBranches / MaxResults),
+    round(Mult * BrokenLeaves).
+
 -spec process_options(options(), exchange_state()) -> exchange_state().
 %% @doc
 %% Alter state reflecting any passed in options
 process_options([], State) ->
     State;
-process_options([{transition_pause_ms, PauseMS}|Tail], State) ->
+process_options([{transition_pause_ms, PauseMS}|Tail], State)
+                                                when is_integer(PauseMS) ->
     process_options(Tail, State#state{transition_pause_ms = PauseMS});
-process_options([{log_levels, LogLevels}|Tail], State) ->
+process_options([{log_levels, LogLevels}|Tail], State)
+                                                when is_list(LogLevels) ->
     process_options(Tail, State#state{log_levels = LogLevels});
-process_options([{scan_timeout, Timeout}|Tail], State) ->
+process_options([{scan_timeout, Timeout}|Tail], State)
+                                                when is_integer(Timeout) ->
     process_options(Tail, State#state{scan_timeout = Timeout});
-process_options([{max_results, MaxResults}|Tail], State) ->
-    process_options(Tail, State#state{max_results = MaxResults}).
+process_options([{max_results, MaxResults}|Tail], State)
+                                                when is_integer(MaxResults) ->
+    process_options(Tail, State#state{max_results = MaxResults});
+process_options([{purpose, Purpose}|Tail], State) 
+                                                when is_atom(Purpose) ->
+    process_options(Tail, State#state{purpose = Purpose}).
 
 -spec trigger_next(any(), atom(), fun(), any(), boolean(), 
                                         integer(), exchange_state()) -> any().
@@ -768,6 +826,19 @@ send_requests({fetch_clocks_range, {filter, B, KR, _TS, SF, MR, _HM}},
     % unpack the filter into a single tuple msg or merge_tree_range
     send_requests({fetch_clocks_range, B, KR, SF, MR},
                     BlueList, PinkList, Always);
+send_requests({fetch_clocks, SegIDs, none}, BlueList, PinkList, Always) ->
+    send_requests({fetch_clocks, SegIDs}, BlueList, PinkList, Always);
+send_requests({fetch_clocks,
+                    SegIDs,
+                    {filter, all, all, large, all, MR, pre_hash}},
+                BlueList, PinkList, Always) ->
+    send_requests({fetch_clocks, SegIDs, MR}, BlueList, PinkList, Always);
+send_requests({fetch_clocks,
+                    SegIDs,
+                    {filter, B, KR, large, all, MR, pre_hash}},
+                BlueList, PinkList, Always) ->
+    F0 = {filter, B, KR, large, {segments, SegIDs, large}, MR, pre_hash},
+    send_requests({fetch_clocks_range, F0}, BlueList, PinkList, Always);
 send_requests(_Msg, [], [], _Always) ->
     ok;
 send_requests(Msg, [{SendFun, Preflists}|Rest], PinkList, always_blue) ->
@@ -899,39 +970,33 @@ intersect_ids(IDs0, IDs1) ->
 %% Select a cluster of IDs if the list of IDs is smaller than the maximum 
 %% output size.  The lookup based on these IDs will be segment based, so it 
 %% is expected that the tightest clustering will yield the most efficient 
-%% results. 
-select_ids(IDList, MaxOutput, StateName, ExchangeID, LogLevels) ->
-    IDList0 = lists:usort(IDList),
+%% results.  However, if we always get the same list, then concurrent exchanges
+%% will wastefully correct the same data - so randomly chose one of the better
+%% lists
+select_ids(IDList, MaxOutput, StateName, ExchangeID, LogLevels)
+                                            when length(IDList) > MaxOutput ->
+    IDList0 = lists:sort(IDList),
+    aae_util:log("EX005", 
+                    [ExchangeID, length(IDList0), StateName],
+                    logs(),
+                    LogLevels),
+    IDList1 =
+        lists:sublist(IDList0, 1 + length(IDList0) - MaxOutput),
+    IDList2 =
+        lists:sublist(IDList0, MaxOutput, 1 + length(IDList0) - MaxOutput),
     FoldFun =
-        fun(Idx, {BestIdxs, MinOutput}) ->
-            Space = lists:nth(MaxOutput + Idx - 1, IDList0) 
-                        - lists:nth(Idx, IDList0),
-            case Space of
-                MinOutput ->
-                    {[Idx|BestIdxs], MinOutput};
-                S when S < MinOutput ->
-                    {[Idx], Space};
-                _ ->
-                    {BestIdxs, MinOutput}
-            end
+        fun({Start, End}, {Idx, Acc}) ->
+            {Idx + 1, [{End - Start, Idx}|Acc]}
         end,
-    case length(IDList0) > MaxOutput of 
-        true ->
-            aae_util:log("EX005", 
-                            [ExchangeID, length(IDList0), StateName],
-                            logs(),
-                            LogLevels),
-            {BestSliceStarts, _Score} = 
-                lists:foldl(FoldFun, 
-                            {[0], infinity}, 
-                            lists:seq(1, 1 + length(IDList0) - MaxOutput)),
-            BestSliceStart = 
-                lists:nth(leveled_rand:uniform(length(BestSliceStarts)),
-                            BestSliceStarts),
-            lists:sublist(IDList0, BestSliceStart, MaxOutput);
-        false ->
-            IDList0
-    end.
+    {_EndIdx, SpaceIdxL} =
+        lists:foldl(FoldFun, {1, []}, lists:zip(IDList1, IDList2)),
+    Selections = 
+        lists:sublist(lists:sort(SpaceIdxL), MaxOutput),
+    {_ChosenSpace, ChosenIdx} =
+        lists:nth(leveled_rand:uniform(length(Selections)), Selections),
+    lists:sublist(IDList0, ChosenIdx, MaxOutput);
+select_ids(IDList, _MaxOutput, _StateName, _ExchangeID, _LogLevels) ->
+    lists:sort(IDList).
     
 -spec jitter_pause(pos_integer()) -> pos_integer().
 %% @doc
@@ -979,18 +1044,20 @@ refine_clock(Clock) ->
 %% Define log lines for this module
 logs() ->
     [{"EX001", 
-            {info, "Exchange id=~s with target_count=~w expected"}},
+            {info, "Exchange id=~s with target_count=~w expected purpose=~w"}},
         {"EX002",
             {error, "~w with pending_state=~w and missing_count=~w" 
-                        ++ " for exchange id=~s"}},
+                        ++ " for exchange id=~s purpose=~w"}},
         {"EX003",
-            {info, "Normal exit for full exchange at"
-                        ++ " pending_state=~w for exchange_id=~s"
-                        ++ " root_compare_deltas=~w root_compares=~w"
-                        ++ " branch_compare_deltas=~w branch_compares=~w"
-                        ++ " keys_passed_for_compare=~w"}},
+            {info, "Normal exit for full exchange purpose=~w in_sync=~w "
+                        ++ " pending_state=~w for exchange id=~s"
+                        ++ " scope of mismatched_segments=~w"
+                        ++ " root_compare_loops=~w "
+                        ++ " branch_compare_loops=~w "
+                        ++ " keys_passed_for_repair=~w"}},
         {"EX004",
-            {info, "Exchange id=~s led to prompting of repair_count=~w"}},
+            {info, "Exchange id=~s purpose=~w led to prompting"
+                        ++ " of repair_count=~w"}},
         {"EX005",
             {info, "Exchange id=~s throttled count=~w at state=~w"}},
         {"EX006",
@@ -1000,12 +1067,14 @@ logs() ->
         {"EX008", 
             {debug, "Comparison between BlueList ~w and PinkList ~w"}},
         {"EX009",
-            {info, "Normal exit for partial (dynamic) exchange at"
-                        ++ " pending_state=~w for exchange_id=~s"
-                        ++ " tree_compare_deltas=~w after tree_compares=~w"
-                        ++ " keys_passed_for_compare=~w"}},
+            {info, "Normal exit for full exchange purpose=~w in_sync=~w"
+                        ++ " pending_state=~w for exchange id=~s"
+                        ++ " scope of mismatched_segments=~w"
+                        ++ " tree_compare_loops=~w "
+                        ++ " keys_passed_for_repair=~w"}},
         {"EX010", 
-            {warn, "Exchange not_supported for colour=~w in exchange id=~s"}}
+            {warn, "Exchange not_supported in exchange id=~s"
+                        ++ " for colour=~w purpose=~w"}}
         ].
 
 
@@ -1018,23 +1087,12 @@ logs() ->
 select_id_test() ->
     L0 = [1, 2, 3],
     ?assertMatch(L0, select_ids(L0, 3, root_confirm, "t0", undefined)),
-    L1 = [1, 2, 3, 5],
-    ?assertMatch(L0, select_ids(L1, 3, root_confirm, "t1", undefined)),
-    L2 = [1, 2, 3, 5, 6, 7, 8],
-    ?assertMatch([5, 6, 7, 8],
-                    select_ids(L2, 4, root_confirm, "t3", undefined)),
-    ?assertMatch(L0,
-                    select_ids(intersect_ids(L1, L2),
-                                3, root_confirm, "t4", undefined)),
-    L3 = [8, 7, 1, 3, 2, 5, 6],
-    ?assertMatch([5, 6, 7, 8],
-                    select_ids(L3, 4, root_confirm, "t6", undefined)),
-    ?assertMatch(L0,
-                    select_ids(intersect_ids(L1, L3),
-                                3, root_confirm, "t7", undefined)).
+    L1 = [3, 2, 1],
+    ?assertMatch(L0, select_ids(L1, 3, root_confirm, "t0", undefined)),
+    ?assertMatch(2, length(select_ids(L1, 2, root_confirm, "t0", undefined))).
 
 select_best_id_rand_test() ->
-    L2 = [1, 2, 3, 5, 6, 7, 8],
+    L2 = [1, 2, 3, 5, 16, 17, 18],
     F =
         fun(_N, {S1, S2, S3}) ->
             case {S1, S2, S3} of
@@ -1045,9 +1103,9 @@ select_best_id_rand_test() ->
                                     "r3", undefined) of
                         [1, 2, 3] ->
                             {true, S2, S3};
-                        [5, 6, 7] ->
+                        [2, 3, 5] ->
                             {S1, true, S3};
-                        [6, 7, 8] ->
+                        [16, 17, 18] ->
                             {S1, S2, true}
                     end
             end
@@ -1143,7 +1201,8 @@ coverage_cheat_test() ->
     {next_state, prepare, _State2} =
         handle_info(null, prepare, #state{exchange_type = full}),
     {ok, prepare, _State3} =
-        code_change(null, prepare, #state{exchange_type = full}, null).
+        code_change(null, prepare, #state{exchange_type = full}, null),
+    [root_compare, branch_compare] = insync_responses().
 
 
 -endif.
