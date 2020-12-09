@@ -556,9 +556,21 @@ handle_call({rebuild_trees, IndexNs, PreflistFun, OnlyIfBroken},
                     % Setup a fold over the store
                     {FoldFun, InitAcc} =
                         foldobjects_buildtrees(IndexNs, LogLevels),
+                    CheckPresence = (StateName == native) and not OnlyIfBroken,
+                    % If performing a scheduled rebuild on a native store
+                    % then the fold needs to check for the presence of the key
+                    % in the journal, not just the ledger.  Special range value
+                    % is used to trigger CheckPresence 
+                    Range =
+                        case CheckPresence of
+                            true ->
+                                all_check;
+                            false ->
+                                all
+                        end,
                     {async, Folder} = 
                         aae_keystore:store_fold(KeyStore, 
-                                                all, all,
+                                                Range, all,
                                                 all, false,
                                                 FoldFun, InitAcc, 
                                                 [{preflist, PreflistFun}, 
@@ -760,6 +772,16 @@ handle_call({fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PreflFun},
         fun({KeyClockList, _SubTree}) ->
             length(KeyClockList)
         end,
+    
+    Range =
+        case State#state.parallel_keystore of
+            false ->
+                % If we discover a broken journal file via a rebuild, don't
+                % want to falsely repair it through the fetch_clocks process.
+                all_check;
+            _ ->
+                all
+        end,
 
     ok = maybe_flush_puts(State#state.key_store, 
                             State#state.objectspecs_queue,
@@ -767,7 +789,7 @@ handle_call({fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PreflFun},
                             true),
     {async, Folder} = 
         aae_keystore:store_fold(State#state.key_store, 
-                                all,
+                                Range,
                                 {segments, SegmentIDs, ?TREE_SIZE},
                                 all, false, 
                                 FoldObjFun, 
@@ -1743,5 +1765,4 @@ wrap_splitfun_test() ->
     ?assertMatch(undefined, element(4, SplitObj)). 
 
 -endif.
-
 

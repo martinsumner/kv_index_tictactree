@@ -45,7 +45,8 @@
                 dirty_segments = [] :: list(),
                 active_fold :: string()|undefined,
                 change_queue = [] :: list(),
-                log_levels :: aae_util:log_levels()|undefined}).
+                log_levels :: aae_util:log_levels()|undefined,
+                safe_save = false :: boolean()}).
 
 -type partition_id() :: integer()|{integer(), integer()}.
 
@@ -105,7 +106,7 @@ cache_root(Pid) ->
 
 -spec cache_leaves(pid(), list(integer())) -> list().
 %% @doc
-%% Fetch the root of the cache tree to compare
+%% Fetch the leaves for a given list of branch IDs.
 cache_leaves(Pid, BranchIDs) -> 
     gen_server:call(Pid, {fetch_leaves, BranchIDs}, infinity).
 
@@ -148,7 +149,7 @@ cache_startload(Pid) ->
 -spec cache_completeload(pid(), leveled_tictac:tictactree()) -> ok.
 %% @doc
 %% Take a tree which has been produced from a fold of the KeyStore, and make 
-%% this thenew tree
+%% this the new tree
 cache_completeload(Pid, LoadedTree) ->
     gen_server:cast(Pid, {complete_load, LoadedTree}).
 
@@ -186,7 +187,8 @@ init([Opts]) ->
                 is_restored = IsRestored,
                 root_path = RootPath0,
                 partition_id = PartitionID,
-                log_levels = LogLevels}}.
+                log_levels = LogLevels,
+                safe_save = IsRestored or IgnoreDisk}}.
     
 
 handle_call(is_restored, _From, State) ->
@@ -196,10 +198,15 @@ handle_call(fetch_root, _From, State) ->
 handle_call({fetch_leaves, BranchIDs}, _From, State) ->
     {reply, leveled_tictac:fetch_leaves(State#state.tree, BranchIDs), State};
 handle_call(close, _From, State) ->
-    save_to_disk(State#state.root_path, 
-                    State#state.save_sqn, 
-                    State#state.tree,
-                    State#state.log_levels),
+    case State#state.safe_save of
+        true ->
+            save_to_disk(State#state.root_path, 
+                            State#state.save_sqn, 
+                            State#state.tree,
+                            State#state.log_levels);
+        false ->
+            ok
+    end,
     {stop, normal, ok, State}.
 
 handle_cast({alter, Key, CurrentHash, OldHash}, State) ->
@@ -243,7 +250,11 @@ handle_cast({complete_load, Tree}, State=#state{loading=Loading})
                     [length(State#state.change_queue)],
                     logs(),
                     State#state.log_levels),
-    {noreply, State#state{loading = false, change_queue = [], tree = Tree0}};
+    {noreply,
+        State#state{loading = false,
+                    change_queue = [],
+                    tree = Tree0,
+                    safe_save = true}};
 handle_cast({mark_dirtysegments, SegmentList, FoldGUID}, State) ->
     case State#state.loading of 
         true ->
@@ -482,6 +493,59 @@ clear_old_cache_test() ->
     ok = cache_close(Cpid),
     {ok, FN2s} = file:list_dir(RP0),
     ?assertMatch(1, length(FN2s)),
+    aae_util:clean_subdir(RootPath).
+
+dirty_saveopen_test() ->
+    RootPath = "test/dirtycache0/",
+    aae_util:clean_subdir(RootPath),
+    RP0 = filename:join(RootPath, integer_to_list(1)) ++ "/",
+    {ok, Cpid0} = cache_new(RootPath, 1, undefined),
+    Hash0 = erlang:phash2({<<"K1">>, <<"C1">>}),
+    cache_alter(Cpid0, <<"K1">>, Hash0, 0),
+    ok = cache_close(Cpid0),
+    ?assertMatch(true, filelib:is_file(form_cache_filename(RP0, 1))),
+    {true, Cpid1} = cache_open(RootPath, 1, undefined),
+    Hash1 = erlang:phash2({<<"K1">>, <<"C2">>}),
+    cache_alter(Cpid1, <<"K1">>, Hash1, Hash0),
+    ok = cache_close(Cpid1),
+    ?assertMatch(true, filelib:is_file(form_cache_filename(RP0, 2))),
+    aae_util:clean_subdir(RootPath),
+    {false, Cpid2} = cache_open(RootPath, 1, undefined),
+    Hash2 = erlang:phash2({<<"K1">>, <<"C3">>}),
+    cache_alter(Cpid2, <<"K1">>, Hash2, Hash1),
+    ok = cache_close(Cpid2),
+    ?assertMatch(false, filelib:is_file(form_cache_filename(RP0, 1))),
+    ?assertMatch(false, filelib:is_file(form_cache_filename(RP0, 2))),
+    ?assertMatch(false, filelib:is_file(form_cache_filename(RP0, 3))),
+    {false, Cpid3} = cache_open(RootPath, 1, undefined),
+    Hash3 = erlang:phash2({<<"K1">>, <<"C4">>}),
+    cache_alter(Cpid3, <<"K1">>, Hash3, Hash2),
+    ok = cache_close(Cpid3),
+    ?assertMatch(false, filelib:is_file(form_cache_filename(RP0, 1))),
+    ?assertMatch(false, filelib:is_file(form_cache_filename(RP0, 2))),
+    ?assertMatch(false, filelib:is_file(form_cache_filename(RP0, 3))),
+    ?assertMatch(false, filelib:is_file(form_cache_filename(RP0, 4))),
+    {false, Cpid4} = cache_open(RootPath, 1, undefined),
+    cache_startload(Cpid4),
+    cache_alter(Cpid4, <<"K1">>, Hash3, 0),
+    T0 = leveled_tictac:new_tree(raw, ?TREE_SIZE),
+    cache_completeload(Cpid4, T0),
+    ok = cache_close(Cpid4),
+    ?assertMatch(true, filelib:is_file(form_cache_filename(RP0, 1))),
+    {true, Cpid5} = cache_open(RootPath, 1, undefined),
+    R0 = cache_root(Cpid5),
+    [BranchID] =
+        leveled_tictac:find_dirtysegments(R0, leveled_tictac:fetch_root(T0)),
+    [{BranchID, Branch5}] = cache_leaves(Cpid5, [BranchID]),
+    [{BranchID, Branch0}] = leveled_tictac:fetch_leaves(T0, [BranchID]),
+    [SegmentID] =
+        leveled_tictac:find_dirtysegments(Branch0, Branch5),
+    Pos = SegmentID * 4,
+    <<_Pre:Pos/binary, HashToCheck:32/integer, _Post/binary>> = Branch5,
+    {_SegmentHash, AltHash} = leveled_tictac:keyto_doublesegment32(<<"K1">>),
+    ?assertMatch(Hash3, HashToCheck bxor AltHash),
+    ok = cache_close(Cpid5),
+    ?assertMatch(true, filelib:is_file(form_cache_filename(RP0, 2))),
     aae_util:clean_subdir(RootPath).
 
 

@@ -118,7 +118,8 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
                                 {filter, Bucket3, all, 
                                     small, all, all, prehash},
                                 [{transition_pause_ms, 100},
-                                    {log_levels, [warn, error, critical]}]),
+                                    {log_levels, [warn, error, critical]},
+                                    {purpose, test}]),
     io:format("Exchange id for tree compare ~s~n", [TC_GUID0]),
     {ExchangeStateTC0, 0} = testutil:start_receiver(),
     true = ExchangeStateTC0 == tree_compare,
@@ -363,6 +364,85 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     io:format("Exchange id ~s~n", [GUID3a]),
     {ExchangeState3a, 2} = testutil:start_receiver(),
     true = ExchangeState3a == clock_compare,
+
+    % Exchange with a one hour modified range - should see same differences
+    io:format("Repeat exchange with 1 hour modified range~n"),
+    MRH = convert_ts(os:timestamp()),
+    {ok, _P3mr1, GUID3mr1} = 
+        aae_exchange:start(full,
+                                [{exchange_vnodesendfun(VNNa), IndexNs}],
+                                [{exchange_vnodesendfun(VNPa), IndexNs}],
+                                NullRepairFun,
+                                ReturnFun,
+                                {filter, all, all, large, all,
+                                    {MRH - (60 * 60), MRH},
+                                    pre_hash},
+                                []),
+    io:format("Exchange id ~s~n", [GUID3mr1]),
+    {ExchangeState3mr1, 2} = testutil:start_receiver(),
+    true = ExchangeState3mr1 == clock_compare,
+
+    % Exchnage with an older modified range - see clock_compare but no
+    % differences
+    io:format("Repeat exchange, but with change outside of modified range~n"),
+    {ok, _P3mr2, GUID3mr2} = 
+        aae_exchange:start(full,
+                                [{exchange_vnodesendfun(VNNa), IndexNs}],
+                                [{exchange_vnodesendfun(VNPa), IndexNs}],
+                                NullRepairFun,
+                                ReturnFun,
+                                {filter, all, all, large, all,
+                                    {MRH - (2 * 60 * 60), MRH - (60 * 60)},
+                                    pre_hash},
+                                []),
+    io:format("Exchange id ~s~n", [GUID3mr2]),
+    {ExchangeState3mr2, 0} = testutil:start_receiver(),
+    true = ExchangeState3mr2 == clock_compare,
+
+    io:format("Repeat exchange with modified range and Bucket constraint~n"),
+    {ok, _P3bmr1, GUID3bmr1} = 
+        aae_exchange:start(full,
+                                [{exchange_vnodesendfun(VNNa), IndexNs}],
+                                [{exchange_vnodesendfun(VNPa), IndexNs}],
+                                NullRepairFun,
+                                ReturnFun,
+                                {filter, Bucket1, all, large, all,
+                                    {MRH - (60 * 60), MRH},
+                                    pre_hash},
+                                []),
+    io:format("Exchange id ~s~n", [GUID3bmr1]),
+    {ExchangeState3bmr1, 1} = testutil:start_receiver(),
+
+    true = ExchangeState3bmr1 == clock_compare,
+    io:format("Repeat exchange with modified range and Bucket constraint~n"),
+    {ok, _P3bmr2, GUID3bmr2} = 
+        aae_exchange:start(full,
+                                [{exchange_vnodesendfun(VNNa), IndexNs}],
+                                [{exchange_vnodesendfun(VNPa), IndexNs}],
+                                NullRepairFun,
+                                ReturnFun,
+                                {filter, Bucket2, all, large, all,
+                                    {MRH - (60 * 60), MRH},
+                                    pre_hash},
+                                []),
+    io:format("Exchange id ~s~n", [GUID3bmr2]),
+    {ExchangeState3bmr2, 1} = testutil:start_receiver(),
+    true = ExchangeState3bmr2 == clock_compare,
+
+    io:format("Repeat exchange with modified range and unmodified Bucket~n"),
+    {ok, _P3bmr3, GUID3bmr3} = 
+        aae_exchange:start(full,
+                                [{exchange_vnodesendfun(VNNa), IndexNs}],
+                                [{exchange_vnodesendfun(VNPa), IndexNs}],
+                                NullRepairFun,
+                                ReturnFun,
+                                {filter, Bucket, all, large, all,
+                                    {MRH - (60 * 60), MRH},
+                                    pre_hash},
+                                []),
+    io:format("Exchange id ~s~n", [GUID3bmr3]),
+    {ExchangeState3bmr3, 0} = testutil:start_receiver(),
+    true = ExchangeState3bmr3 == clock_compare,
 
     io:format("Prompts for a rebuild of both stores~n"),
     % The rebuild is a rebuild of both
@@ -681,7 +761,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
         % updating the other vnode
     
     % check between TS3 and TS4 - should only see 'b' changes
-    TS3_4_Range = {date, convert_ts(MDR_TS3), convert_ts(MDR_TS4)},
+    TS3_4_Range = {convert_ts(MDR_TS3), convert_ts(MDR_TS4)},
     CheckFiltersMRb = 
         {filter, Bucket3, all, small, all, TS3_4_Range, prehash},
         % verify no hangover going into the key range test
@@ -692,7 +772,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     
     % check between TS1 and TS2 - should only see 'a' changes, but
     % not 'b' chnages as they have a higher last modified date
-    TS1_2_Range = {date, convert_ts(MDR_TS1), convert_ts(MDR_TS2)},
+    TS1_2_Range = {convert_ts(MDR_TS1), convert_ts(MDR_TS2)},
     CheckFiltersMRa = 
         {filter, Bucket3, all, small, all, TS1_2_Range, prehash},
         % verify no hangover going into the key range test

@@ -69,10 +69,10 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
     % {2, 1} <-> {3, 1} & {3, 2}
     %
     % Think of these preflists in terms of needless partitions for test 
-    % purposes.  Alhtough this is a comparison between 2 'nodes', it is 
+    % purposes.  Although this is a comparison between 2 'nodes', it is 
     % more like a comparison between 2 clusters where n=1, there is 1 
     % vnode, but data is still partitioned into either 2 or 3 partitions.
-    % Don't rtry and make sense of this in term of a ring - the 
+    % Don't try and make sense of this in term of a ring - the 
     % mock_vnode_coverage_fold tests have a more Riak ring-like setup.
 
     RootPath = testutil:reset_filestructure(),
