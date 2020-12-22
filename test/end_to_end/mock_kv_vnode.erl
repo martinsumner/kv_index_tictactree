@@ -603,7 +603,11 @@ rebuild_worker(ReturnFun) ->
 fold_worker() ->
     receive
         {fold, FoldFun, ReturnFun} ->
-            ReturnFun(FoldFun())
+            SW0 = os:timestamp(),
+            R = FoldFun(),
+            io:format("FoldFun took ~w ms~n",
+                [timer:now_diff(os:timestamp(), SW0) div 1000]),
+            ReturnFun(R)
     end.
 
 

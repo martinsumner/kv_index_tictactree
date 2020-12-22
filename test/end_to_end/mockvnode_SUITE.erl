@@ -32,7 +32,6 @@ loadexchangeandrebuild_stbucketko(_Config) ->
     mock_vnode_loadexchangeandrebuild_tester(false, parallel_ko).
 
 loadexchangeandrebuild_stbucketso(_Config) ->
-    mock_vnode_loadexchangeandrebuild_tester(false, parallel_so),
     mock_vnode_loadexchangeandrebuild_tester(false, parallel_so).
 
 loadexchangeandrebuild_tuplebucketko(_Config) ->
@@ -40,7 +39,6 @@ loadexchangeandrebuild_tuplebucketko(_Config) ->
     mock_vnode_loadexchangeandrebuild_tester(true, parallel_ko).
 
 loadexchangeandrebuild_tuplebucketso(_Config) ->
-    mock_vnode_loadexchangeandrebuild_tester(true, parallel_so),
     mock_vnode_loadexchangeandrebuild_tester(true, parallel_so).
 
 mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
@@ -49,7 +47,16 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     %
     % The purpose if to perform exchanges to first highlight no differences, 
     % and then once a difference is created, discover any difference 
-    _TestStartPoint = os:timestamp(),
+    TestStartPoint = os:timestamp(),
+    LogProgress =
+        fun(Point) ->
+            io:format("Test reached point ~s in ~w s~n",
+                        [Point,
+                            timer:now_diff(os:timestamp(), TestStartPoint)
+                                div 1000])
+        end,
+
+    LogProgress("T0"),
     InitialKeyCount = 80000,
     RootPath = testutil:reset_filestructure(),
     MockPathN = filename:join(RootPath, "mock_native/"),
@@ -183,6 +190,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
             end
         end,
     
+    LogProgress("T1"),
     io:format("Load objects into both stores~n"),
     PutFun1 = PutFun(VNN, VNP),
     PutFun2 = PutFun(VNP, VNN),
@@ -312,6 +320,8 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     {ExchangeState2, 1} = testutil:start_receiver(),
     true = ExchangeState2 == clock_compare,
 
+    LogProgress("T2"),
+
     io:format("Make change to one vnode only (the native one)~n"),
     Idx2 = erlang:phash2(RogueObj2#r_object.key) rem length(IndexNs),
     mock_kv_vnode:put(VNN, RogueObj2, lists:nth(Idx2 + 1, IndexNs), []),
@@ -364,6 +374,8 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     io:format("Exchange id ~s~n", [GUID3a]),
     {ExchangeState3a, 2} = testutil:start_receiver(),
     true = ExchangeState3a == clock_compare,
+
+    LogProgress("T3"),
 
     % Exchange with a one hour modified range - should see same differences
     io:format("Repeat exchange with 1 hour modified range~n"),
@@ -444,6 +456,8 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     {ExchangeState3bmr3, 0} = testutil:start_receiver(),
     true = ExchangeState3bmr3 == clock_compare,
 
+    LogProgress("T4"),
+
     io:format("Prompts for a rebuild of both stores~n"),
     % The rebuild is a rebuild of both
     % the store and the tree in the case of the parallel vnode, and just the
@@ -523,6 +537,8 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     {ExchangeState3d, 2} = testutil:start_receiver(),
     true = ExchangeState3d == clock_compare,
 
+    LogProgress("T5"),
+
     io:format("Delete some keys - and see the size of the delta increase~n"),
     ok = lists:foreach(DeleteFun([VNPa]), DeleteList2),
     {ok, _P4a, GUID4a} = 
@@ -548,7 +564,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     CheckBucketList = [Bucket1, Bucket2],
     CheckBucketFun = 
         fun(CheckBucket, Acc) ->
-            CBFilters = {filter, CheckBucket, all, small, all, all, prehash},
+            CBFilters = {filter, CheckBucket, all, large, all, all, prehash},
             {ok, _TCCB_P, TCCB_GUID} = 
                 aae_exchange:start(partial,
                                     [{exchange_vnodesendfun(VNNa), IndexNs}],
@@ -566,6 +582,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
         end,
     true = 2 == lists:foldl(CheckBucketFun, 0, CheckBucketList),
 
+    LogProgress("T5.1"),
 
     io:format("Tree compare section - with large deltas~n"),
     % Next section is going to test tree_compare with large deltas, and
@@ -574,7 +591,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     % be too large - so there will be a down selection in select_ids
     %
     % A delta between buckets is created both ways, with bucket3 out of
-    % sync one way, and bucket 4 out of sync th eother way
+    % sync one way, and bucket 4 out of sync the other way
 
     true = InitialKeyCount > 2000,
     RplObjListTC = testutil:gen_riakobjects(2000, [], TupleBuckets),
@@ -595,6 +612,8 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     lists:foreach(SingleSidedPutFun(VNNa), RplObjListTC3),
     lists:foreach(SingleSidedPutFun(VNPa), RplObjListTC4),
 
+    LogProgress("T5.2"),
+
     NoRepairCheckB3 = CheckBucketFun(Bucket3, 0),
     NoRepairCheckB4 = CheckBucketFun(Bucket4, 0),
     true = length(RplObjListTC3) > NoRepairCheckB3,
@@ -603,6 +622,8 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
         % be passed to fetch clocks
     true = 0 < NoRepairCheckB3,
     true = 0 < NoRepairCheckB4,
+
+    LogProgress("T5.3"),
        
     RepairListMapFun = fun(RObj) -> {RObj#r_object.key, RObj} end,
     RepairListTC3 = lists:map(RepairListMapFun, RplObjListTC3),
@@ -634,9 +655,11 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     RepairFunTC3 = GenuineRepairFun(VNNa, VNPa, RepairListTC3),
     RepairFunTC4 = GenuineRepairFun(VNPa, VNNa, RepairListTC4),
 
+    LogProgress("T5.4"),
+
     RepairBucketFun = 
         fun(CheckBucket, TargettedRepairFun, KR, MR, Hash) ->
-            CBFilters = {filter, CheckBucket, KR, small, all, MR, Hash},
+            CBFilters = {filter, CheckBucket, KR, large, all, MR, Hash},
             {ok, _TCCB_P, TCCB_GUID} = 
                 aae_exchange:start(partial,
                                     [{exchange_vnodesendfun(VNNa), IndexNs}],
@@ -663,6 +686,8 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
                 [TotalRepairs3, length(RepairListTC3)]),
     true = length(RepairListTC3) == TotalRepairs3,
 
+    LogProgress("T5.5"),
+
     FoldRepair4Fun = 
         fun(_I, Acc) ->
             case RepairBucketFun(Bucket4, RepairFunTC4,
@@ -678,6 +703,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
                 [TotalRepairs4, length(RepairListTC4)]),
     true = length(RepairListTC4) == TotalRepairs4,
 
+    LogProgress("T6"),
     io:format("Check with a key range~n"),
     % Testing with a modified range requires more
     % effort as the objects don't have a last modified date
@@ -713,7 +739,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
                 [binary_to_list(SK), binary_to_list(EK)]),
 
     CheckFiltersKR = 
-        {filter, Bucket3, {SK, EK}, small, all, all, prehash},
+        {filter, Bucket3, {SK, EK}, medium, all, all, prehash},
     true = {clock_compare, 50} == LimiterCheckBucketFun(CheckFiltersKR),
 
     RepairFunKR3 = GenuineRepairFun(VNNa, VNPa, RepairListKR3),
@@ -738,7 +764,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     io:format("Total repairs after key range test ~w~n", [AllRepairsKR3]),
     true = length(RplObjListKR3) - 50 == AllRepairsKR3,
 
-
+    LogProgress("T7"),
     io:format("Tests with a modified range~n"),
     % Some tests with a modified range.  Split a bunch of changes into two
     % lots.  Apply those two lots in two distinct time ranges.  Find the 
@@ -763,7 +789,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     % check between TS3 and TS4 - should only see 'b' changes
     TS3_4_Range = {convert_ts(MDR_TS3), convert_ts(MDR_TS4)},
     CheckFiltersMRb = 
-        {filter, Bucket3, all, small, all, TS3_4_Range, prehash},
+        {filter, Bucket3, all, large, all, TS3_4_Range, prehash},
         % verify no hangover going into the key range test
     TS3_4_Result = LimiterCheckBucketFun(CheckFiltersMRb),
     io:format("Exchange in second modified range resulted in ~w~n",
@@ -774,7 +800,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     % not 'b' chnages as they have a higher last modified date
     TS1_2_Range = {convert_ts(MDR_TS1), convert_ts(MDR_TS2)},
     CheckFiltersMRa = 
-        {filter, Bucket3, all, small, all, TS1_2_Range, prehash},
+        {filter, Bucket3, all, large, all, TS1_2_Range, prehash},
         % verify no hangover going into the key range test
     TS1_2_Result = LimiterCheckBucketFun(CheckFiltersMRa),
     io:format("Exchange in first modified range resulted in ~w~n",
@@ -820,6 +846,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
                 [TotalRepairsMR3]),
     true = length(RplObjListMRa3) == TotalRepairsMR3,
 
+    LogProgress("T8"),
     % Shutdown and clear down files
     ok = mock_kv_vnode:close(VNNa),
     ok = mock_kv_vnode:close(VNPa),

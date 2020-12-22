@@ -95,8 +95,7 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
--define(LEVELED_BACKEND_OPTS, [{max_pencillercachesize, 32000},
-                                    {cache_size, 4000},
+-define(LEVELED_BACKEND_OPTS, [{cache_size, 2000},
                                     {sync_strategy, none},
                                     {max_journalsize, 100000000},
                                     {compression_method, native},
@@ -215,19 +214,23 @@
 %% Start a store to be run in parallel mode
 store_parallelstart(Path, leveled_so, LogLevels) ->
     MinLevel = aae_util:min_loglevel(LogLevels),
+    AddOpts = [{max_pencillercachesize, 8000}, {log_level, MinLevel}],
     Opts = 
         [{root_path, Path}, 
             {native, {false, leveled_so}}, 
-            {backend_opts, [{log_level, MinLevel}|?LEVELED_BACKEND_OPTS]},
+            {backend_opts,
+                lists:ukeysort(1, AddOpts ++ ?LEVELED_BACKEND_OPTS)},
             {log_levels, LogLevels}],
     {ok, Pid} = gen_fsm:start_link(?MODULE, [Opts], []),
     store_startupdata(Pid);
 store_parallelstart(Path, leveled_ko, LogLevels) ->
     MinLevel = aae_util:min_loglevel(LogLevels),
+    AddOpts = [{max_pencillercachesize, 32000}, {log_level, MinLevel}],
     Opts = 
         [{root_path, Path}, 
             {native, {false, leveled_ko}}, 
-            {backend_opts, [{log_level, MinLevel}|?LEVELED_BACKEND_OPTS]},
+            {backend_opts, 
+                lists:ukeysort(1, AddOpts ++ ?LEVELED_BACKEND_OPTS)},
             {log_levels, LogLevels}],
     {ok, Pid} = gen_fsm:start_link(?MODULE, [Opts], []),
     store_startupdata(Pid).
