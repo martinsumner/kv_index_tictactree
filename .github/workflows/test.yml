@@ -1,0 +1,17 @@
+name: Erlang CI
+
+on:
+  push:
+    branches: [ develop-3.0 ]
+  pull_request:
+    branches: [ develop-3.0 ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2.0.0
+    - uses: gleam-lang/setup-erlang@v1.1.2
+      with:
+        otp-version: 22.3
+    - run: rebar3 do compile, upgrade, xref, dialyzer, eunit, ct
