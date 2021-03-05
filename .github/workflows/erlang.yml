@@ -7,12 +7,17 @@ on:
     branches: [ develop-3.0 ]
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v2.0.0
-    - uses: gleam-lang/setup-erlang@v1.1.2
-      with:
-        otp-version: 22.3.3
-    - run: rebar3 do compile, upgrade, xref, dialyzer, eunit, ct
 
+  build:
+
+    runs-on: ubuntu-latest
+
+    container:
+      image: erlang:22.3.3
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Compile
+      run: rebar3 compile
+    - name: Run tests
+      run: rebar3 do xref, dialyzer, eunit, ct
