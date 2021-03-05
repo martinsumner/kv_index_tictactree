@@ -1519,10 +1519,10 @@ fetch_clock_test() ->
 
 
 so_big_load_test_() ->
-    {timeout, 60, fun so_big_load_tester/0}.
+    {timeout, 180, fun so_big_load_tester/0}.
 
 ko_big_load_test_() ->
-    {timeout, 60, fun ko_big_load_tester/0}.
+    {timeout, 180, fun ko_big_load_tester/0}.
 
 so_big_load_tester() ->
     big_load_tester(leveled_so).
