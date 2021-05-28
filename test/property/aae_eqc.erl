@@ -10,13 +10,34 @@
 -ifdef(EQC).
 -include_lib("eqc/include/eqc.hrl").
 -include_lib("eqc/include/eqc_statem.hrl").
-
+-include_lib("eunit/include/eunit.hrl").
 
 -compile([export_all, nowarn_export_all]).
 -compile({nowarn_deprecated_function, [{erlang, now, 0}]}).
 
 -define(LOG_LEVELS, [error, critical]).
 -define(EXCHANGE_PAUSE_MS, 10).
+
+-define(NUMTESTS, 1000).
+-define(QC_OUT(P),
+        eqc:on_output(fun(Str, Args) ->
+                              io:format(user, Str, Args) end, P)).
+
+
+eqc_test_() ->
+    {timeout, 120,
+        ?_assertEqual(true,
+            eqc:quickcheck(eqc:testing_time(60, ?QC_OUT(prop_aae()))))}.
+
+run() ->
+    run(?NUMTESTS).
+
+run(Count) ->
+    eqc:quickcheck(eqc:numtests(Count, prop_aae())).
+
+check() ->
+    eqc:check(prop_aae()).
+
 
 %% -- State and state functions ----------------------------------------------
 initial_state() ->

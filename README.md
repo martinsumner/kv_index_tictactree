@@ -47,9 +47,26 @@ The AAE exchange should work the same way if two partitions are bing compared, o
 
 ## Using the Library
 
-The library is currently tested for use as a proof of concept, running OTP versions 16 to 19.  If further testing is successful it may go on to be maintained as part of the Riak KV store (targeting release 3.0).
-
 Following the [current tests](https://github.com/martinsumner/kv_index_tictactree/blob/master/test/end_to_end/basic_SUITE.erl) presently provides the simplest guide to using the library.  There is also a [`mock_kv_vnode`](https://github.com/martinsumner/kv_index_tictactree/blob/master/test/end_to_end/mock_kv_vnode.erl) process used in these tests, and provides a sample view of how an `aae_controller` could be integrated.
+
+There are three main branches:
+
+[`develop-3.0`](https://github.com/martinsumner/kv_index_tictactree/tree/develop-3.0): Used in the Riak 3.0 release with support for OTP 20 and OTP 22;
+
+[`develop-2.9`](https://github.com/martinsumner/kv_index_tictactree/tree/develop-2.9): Used in the Riak 2.9 release with support for OTP R16 through to OTP 20.
+
+### Contributing and Testing
+
+The acceptance criteria for updating kv_index_tictactree is that it passes rebar3 dialyzer, xref, eunit, and ct with 100% coverage.
+
+To have rebar3 execute the full set of tests, run:
+
+`rebar3 as test do xref, dialyzer, cover --reset, eunit --cover, ct --cover, cover --verbose`
+
+For those with a Quickcheck license, property-based tests can also be run using:
+
+`rebar3 as eqc do eunit --module=ae_eqc`
+
 
 ### Riak KV
 
