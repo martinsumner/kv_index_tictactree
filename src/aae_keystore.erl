@@ -1635,8 +1635,8 @@ timed_bulk_put(Store, ObjectSpecs, StoreType) ->
 coverage_cheat_test() ->
     ok = load_pause(pause),
     State = #state{store_type = leveled_so},
-    {next_state, native, _State} = handle_info(null, native, State),
-    {ok, native, _State} = code_change(null, native, State, null).
+    {next_state, native, State} = handle_info(null, native, State),
+    {ok, native, State} = code_change(null, native, State, null).
 
 dumb_value_test() ->
     V = generate_value({0, 3}, 0, [{a, 1}], erlang:phash2(<<>>), 
