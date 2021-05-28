@@ -51,7 +51,7 @@ Following the [current tests](https://github.com/martinsumner/kv_index_tictactre
 
 There are two main branches:
 
-[`develop-3.1 - default](https://github.com/martinsumner/kv_index_tictactree/tree/develop-3.1): Target for the Riak 3.1 release with support for OTP 22 and OTP 24;
+[`develop-3.1 - default`](https://github.com/martinsumner/kv_index_tictactree/tree/develop-3.1): Target for the Riak 3.1 release with support for OTP 22 and OTP 24;
 
 [`develop-3.0`](https://github.com/martinsumner/kv_index_tictactree/tree/develop-3.0): Used in the Riak 3.0 release with support for OTP 20 and OTP 22;
 
