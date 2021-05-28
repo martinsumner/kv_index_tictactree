@@ -1,6 +1,6 @@
 # KV Tictac Tree
 
-[![Build Status](https://travis-ci.com/martinsumner/kv_index_tictactree.svg?branch=master)](https://travis-ci.com/martinsumner/kv_index_tictactree)
+[![Build Status](https://github.com/martinsumner/kv_index_tictactree/actions/workflows/erlang.yml/badge.svg?branch=develop-3.0)](https://github.com/martinsumner/kv_index_tictactree/actions)
 
 An Active Anti-Entropy library for Key-Value stores in Erlang.
 
