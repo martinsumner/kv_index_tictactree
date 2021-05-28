@@ -49,7 +49,7 @@ The AAE exchange should work the same way if two partitions are bing compared, o
 
 Following the [current tests](https://github.com/martinsumner/kv_index_tictactree/blob/master/test/end_to_end/basic_SUITE.erl) presently provides the simplest guide to using the library.  There is also a [`mock_kv_vnode`](https://github.com/martinsumner/kv_index_tictactree/blob/master/test/end_to_end/mock_kv_vnode.erl) process used in these tests, and provides a sample view of how an `aae_controller` could be integrated.
 
-There are three main branches:
+There are two main branches:
 
 [`develop-3.0`](https://github.com/martinsumner/kv_index_tictactree/tree/develop-3.0): Used in the Riak 3.0 release with support for OTP 20 and OTP 22;
 
