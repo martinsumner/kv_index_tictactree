@@ -61,11 +61,11 @@ The acceptance criteria for updating kv_index_tictactree is that it passes rebar
 
 To have rebar3 execute the full set of tests, run:
 
-`rebar3 as test do xref, dialyzer, cover --reset, eunit --cover, ct --cover, cover --verbose`
+`./rebar3 as test do xref, dialyzer, cover --reset, eunit --cover, ct --cover, cover --verbose`
 
 For those with a Quickcheck license, property-based tests can also be run using:
 
-`rebar3 as eqc do eunit --module=ae_eqc`
+`./rebar3 as eqc do eunit --module=aae_eqc`
 
 
 ### Riak KV
