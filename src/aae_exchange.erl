@@ -248,7 +248,7 @@
 -define(FILTERIDX_SEG, 5).
 -define(FILTERIDX_TRS, 4).
 
--export_type([send_fun/0, repair_fun/0, reply_fun/0]).
+-export_type([send_fun/0, repair_fun/0, reply_fun/0, filters/0]).
 
 %%%============================================================================
 %%% API
