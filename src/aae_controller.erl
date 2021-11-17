@@ -748,7 +748,7 @@ handle_call({fetch_clocks,
     {reply, ok, State#state{runner_queue = Queue}};
 handle_call({fetch_clocks,
                 IndexNs, 
-                RLimiter, SegmentIDs, LMDLimiter, 
+                all, SegmentIDs, all, 
                 ReturnFun, PreflFun},
                     From, State) ->
     ImmediateReply = State#state.parallel_keystore,
@@ -781,27 +781,21 @@ handle_call({fetch_clocks,
     
     FoldObjFun = 
         fun(B, K, V, {Acc, SubTreeAcc}) ->
+            {clock, VC} = lists:keyfind(clock, 1, V),
+            {aae_segment, SegID} = lists:keyfind(aae_segment, 1, V),
+            {hash, H} = lists:keyfind(hash, 1, V),
             {preflist, PL} = lists:keyfind(preflist, 1, V),
-            case lists:member(PL, IndexNs) of   
-                true ->
-                    {clock, VC} = lists:keyfind(clock, 1, V),
-                    {aae_segment, SegID} = lists:keyfind(aae_segment, 1, V),
-                    {hash, H} = lists:keyfind(hash, 1, V),
-                    {PL, T, SegMap} = lists:keyfind(PL, 1, SubTreeAcc),
-                    {SegID, HashAcc} = lists:keyfind(SegID, 1, SegMap),
-                    BinK = aae_util:make_binarykey(B, K),
-                    {_, HashToAdd} = 
-                        leveled_tictac:tictac_hash(BinK, {is_hash, H}),
-                    UpdHash = HashAcc bxor HashToAdd,
-                    SegMap0 = 
-                        lists:keyreplace(SegID, 1, SegMap, {SegID, UpdHash}),
-                    SubTreeAcc0 = lists:keyreplace(PL, 1, SubTreeAcc, 
-                                                    {PL, T, SegMap0}),
-                    {[{B, K, VC}|Acc], SubTreeAcc0};
-                false ->
-                    {Acc, SubTreeAcc} 
-            end 
+            {PL, T, SegMap} = lists:keyfind(PL, 1, SubTreeAcc),
+            {SegID, HashAcc} = lists:keyfind(SegID, 1, SegMap),
+            BinK = aae_util:make_binarykey(B, K),
+            {_, HashToAdd} =  leveled_tictac:tictac_hash(BinK, {is_hash, H}),
+            UpdHash = HashAcc bxor HashToAdd,
+            SegMap0 = lists:keyreplace(SegID, 1, SegMap, {SegID, UpdHash}),
+            SubTreeAcc0 =
+                lists:keyreplace(PL, 1, SubTreeAcc,  {PL, T, SegMap0}),
+            {[{B, K, VC}|Acc], SubTreeAcc0}
         end,
+    WrappedFoldObjFun = preflist_wrapper_fun(FoldObjFun, IndexNs),
     
     ReturnFun0 = generate_returnfun(GUID, ReturnFun),
     SizeFun =
@@ -810,13 +804,13 @@ handle_call({fetch_clocks,
         end,
     
     Range =
-        case (not State#state.parallel_keystore) andalso RLimiter == all of
+        case (not State#state.parallel_keystore) of
             true ->
                 % If we discover a broken journal file via a rebuild, don't
                 % want to falsely repair it through the fetch_clocks process.
                 all_check;
             _ ->
-                RLimiter
+                all
         end,
 
     ok = maybe_flush_puts(State#state.key_store, 
@@ -827,9 +821,9 @@ handle_call({fetch_clocks,
         aae_keystore:store_fold(State#state.key_store, 
                                 Range,
                                 {segments, SegmentIDs, ?TREE_SIZE},
-                                LMDLimiter,
+                                all,
                                 false, 
-                                FoldObjFun, 
+                                WrappedFoldObjFun, 
                                 {[], InitMap},
                                 [{preflist, PreflFun}, 
                                     {clock, null},
@@ -848,7 +842,64 @@ handle_call({fetch_clocks,
         _ ->
             {reply, ok, S0}
     end;
+handle_call({fetch_clocks,
+                IndexNs, 
+                RLimiter, SegmentIDs, LMDLimiter, 
+                ReturnFun, PreflFun},
+                    From, State) ->
+    ImmediateReply = State#state.parallel_keystore,
+    case ImmediateReply of
+        true ->
+            %% When this is a parallel store, there is no need benefit on
+            %% waiting before replying - as no race conditions will be
+            %% avoided.
+            gen_server:reply(From, ok);
+        _ ->
+            %% In native mode, don't want a new PUT to be received before the
+            %% snapshot has been taken, so block until the snapshot has been
+            %% taken
+            ok
+    end,
+    
+    FoldObjFun = 
+        fun(B, K, V, Acc) ->
+            {clock, VC} = lists:keyfind(clock, 1, V),
+            [{B, K, VC}|Acc]
+        end,
+    WrappedFoldObjFun = preflist_wrapper_fun(FoldObjFun, IndexNs),
+    SizeFun =
+        fun(KeyClockList) ->
+            length(KeyClockList)
+        end,
 
+    ok = maybe_flush_puts(State#state.key_store, 
+                            State#state.objectspecs_queue,
+                            State#state.parallel_keystore,
+                            true),
+    {async, Folder} = 
+        aae_keystore:store_fold(State#state.key_store, 
+                                RLimiter,
+                                {segments, SegmentIDs, ?TREE_SIZE},
+                                LMDLimiter,
+                                false, 
+                                WrappedFoldObjFun, 
+                                [],
+                                [{preflist, PreflFun}, 
+                                    {clock, null},
+                                    {aae_segment, null}]),
+    Queue = State#state.runner_queue ++ [{work, Folder, ReturnFun, SizeFun}],
+    Backlog = length(Queue) >= ?MAX_RUNNER_QUEUEDEPTH,
+    %% If there is a backlog, the queue will remain in backlog state until it
+    %% is empty.  Whilst in backlog state, query requests will result in dummy
+    %% work being added to the queue not real work (which may cause the queue
+    %% to continue to grow)
+    S0 = State#state{queue_backlog = Backlog, runner_queue = Queue},
+    case ImmediateReply of
+        true ->
+            {noreply, S0};
+        _ ->
+            {reply, ok, S0}
+    end;
 handle_call(bucket_list,  _From, State) ->
     ok = maybe_flush_puts(State#state.key_store, 
                             State#state.objectspecs_queue,
@@ -1222,6 +1273,22 @@ wait_on_sync(Mod, Fun, Pid, Call, Timeout) ->
     try Mod:Fun(Pid, Call, Timeout)
     catch exit:{timeout, _} -> timeout
     end.
+
+-spec preflist_wrapper_fun(
+        fun((term(), term(), term(), term()) -> term()),
+        list(responsible_preflist())) -> 
+        fun((term(), term(), term(), term()) -> term()).
+preflist_wrapper_fun(FoldObjectsFun, IndexNs) ->
+    fun(B, K, V, Acc) ->
+        {preflist, PL} = lists:keyfind(preflist, 1, V),
+        case lists:member(PL, IndexNs) of
+            true ->
+                FoldObjectsFun(B, K, V, Acc);
+            false ->
+                Acc
+        end
+    end.
+
 
 %%%============================================================================
 %%% log definitions

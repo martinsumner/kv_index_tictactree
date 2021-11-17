@@ -370,12 +370,13 @@ handle_call({aae, Msg, IndexNs, ReturnFun}, _From, State) ->
                                                 ReturnFun,
                                                 State#state.preflist_fun);
         {fetch_clocks, SegmentIDs, MR} ->
-            io:format("Switching to fetch_clock_range with MR ~p~n", [MR]),
-            handle_call({aae, 
-                            {fetch_clocks_range,
-                                all, all, {segments, SegmentIDs, large}, MR},
-                            IndexNs,
-                            ReturnFun}, _From, State);
+            aae_controller:aae_fetchclocks(State#state.aae_controller,
+                                                IndexNs,
+                                                all,
+                                                SegmentIDs,
+                                                MR,
+                                                ReturnFun,
+                                                State#state.preflist_fun);
         {merge_tree_range, B, KR, TS, SF, MR, HM} ->
             NullExtractFun = 
                 fun({B0, K0}, V0) -> 
