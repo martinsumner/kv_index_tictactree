@@ -852,7 +852,11 @@ handle_call({fetch_clocks,
         true ->
             %% When this is a parallel store, there is no need benefit on
             %% waiting before replying - as no race conditions will be
-            %% avoided.
+            %% avoided.  Also, there may be a build up of PUTs, and a risk of
+            %% timeout when waiting for maybe_flush_puts/4.  There are
+            %% better mechanisms available to slow the calling process in the
+            %% case of backlog, avoiding overload - see aae_ping/3.  So, reply
+            %% immediately if in parallel mode 
             gen_server:reply(From, ok);
         _ ->
             %% In native mode, don't want a new PUT to be received before the
@@ -896,6 +900,7 @@ handle_call({fetch_clocks,
     S0 = State#state{queue_backlog = Backlog, runner_queue = Queue},
     case ImmediateReply of
         true ->
+            %% In parallel mode a reply has already been sent
             {noreply, S0};
         _ ->
             {reply, ok, S0}
