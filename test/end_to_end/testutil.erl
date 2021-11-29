@@ -73,8 +73,9 @@ put_keys(Cntrl, Nval, [{Bucket, Key, VersionVector}|Tail], PrevVV) ->
                                 Key, 
                                 VersionVector, 
                                 PrevVV, 
-                                {[os:timestamp()],
-                                    term_to_binary([{clock, VersionVector}])}),
+                                term_to_binary(
+                                    {[os:timestamp()], 
+                                        term_to_binary([{clock, VersionVector}])})),
     put_keys(Cntrl, Nval, Tail, PrevVV).
 
 remove_keys(_Cntrl, _Nval, []) ->

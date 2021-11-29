@@ -123,7 +123,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
                                 LogNotRepairFun,
                                 ReturnFun,
                                 {filter, Bucket3, all, 
-                                    small, all, all, prehash},
+                                    small, all, all, pre_hash},
                                 [{transition_pause_ms, 100},
                                     {log_levels, [warn, error, critical]},
                                     {purpose, test}]),
@@ -137,7 +137,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
                                 LogNotRepairFun,
                                 ReturnFun,
                                 {filter, Bucket3, all, 
-                                    small, all, all, prehash},
+                                    small, all, all, pre_hash},
                                 [{transition_pause_ms, 100}]),
     io:format("Exchange id for tree compare ~s~n", [TC_GUID1]),
     {ExchangeStateTC1, 0} = testutil:start_receiver(),
@@ -564,7 +564,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     CheckBucketList = [Bucket1, Bucket2],
     CheckBucketFun = 
         fun(CheckBucket, Acc) ->
-            CBFilters = {filter, CheckBucket, all, large, all, all, prehash},
+            CBFilters = {filter, CheckBucket, all, large, all, all, pre_hash},
             {ok, _TCCB_P, TCCB_GUID} = 
                 aae_exchange:start(partial,
                                     [{exchange_vnodesendfun(VNNa), IndexNs}],
@@ -674,7 +674,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     
     FoldRepair3Fun = 
         fun(_I, Acc) ->
-            case RepairBucketFun(Bucket3, RepairFunTC3, all, all, prehash) of
+            case RepairBucketFun(Bucket3, RepairFunTC3, all, all, pre_hash) of
                 {clock_compare, Count3} ->
                     Acc + Count3;
                 {tree_compare, 0} ->
@@ -722,7 +722,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
             testutil:start_receiver()
         end,
     CheckFiltersB = 
-        {filter, Bucket3, all, small, all, all, prehash},
+        {filter, Bucket3, all, small, all, all, pre_hash},
         % verify no hangover going into the key range test
     true = {tree_compare, 0} == LimiterCheckBucketFun(CheckFiltersB),
 
@@ -739,7 +739,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
                 [binary_to_list(SK), binary_to_list(EK)]),
 
     CheckFiltersKR = 
-        {filter, Bucket3, {SK, EK}, medium, all, all, prehash},
+        {filter, Bucket3, {SK, EK}, medium, all, all, pre_hash},
     true = {clock_compare, 50} == LimiterCheckBucketFun(CheckFiltersKR),
 
     RepairFunKR3 = GenuineRepairFun(VNNa, VNPa, RepairListKR3),
@@ -748,7 +748,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
         fun(_I, Acc) ->
             case RepairBucketFun(Bucket3, RepairFunKR3,
                                     {SK, EK},
-                                    all, prehash) of
+                                    all, pre_hash) of
                 {clock_compare, Count3} ->
                     Acc + Count3;
                 {tree_compare, 0} ->
@@ -789,7 +789,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     % check between TS3 and TS4 - should only see 'b' changes
     TS3_4_Range = {convert_ts(MDR_TS3), convert_ts(MDR_TS4)},
     CheckFiltersMRb = 
-        {filter, Bucket3, all, large, all, TS3_4_Range, prehash},
+        {filter, Bucket3, all, large, all, TS3_4_Range, pre_hash},
         % verify no hangover going into the key range test
     TS3_4_Result = LimiterCheckBucketFun(CheckFiltersMRb),
     io:format("Exchange in second modified range resulted in ~w~n",
@@ -800,7 +800,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     % not 'b' chnages as they have a higher last modified date
     TS1_2_Range = {convert_ts(MDR_TS1), convert_ts(MDR_TS2)},
     CheckFiltersMRa = 
-        {filter, Bucket3, all, large, all, TS1_2_Range, prehash},
+        {filter, Bucket3, all, large, all, TS1_2_Range, pre_hash},
         % verify no hangover going into the key range test
     TS1_2_Result = LimiterCheckBucketFun(CheckFiltersMRa),
     io:format("Exchange in first modified range resulted in ~w~n",
@@ -832,7 +832,7 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
                                     all, 
                                     {convert_ts(MDR_TS1), 
                                         convert_ts(os:timestamp())},
-                                    prehash) of
+                                    pre_hash) of
                 {clock_compare, Count3} ->
                     Acc + Count3;
                 {tree_compare, 0} ->

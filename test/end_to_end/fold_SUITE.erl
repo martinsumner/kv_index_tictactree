@@ -23,7 +23,8 @@ aae_fold_tester(ParallelStoreType, KeyCount) ->
     FoldPath1 = filename:join(RootPath, "folder1/"),
     SplitF = 
         fun(X) -> 
-            {leveled_rand:uniform(1000), 1, 0, element(1, X), element(2, X)}
+            T = binary_to_term(X),
+            {leveled_rand:uniform(1000), 1, 0, element(1, T), element(2, T)}
         end,
     
     {ok, Cntrl1} = 
@@ -98,7 +99,7 @@ aae_fold_tester(ParallelStoreType, KeyCount) ->
                                 {buckets, BucketList},
                                 all,
                                 {SWHighMegaS * 1000000 + SWHighS, 
-                                    infinity},
+                                    SWHighMegaS * 1000000 + SWHighS + 60},
                                 false,
                                 FoldFun,
                                 InitAcc,

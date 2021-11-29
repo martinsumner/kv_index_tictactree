@@ -47,7 +47,7 @@
                     updatemetadata=dict:store(clean, true, dict:new()),
                     updatevalue :: term()}).
 
--record(options, {aae :: parallel|native,
+-record(options, {aae :: parallel_so|parallel_ko|native,
                     index_ns :: list(tuple()),
                     root_path :: list(),
                     preflist_fun = null :: preflist_fun()}).
@@ -58,7 +58,7 @@
                 aae_controller :: pid(),
                 vnode_store :: pid(),
                 vnode_id :: binary(),
-                aae_type :: parallel|native,
+                aae_type :: tuple(),
                 vnode_sqn = 1 :: integer(),
                 preflist_fun = null :: preflist_fun(),
                 aae_rebuild = false :: boolean()}).
@@ -151,14 +151,14 @@ fold_aae(Vnode, Range, Segments, FoldObjectsFun, InitAcc, Elements) ->
                         Range, Segments,
                         FoldObjectsFun, InitAcc, Elements}).
 
--spec exchange_message(pid(), tuple()|atom(), list(tuple()), atom()) -> ok.
+-spec exchange_message(pid(), tuple()|atom(), list(tuple()), fun((any()) -> ok)) -> ok.
 %% @doc
 %% Handle a message from an AAE exchange
 exchange_message(Vnode, Msg, IndexNs, ReturnFun) ->
     gen_server:call(Vnode, {aae, Msg, IndexNs, ReturnFun}).
 
 
--spec bucketlist_aae(pid()) -> fun(() -> list()).
+-spec bucketlist_aae(pid()) -> {async, fun(() -> list())}.
 %% @doc
 %% List buckets via AAE store
 bucketlist_aae(Vnode) ->
@@ -384,7 +384,7 @@ handle_call({aae, Msg, IndexNs, ReturnFun}, _From, State) ->
                 end,
             {FoldFun, Elements} = 
                 case HM of
-                    prehash ->
+                    pre_hash ->
                         {fun(BF, KF, EFs, TreeAcc) ->
                                 {hash, CH} = lists:keyfind(hash, 1, EFs),
                                 leveled_tictac:add_kv(TreeAcc, 
