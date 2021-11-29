@@ -34,6 +34,7 @@
             aae_fetchbranches/4,
             aae_mergebranches/4,
             aae_fetchclocks/5,
+            aae_fetchclocks/7,
             aae_rebuildtrees/5,
             aae_rebuildtrees/4,
             aae_rebuildstore/2,
@@ -128,8 +129,17 @@
         % be being replaced but the vnode does not know if it is being 
         % replaced.  In this case, it is the responsiblity of the controller 
         % to best determine what the previous version was.
+-type returner() :: fun((term()) -> ok).
 -type runner_work()
-        :: {work, fun(), fun(), fun()}.
+        :: {work,
+            fun(() -> term()),
+            returner(),
+            fun((term()) -> non_neg_integer())}.
+-type object_splitter()
+        :: fun((binary()) ->
+                {pos_integer(), pos_integer(), non_neg_integer(),
+                    list(erlang:timestamp()), binary()}).
+
 
 -export_type([responsible_preflist/0,
                 keystore_type/0,
@@ -148,7 +158,7 @@
                 rebuild_schedule(),
                 list(responsible_preflist()), 
                 list(),
-                fun()) -> {ok, pid()}.
+                object_splitter()) -> {ok, pid()}.
 %% @doc
 %% Start an AAE controller 
 %% The ObjectsplitFun must take a vnode object in a binary form and output 
@@ -163,7 +173,7 @@ aae_start(KeyStoreT, IsEmpty, RebuildSch, Preflists, RootPath, ObjSplitFun) ->
                 rebuild_schedule(),
                 list(responsible_preflist()), 
                 list(),
-                fun(),
+                object_splitter(),
                 aae_util:log_levels()|undefined) -> {ok, pid()}.
 
 aae_start(KeyStoreT, IsEmpty, RebuildSch,
@@ -198,7 +208,7 @@ aae_put(Pid, IndexN, Bucket, Key, CurrentVV, PrevVV, BinaryObj) ->
                     {put, IndexN, Bucket, Key, CurrentVV, PrevVV, BinaryObj}).
 
 
--spec aae_fetchroot(pid(), list(responsible_preflist()), fun()) -> ok.
+-spec aae_fetchroot(pid(), list(responsible_preflist()), returner()) -> ok.
 %% @doc
 %% Fetch the roots of AAE tree caches for a list of IndexNs returning an
 %% indexed list of results using ReturnFun - with a result of `false` in the 
@@ -210,7 +220,7 @@ aae_put(Pid, IndexN, Bucket, Key, CurrentVV, PrevVV, BinaryObj) ->
 aae_fetchroot(Pid, IndexNs, ReturnFun) ->
     gen_server:cast(Pid, {fetch_root, IndexNs, ReturnFun}).
 
--spec aae_mergeroot(pid(), list(responsible_preflist()), fun()) -> ok.
+-spec aae_mergeroot(pid(), list(responsible_preflist()), returner()) -> ok.
 %% @doc
 %% As with aae_fetch root, but now the reply will be just a single root rather
 %% than an indexed list.  The response will now always be a binary - an empty 
@@ -229,7 +239,7 @@ aae_mergeroot(Pid, IndexNs, ReturnFun) ->
 
 -spec aae_fetchbranches(pid(), 
                         list(responsible_preflist()), list(integer()), 
-                        fun()) -> ok.
+                        returner()) -> ok.
 %% @doc
 %% Fetch the branches of AAE tree caches for a list of IndexNs returning an
 %% indexed list of results using ReturnFun - with a result of `false` in the 
@@ -241,7 +251,7 @@ aae_fetchbranches(Pid, IndexNs, BranchIDs, ReturnFun) ->
 
 -spec aae_mergebranches(pid(), 
                         list(responsible_preflist()), list(integer()), 
-                        fun()) -> ok.
+                        returner()) -> ok.
 %% @doc
 %% As with fetch branches but the results are merged before sending
 aae_mergebranches(Pid, IndexNs, BranchIDs, ReturnFun) ->
@@ -260,9 +270,11 @@ aae_mergebranches(Pid, IndexNs, BranchIDs, ReturnFun) ->
 
 -spec aae_fetchclocks(pid(), 
                         list(responsible_preflist()),
-                        list(integer()), 
+                        list(non_neg_integer()), 
                             % fetch_clocks assumes "large" tree size
-                        fun(), null|fun()) -> ok.
+                        returner(),
+                        null|fun((term(), term()) -> responsible_preflist()))
+                            -> ok.
 %% @doc
 %% Fetch all the keys and clocks but use the passed in 2-arity function to 
 %% determine the IndexN of the object, by applying the function to the bucket
@@ -275,15 +287,32 @@ aae_mergebranches(Pid, IndexNs, BranchIDs, ReturnFun) ->
 %% PUTs are received by the vnode - so we know any subseqent changes are not
 %% included in the fold result. 
 aae_fetchclocks(Pid, IndexNs, SegmentIDs, ReturnFun, PrefLFun) ->
+    aae_fetchclocks(Pid, IndexNs, all, SegmentIDs, all, ReturnFun, PrefLFun).
+
+-spec aae_fetchclocks(pid(),
+                        list(responsible_preflist()),
+                        aae_keystore:range_limiter(),
+                        list(non_neg_integer()),
+                        aae_keystore:modified_limiter(),
+                        returner(),
+                        null|fun((term(), term()) -> responsible_preflist()))
+                            -> ok.
+aae_fetchclocks(Pid, IndexNs,
+                RLimiter, SLimiter, LMDLimiter,
+                ReturnFun, PrefLFun) ->
     gen_server:call(Pid, 
-                    {fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PrefLFun},
+                    {fetch_clocks, IndexNs, 
+                        RLimiter, SLimiter, LMDLimiter,
+                        ReturnFun, PrefLFun},
                     ?SYNC_TIMEOUT).
 
 -spec aae_fold(pid(), 
                 aae_keystore:range_limiter(),
                 aae_keystore:segment_limiter(),
-                fun(), any(), 
-                list(aae_keystore:value_element())) -> {async, fun()}.
+                fun((term(), term(), term(), term()) -> term()), 
+                any(), 
+                list(aae_keystore:value_element())) ->
+                    {async, fun(() -> term())}.
 %% @doc
 %% Return a folder to fold over the keys in the aae_keystore (or native 
 %% keystore if in native mode)
@@ -296,8 +325,10 @@ aae_fold(Pid, RLimiter, SLimiter, FoldObjectsFun, InitAcc, Elements) ->
                 aae_keystore:segment_limiter(),
                 aae_keystore:modified_limiter(),
                 aae_keystore:count_limiter(),
-                fun(), any(), 
-                list(aae_keystore:value_element())) -> {async, fun()}.
+                fun((term(), term(), term(), term()) -> term()),
+                any(), 
+                list(aae_keystore:value_element())) ->
+                    {async, fun(() -> term())}.
 %% @doc
 %% Return a folder to fold over the keys in the aae_keystore (or native 
 %% keystore if in native mode)
@@ -701,9 +732,11 @@ handle_call({fold, RLimiter, SLimiter, LMDLimiter, MaxObjectCount,
                                 InitAcc,
                                 Elements),
     {reply, R, State};
-handle_call({fetch_clocks, _IndexNs, _SegmentIDs, ReturnFun, _PreflFun},
-                                _From, State=#state{queue_backlog=QB}) 
-                                    when QB ->
+handle_call({fetch_clocks,
+                _IndexNs,
+                _RLimiter, _SegmentIDs, _LMDLimiter,
+                ReturnFun, _PreflFun},
+                    _From, State=#state{queue_backlog=QB}) when QB ->
     %% There is a backlog of queries for the runner.  Add some dummy work to
     %% the queue.  The dummy work will prevent a snapshot being taken which may
     %% otherwise have to live the length of the queue.  It also makes sure the
@@ -713,8 +746,11 @@ handle_call({fetch_clocks, _IndexNs, _SegmentIDs, ReturnFun, _PreflFun},
     SizeFun = fun() -> 0 end,
     Queue = State#state.runner_queue ++ [{work, Folder, ReturnFun, SizeFun}],
     {reply, ok, State#state{runner_queue = Queue}};
-handle_call({fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PreflFun},
-                                From, State) ->
+handle_call({fetch_clocks,
+                IndexNs, 
+                all, SegmentIDs, all, 
+                ReturnFun, PreflFun},
+                    From, State) ->
     ImmediateReply = State#state.parallel_keystore,
     case ImmediateReply of
         true ->
@@ -745,27 +781,21 @@ handle_call({fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PreflFun},
     
     FoldObjFun = 
         fun(B, K, V, {Acc, SubTreeAcc}) ->
+            {clock, VC} = lists:keyfind(clock, 1, V),
+            {aae_segment, SegID} = lists:keyfind(aae_segment, 1, V),
+            {hash, H} = lists:keyfind(hash, 1, V),
             {preflist, PL} = lists:keyfind(preflist, 1, V),
-            case lists:member(PL, IndexNs) of   
-                true ->
-                    {clock, VC} = lists:keyfind(clock, 1, V),
-                    {aae_segment, SegID} = lists:keyfind(aae_segment, 1, V),
-                    {hash, H} = lists:keyfind(hash, 1, V),
-                    {PL, T, SegMap} = lists:keyfind(PL, 1, SubTreeAcc),
-                    {SegID, HashAcc} = lists:keyfind(SegID, 1, SegMap),
-                    BinK = aae_util:make_binarykey(B, K),
-                    {_, HashToAdd} = 
-                        leveled_tictac:tictac_hash(BinK, {is_hash, H}),
-                    UpdHash = HashAcc bxor HashToAdd,
-                    SegMap0 = 
-                        lists:keyreplace(SegID, 1, SegMap, {SegID, UpdHash}),
-                    SubTreeAcc0 = lists:keyreplace(PL, 1, SubTreeAcc, 
-                                                    {PL, T, SegMap0}),
-                    {[{B, K, VC}|Acc], SubTreeAcc0};
-                false ->
-                    {Acc, SubTreeAcc} 
-            end 
+            {PL, T, SegMap} = lists:keyfind(PL, 1, SubTreeAcc),
+            {SegID, HashAcc} = lists:keyfind(SegID, 1, SegMap),
+            BinK = aae_util:make_binarykey(B, K),
+            {_, HashToAdd} =  leveled_tictac:tictac_hash(BinK, {is_hash, H}),
+            UpdHash = HashAcc bxor HashToAdd,
+            SegMap0 = lists:keyreplace(SegID, 1, SegMap, {SegID, UpdHash}),
+            SubTreeAcc0 =
+                lists:keyreplace(PL, 1, SubTreeAcc,  {PL, T, SegMap0}),
+            {[{B, K, VC}|Acc], SubTreeAcc0}
         end,
+    WrappedFoldObjFun = preflist_wrapper_fun(FoldObjFun, IndexNs),
     
     ReturnFun0 = generate_returnfun(GUID, ReturnFun),
     SizeFun =
@@ -774,8 +804,8 @@ handle_call({fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PreflFun},
         end,
     
     Range =
-        case State#state.parallel_keystore of
-            false ->
+        case (not State#state.parallel_keystore) of
+            true ->
                 % If we discover a broken journal file via a rebuild, don't
                 % want to falsely repair it through the fetch_clocks process.
                 all_check;
@@ -791,8 +821,9 @@ handle_call({fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PreflFun},
         aae_keystore:store_fold(State#state.key_store, 
                                 Range,
                                 {segments, SegmentIDs, ?TREE_SIZE},
-                                all, false, 
-                                FoldObjFun, 
+                                all,
+                                false, 
+                                WrappedFoldObjFun, 
                                 {[], InitMap},
                                 [{preflist, PreflFun}, 
                                     {clock, null},
@@ -811,7 +842,69 @@ handle_call({fetch_clocks, IndexNs, SegmentIDs, ReturnFun, PreflFun},
         _ ->
             {reply, ok, S0}
     end;
+handle_call({fetch_clocks,
+                IndexNs, 
+                RLimiter, SegmentIDs, LMDLimiter, 
+                ReturnFun, PreflFun},
+                    From, State) ->
+    ImmediateReply = State#state.parallel_keystore,
+    case ImmediateReply of
+        true ->
+            %% When this is a parallel store, there is no need benefit on
+            %% waiting before replying - as no race conditions will be
+            %% avoided.  Also, there may be a build up of PUTs, and a risk of
+            %% timeout when waiting for maybe_flush_puts/4.  There are
+            %% better mechanisms available to slow the calling process in the
+            %% case of backlog, avoiding overload - see aae_ping/3.  So, reply
+            %% immediately if in parallel mode 
+            gen_server:reply(From, ok);
+        _ ->
+            %% In native mode, don't want a new PUT to be received before the
+            %% snapshot has been taken, so block until the snapshot has been
+            %% taken
+            ok
+    end,
+    
+    FoldObjFun = 
+        fun(B, K, V, Acc) ->
+            {clock, VC} = lists:keyfind(clock, 1, V),
+            [{B, K, VC}|Acc]
+        end,
+    WrappedFoldObjFun = preflist_wrapper_fun(FoldObjFun, IndexNs),
+    SizeFun =
+        fun(KeyClockList) ->
+            length(KeyClockList)
+        end,
 
+    ok = maybe_flush_puts(State#state.key_store, 
+                            State#state.objectspecs_queue,
+                            State#state.parallel_keystore,
+                            true),
+    {async, Folder} = 
+        aae_keystore:store_fold(State#state.key_store, 
+                                RLimiter,
+                                {segments, SegmentIDs, ?TREE_SIZE},
+                                LMDLimiter,
+                                false, 
+                                WrappedFoldObjFun, 
+                                [],
+                                [{preflist, PreflFun}, 
+                                    {clock, null},
+                                    {aae_segment, null}]),
+    Queue = State#state.runner_queue ++ [{work, Folder, ReturnFun, SizeFun}],
+    Backlog = length(Queue) >= ?MAX_RUNNER_QUEUEDEPTH,
+    %% If there is a backlog, the queue will remain in backlog state until it
+    %% is empty.  Whilst in backlog state, query requests will result in dummy
+    %% work being added to the queue not real work (which may cause the queue
+    %% to continue to grow)
+    S0 = State#state{queue_backlog = Backlog, runner_queue = Queue},
+    case ImmediateReply of
+        true ->
+            %% In parallel mode a reply has already been sent
+            {noreply, S0};
+        _ ->
+            {reply, ok, S0}
+    end;
 handle_call(bucket_list,  _From, State) ->
     ok = maybe_flush_puts(State#state.key_store, 
                             State#state.objectspecs_queue,
@@ -1185,6 +1278,22 @@ wait_on_sync(Mod, Fun, Pid, Call, Timeout) ->
     try Mod:Fun(Pid, Call, Timeout)
     catch exit:{timeout, _} -> timeout
     end.
+
+-spec preflist_wrapper_fun(
+        fun((term(), term(), term(), term()) -> term()),
+        list(responsible_preflist())) -> 
+        fun((term(), term(), term(), term()) -> term()).
+preflist_wrapper_fun(FoldObjectsFun, IndexNs) ->
+    fun(B, K, V, Acc) ->
+        {preflist, PL} = lists:keyfind(preflist, 1, V),
+        case lists:member(PL, IndexNs) of
+            true ->
+                FoldObjectsFun(B, K, V, Acc);
+            false ->
+                Acc
+        end
+    end.
+
 
 %%%============================================================================
 %%% log definitions
