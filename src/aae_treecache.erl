@@ -14,7 +14,8 @@
             handle_cast/2,
             handle_info/2,
             terminate/2,
-            code_change/3]).
+            code_change/3,
+            format_status/2]).
 
 -export([cache_open/3,
             cache_new/3,
@@ -44,7 +45,8 @@
                 loading = false :: boolean(),
                 dirty_segments = [] :: list(),
                 active_fold :: string()|undefined,
-                change_queue = [] :: list(),
+                change_queue = [] :: list()|not_logged,
+                queued_changes = 0 :: non_neg_integer(),
                 log_levels :: aae_util:log_levels()|undefined,
                 safe_save = false :: boolean()}).
 
@@ -216,10 +218,12 @@ handle_cast({alter, Key, CurrentHash, OldHash}, State) ->
                                                 fun binary_extractfun/2,
                                                 true),
     State0 = 
-        case State#state.loading of 
+        case State#state.loading of
             true ->
                 CQ = State#state.change_queue,
-                State#state{change_queue = [{Key, CurrentHash, OldHash}|CQ]};
+                QCnt = State#state.queued_changes,
+                State#state{change_queue = [{Key, CurrentHash, OldHash}|CQ],
+                            queued_changes = QCnt + 1};
             false ->
                 State 
         end,
@@ -234,7 +238,9 @@ handle_cast(start_load, State=#state{loading=Loading})
                                                     when Loading == false ->
     {noreply, 
         State#state{loading = true, 
-                    change_queue = [], dirty_segments = [], 
+                    change_queue = [],
+                    queued_changes = 0,
+                    dirty_segments = [], 
                     active_fold = undefined}};
 handle_cast({complete_load, Tree}, State=#state{loading=Loading}) 
                                                     when Loading == true ->
@@ -253,6 +259,7 @@ handle_cast({complete_load, Tree}, State=#state{loading=Loading})
     {noreply,
         State#state{loading = false,
                     change_queue = [],
+                    queued_changes = 0,
                     tree = Tree0,
                     safe_save = true}};
 handle_cast({mark_dirtysegments, SegmentList, FoldGUID}, State) ->
@@ -301,9 +308,14 @@ handle_cast({log_levels, LogLevels}, State) ->
 handle_info(_Info, State) ->
     {stop, normal, State}.
 
+format_status(normal, [_PDict, State]) ->
+    State;
+format_status(terminate, [_PDict, State]) ->
+    State#state{change_queue = not_logged}.
+
+
 terminate(_Reason, _State) ->
     ok.
-
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
@@ -438,7 +450,8 @@ logs() ->
         {"C0005", {info, "Starting cache with is_restored=~w and IndexN of ~w"}},
         {"C0006", {debug, "Altering segment for PartitionID=~w ID=~w Hash=~w"}},
         {"C0007", {warn, "Treecache exiting after trapping exit from Pid=~w"}},
-        {"C0008", {info, "Complete load of tree with length of change_queue=~w"}}].
+        {"C0008", {info, "Complete load of tree with length of change_queue=~w"}},
+        {"C0009", {info, "During cache rebuild reached length of change_queue=~w"}}].
 
 %%%============================================================================
 %%% Test
@@ -575,6 +588,18 @@ corrupt_save_tester() ->
     ok = lists:foreach(BrokenCacheCheckFun, BrokenCaches),
     aae_util:clean_subdir(RootPath).
 
+format_status_test() ->
+    RootPath = "test/foratstatus/",
+    PartitionID = 99,
+    aae_util:clean_subdir(RootPath ++ "/" ++ integer_to_list(PartitionID)),
+    {ok, C0} = cache_new(RootPath, PartitionID, undefined),
+    {status, C0, {module, gen_server}, SItemL} = sys:get_status(C0),
+    S = lists:keyfind(state, 1, lists:nth(5, SItemL)),
+    ?assert(is_list(S#state.change_queue)),
+    ST = format_status(terminate, [dict:new(), S]),
+    ?assertMatch(not_logged, ST#state.change_queue),
+
+    ok = cache_destroy(C0).
 
 simple_test() ->
     RootPath = "test/cache1/",
