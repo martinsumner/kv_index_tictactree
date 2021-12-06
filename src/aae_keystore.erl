@@ -1515,7 +1515,7 @@ load2_tester(StoreType) ->
 
     GenerateKeyFun = aae_util:test_key_generator(v1),
 
-    KVL1 = lists:map(GenerateKeyFun, lists:seq(1, 1000)),
+    KVL1 = lists:map(GenerateKeyFun, lists:seq(1, 10000)),
     KVL2 = lists:map(GenerateKeyFun, lists:seq(601, 700)),
     KVL3 = lists:map(GenerateKeyFun, lists:seq(601, 700)),
     KVL4 = lists:map(GenerateKeyFun, lists:seq(601, 700)),
@@ -1539,7 +1539,7 @@ load2_tester(StoreType) ->
             end
         end,
     {BatchList0, []} =
-        lists:foldl(SplitFun, {[], ObjectSpecs}, lists:seq(1, 41)),
+        lists:foldl(SplitFun, {[], ObjectSpecs}, lists:seq(1, 322)),
     
     {ok, {never, true}, Store0} =
         store_parallelstart(RootPath, StoreType, undefined),
@@ -1563,29 +1563,27 @@ load2_tester(StoreType) ->
 
     ok = store_prompt(Store0, rebuild_start),
 
-    {async, Folder1} = 
-        store_fold(Store0, all, all, FoldObjectsFun, [], [{clock, null}]),
-
-    ?assertMatch(ExpectedResults0, SortFun(Folder1())),
-
     LoadSpecs = generate_objectspecs(add, <<"B1">>, FinalState0),
     {BatchList1, []} =
-        lists:foldl(SplitFun, {[], LoadSpecs}, lists:seq(1, 32)),
+        lists:foldl(SplitFun, {[], LoadSpecs},
+            lists:seq(1, 1 + length(LoadSpecs) div 32)),
     
     KVL5 = lists:map(GenerateKeyFun, lists:seq(601, 700)),
     KVL6 = lists:map(GenerateKeyFun, lists:seq(690, 700)),
     KVL7 = lists:map(GenerateKeyFun, lists:seq(690, 700)),
     KVL8 = lists:map(GenerateKeyFun, lists:seq(690, 700)),
-    KVL9 = lists:map(GenerateKeyFun, lists:seq(1001, 10000)),
+    KVL9 = lists:map(GenerateKeyFun, lists:seq(10001, 15000)),
     FreshSpecs =
         generate_objectspecs(add,
             <<"B1">>,
             KVL5 ++ KVL6 ++ KVL7 ++ KVL8 ++ KVL9),
 
     {FreshList, []} =
-        lists:foldl(SplitFun, {[], FreshSpecs}, lists:seq(1, 286)),
+        lists:foldl(SplitFun, {[], FreshSpecs}, lists:seq(1, 161)),
 
     {BL0, BL1} = lists:split(30, lists:reverse(BatchList1)),
+
+    RebuildStartTime = os:timestamp(),
 
     lists:foreach(fun(B) -> store_mload(Store0, B) end, BL0),
     lists:foreach(fun(B) -> store_mput(Store0, B, false) end,
@@ -1600,7 +1598,6 @@ load2_tester(StoreType) ->
         store_fold(Store0, all, all, FoldObjectsFun, [], [{clock, null}]),
     ?assertMatch(ExpectedResults1, SortFun(Folder2())),
 
-    RebuildCompleteTime = os:timestamp(),
     ok = store_prompt(Store0, rebuild_complete),
     {async, Folder3} = 
         store_fold(Store0, all, all, FoldObjectsFun, [], [{clock, null}]),
@@ -1609,7 +1606,7 @@ load2_tester(StoreType) ->
     parallel = wait_until_parallel(Store0, 50),
 
     io:format(user, "Rebuild completion took ~w ms~n",
-        [timer:now_diff(os:timestamp(), RebuildCompleteTime) div 1000]),
+        [timer:now_diff(os:timestamp(), RebuildStartTime) div 1000]),
 
     {async, Folder4} = 
         store_fold(Store0, all, all, FoldObjectsFun, [], [{clock, null}]),
