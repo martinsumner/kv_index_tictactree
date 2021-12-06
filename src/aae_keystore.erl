@@ -1587,6 +1587,8 @@ load2_tester(StoreType) ->
 
     {BL0, BL1} = lists:split(30, lists:reverse(BatchList1)),
 
+    RebuildStartTime = os:timestamp(),
+
     lists:foreach(fun(B) -> store_mload(Store0, B) end, BL0),
     lists:foreach(fun(B) -> store_mput(Store0, B, false) end,
         lists:reverse(FreshList)),
@@ -1608,8 +1610,10 @@ load2_tester(StoreType) ->
 
     parallel = wait_until_parallel(Store0, 50),
 
-    io:format(user, "Rebuild completion took ~w ms~n",
+    io:format(user, "~nReload on rebuild completion took ~w ms~n",
         [timer:now_diff(os:timestamp(), RebuildCompleteTime) div 1000]),
+    io:format(user, "Total rebuild time took ~w ms~n",
+        [timer:now_diff(os:timestamp(), RebuildStartTime) div 1000]),
 
     {async, Folder4} = 
         store_fold(Store0, all, all, FoldObjectsFun, [], [{clock, null}]),
