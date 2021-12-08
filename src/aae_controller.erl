@@ -59,7 +59,6 @@
 -define(TREE_PATH, "aaetree/").
 -define(MEGA, 1000000).
 -define(BATCH_LENGTH, 128).
--define(DEFAULT_REBUILD_SCHEDULE, {1, 300}).
 -define(EMPTY, <<>>).
 -define(EMPTY_MD, term_to_binary([])).
 -define(SYNC_TIMEOUT, 60000).
@@ -74,8 +73,7 @@
                 object_splitfun,
                 reliable = false :: boolean(),
                 next_rebuild = os:timestamp() :: erlang:timestamp(),
-                rebuild_schedule = ?DEFAULT_REBUILD_SCHEDULE 
-                    :: rebuild_schedule(),
+                rebuild_schedule :: rebuild_schedule(),
                 broken_trees = false :: boolean(),
                 parallel_keystore = true :: boolean(),
                 objectspecs_queue = [] :: list(),
@@ -473,7 +471,8 @@ init([Opts]) ->
                         RebuildTS = 
                             schedule_rebuild(LastRebuild, RebuildSchedule),
                         {ok, #state{key_store = Pid, 
-                                        next_rebuild = RebuildTS, 
+                                        next_rebuild = RebuildTS,
+                                        rebuild_schedule = RebuildSchedule,
                                         reliable = true,
                                         parallel_keystore = true}};
                     StoreState ->
@@ -1769,9 +1768,28 @@ varyindexn_cache_rebuild_tester(StoreType) ->
     aae_util:clean_subdir(RootPath).
 
 
+check_schedule_test() ->
+    RootPath = "test/schedule",
+    ExpectedSchedule = {2, 637},
+    {ok, C} =
+        start_wrap(true, RootPath, [?TEST_DEFAULT_PARTITION], leveled_ko,
+            ExpectedSchedule),
+    S = sys:get_state(C),
+    ?assertMatch(ExpectedSchedule, S#state.rebuild_schedule),
+    ok = aae_close(C),
+    aae_util:clean_subdir(RootPath).
+
+
 coverage_cheat_test() ->
-    {noreply, _State0} = handle_info(null, #state{}),
-    {ok, _State1} = code_change(null, #state{}, null).
+    {noreply, _State0} =
+        handle_info(null,
+            #state{rebuild_schedule =
+                {?TEST_MINHOURS, ?TEST_JITTERSECONDS}}),
+    {ok, _State1} =
+        code_change(null,
+            #state{rebuild_schedule =
+                {?TEST_MINHOURS, ?TEST_JITTERSECONDS}}, 
+        null).
 
 
 
@@ -1784,10 +1802,14 @@ start_wrap(IsEmpty, RootPath, StoreType) ->
     start_wrap(IsEmpty, RootPath, [?TEST_DEFAULT_PARTITION], StoreType).
 
 start_wrap(IsEmpty, RootPath, RPL, StoreType) ->
+    start_wrap(IsEmpty, RootPath, RPL, StoreType,
+        {?TEST_MINHOURS, ?TEST_JITTERSECONDS}).
+
+start_wrap(IsEmpty, RootPath, RPL, StoreType, RebuildSchedule) ->
     F = fun(_X) -> {0, 1, 0, null} end,
     aae_start({parallel, StoreType}, 
                 IsEmpty, 
-                {?TEST_MINHOURS, ?TEST_JITTERSECONDS}, 
+                RebuildSchedule, 
                 RPL, RootPath, F).
 
 
