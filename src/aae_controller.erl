@@ -1492,25 +1492,25 @@ shutdown_parallel_rebuild_test() ->
 
 
 overload_runner_test_() ->
-    {timeout, 10, fun overloadrunner_tester/0}.
+    {timeout, 60, fun overloadrunner_tester/0}.
 
 shudown_parallel_test_() ->
-    {timeout, 10, fun shutdown_parallel_tester/0}.
+    {timeout, 60, fun shutdown_parallel_tester/0}.
 
 wrong_indexn_test_() ->
-    {timeout, 10, fun wrong_indexn_tester/0}.
+    {timeout, 60, fun wrong_indexn_tester/0}.
 
 rebuildso_test_() ->
-    {timeout, 10, fun() -> basic_cache_rebuild_tester(leveled_so) end}.
+    {timeout, 60, fun() -> basic_cache_rebuild_tester(leveled_so) end}.
 
 rebuildko_test_() ->
-    {timeout, 10, fun() -> basic_cache_rebuild_tester(leveled_ko) end}.
+    {timeout, 60, fun() -> basic_cache_rebuild_tester(leveled_ko) end}.
 
 vary_indexnso_test_() ->
-    {timeout, 10, fun() -> varyindexn_cache_rebuild_tester(leveled_so) end}.
+    {timeout, 60, fun() -> varyindexn_cache_rebuild_tester(leveled_so) end}.
 
 vary_indexnlo_test_() ->
-    {timeout, 10, fun() -> varyindexn_cache_rebuild_tester(leveled_ko) end}.
+    {timeout, 60, fun() -> varyindexn_cache_rebuild_tester(leveled_ko) end}.
 
 
 overloadrunner_tester() ->

@@ -69,7 +69,9 @@
                 store :: pid()|undefined,
                 id = key_store :: any(),
                 store_type :: parallel_stores()|native_stores(),
-                change_queue = [] :: list(),
+                load_continuation = start 
+                    :: start | disk_log:continuation() | undefined,
+                load_disklog :: file:filename()|undefined,
                 change_queue_counter = 0 :: integer(),
                 load_counter = 0 :: integer(),
                 current_guid :: list()|undefined,
@@ -108,6 +110,7 @@
     % file extension to be used once manifest write is complete
 -define(PENDING_EXT, ".pnd").
     % file extension to be used once manifest write is pending
+-define(DISKLOG_EXT, ".dlg").
 -define(VALUE_VERSION, 2).
 -define(MAYBE_TRIM, 500).
 -define(NULL_SUBKEY, <<>>).
@@ -125,7 +128,7 @@
 -define(USE_SET_FOR_SPEED, 64).
 -define(SYNC_TIMEOUT, 30000).
 -define(LOAD_PAUSE, 1000). % On backlog when loading a parallel store
--define(LOAD_BUFFER, 5).
+-define(LOAD_BATCH, 256).
 
 -type bucket() :: binary()|{binary(),binary()}.
 -type key() :: binary().
@@ -182,7 +185,7 @@
 
 -type value_element() 
     :: {preflist|clock|hash|size|sibcount|indexhash|aae_segment|lmd|md, 
-        fun()|null}.
+        fun((bucket(), key()) -> term())|null}.
     % A request for a value element to be returned from a value, and the
     % function to apply to the f(Bucket, Key) for elements where the item
     % needs to be calculated (like IndexN in native stores)
@@ -492,7 +495,8 @@ native(Shutdown, _From, State) when Shutdown == close; Shutdown == destroy ->
 
 loading({mput, ObjectSpecs}, State) ->
     ok = do_load(State#state.store_type, State#state.store, ObjectSpecs),
-    ChangeQueue1 = [ObjectSpecs|State#state.change_queue],
+    ok = disk_log:alog_terms(State#state.load_disklog,
+                                lists:reverse(ObjectSpecs)),
     ObjectCount0 = State#state.change_queue_counter,
     ObjectCount1 = State#state.change_queue_counter + length(ObjectSpecs),
     ToLog = 
@@ -506,20 +510,24 @@ loading({mput, ObjectSpecs}, State) ->
         false ->
             ok
     end,
-    {next_state, loading, State#state{change_queue_counter = ObjectCount1, 
-                                        change_queue = ChangeQueue1}};
+    {next_state, loading, State#state{change_queue_counter = ObjectCount1}};
 loading({prompt, rebuild_complete}, State) ->
     aae_util:log("KS008",
-                    [length(State#state.change_queue),
-                        State#state.change_queue_counter,
+                    [State#state.change_queue_counter,
                         State#state.load_counter],
                     logs(),
                     State#state.log_levels),
     store_prompt(self(), queue_complete),
-    {next_state, loading, State#state{load_counter = 0}};
+    {next_state,
+        loading,
+        State#state{load_counter = 0, load_continuation = start}};
 loading({prompt, queue_complete}, State) ->
-    case length(State#state.change_queue) of
-        0 ->
+    GetChunk =
+        disk_log:chunk(State#state.load_disklog,
+                        State#state.load_continuation,
+                        ?LOAD_BATCH),
+    case GetChunk of
+        eof ->
             GUID = State#state.load_guid,
             LoadStore = State#state.load_store,
             LastRebuild = os:timestamp(),
@@ -532,20 +540,22 @@ loading({prompt, queue_complete}, State) ->
                                             last_rebuild = LastRebuild},
                                 State#state.log_levels),
             ok = delete_store(State#state.store_type, State#state.store),
+            ok = disk_log:close(State#state.load_disklog),
+            ok = file:delete(disklog_filename(State#state.root_path, GUID)),
             {next_state, 
                 parallel, 
                 State#state{store = LoadStore,
                             current_guid = GUID,
                             last_rebuild = LastRebuild,
+                            load_disklog = undefined,
+                            load_continuation = undefined,
                             change_queue_counter = 0}};
-        L ->
-            BatchL = max((?SYNC_TIMEOUT div ?LOAD_PAUSE) - ?LOAD_BUFFER, 1),
-            {LeftQ, RightQ} =
-                lists:split(max(L - BatchL, 0), State#state.change_queue),
-            SendFun = fun(OS) -> gen_fsm:send_event(self(), {qload, OS}) end,
-            lists:foreach(SendFun, lists:reverse(RightQ)),
+        {Continuation, ObjectSpecs} when is_list(ObjectSpecs) ->
+            gen_fsm:send_event(self(), {qload, lists:reverse(ObjectSpecs)}),
             store_prompt(self(), queue_complete),
-            {next_state, loading, State#state{change_queue = LeftQ}}
+            {next_state,
+                loading,
+                State#state{load_continuation = Continuation}}
     end;
 loading({qload, ObjectSpecs}, State) ->
     do_load(State#state.store_type, State#state.load_store, ObjectSpecs),
@@ -570,7 +580,15 @@ parallel({prompt, rebuild_start}, State) ->
                         #manifest{current_guid = State#state.current_guid,
                                     pending_guid = GUID},
                         State#state.log_levels),
-    {next_state, loading, State#state{load_store = Store, load_guid = GUID}}.
+    {ok, LoadLog} =
+        disk_log:open([{name, GUID},
+            {file, disklog_filename(State#state.root_path, GUID)},
+            {repair, false}]),
+    {next_state,
+        loading,
+        State#state{load_store = Store,
+                    load_guid = GUID,
+                    load_disklog = LoadLog}}.
 
 native({prompt, rebuild_start}, State) ->
     GUID = leveled_util:generate_uuid(),
@@ -1215,6 +1233,9 @@ clear_pendingpath(Manifest, RootPath) ->
             Manifest#manifest{pending_guid = undefined}
     end.
 
+-spec disklog_filename(string(), string()) -> filename:filename().
+disklog_filename(RootPath, GUID) ->
+    filename:join(RootPath, GUID ++ ?DISKLOG_EXT).
 
 
 %%%============================================================================
@@ -1243,8 +1264,7 @@ logs() ->
         {"KS007",
             {info, "Rebuild prompt ~w with GUID ~s"}},
         {"KS008",
-            {info, "Rebuild queue load backlog_batches=~w backlog_items=~w "
-                    ++ "loaded_count=~w"}}
+            {info, "Rebuild queue load backlog_items=~w loaded_count=~w"}}
 
         ].
 
@@ -1317,11 +1337,18 @@ empty_manifest_test() ->
     aae_util:clean_subdir(RootPath).
 
 
-leveled_so_load_test() ->
-    load_tester(leveled_so).
+leveled_so_load_test_() ->
+    {timeout, 60, fun() -> load_tester(leveled_so) end}.
 
-leveled_ko_load_test() ->
-    load_tester(leveled_ko).
+leveled_ko_load_test_() ->
+    {timeout, 60, fun() -> load_tester(leveled_ko) end}.
+
+leveled_so_load2_test_() ->
+    {timeout, 60, fun() -> load2_tester(leveled_so) end}.
+
+leveled_ko_load2_test_() ->
+    {timeout, 60, fun() -> load2_tester(leveled_ko) end}.
+
 
 load_tester(StoreType) ->
     RootPath = "test/keystore2/",
@@ -1338,7 +1365,6 @@ load_tester(StoreType) ->
         lists:map(fun({K, V}) -> {<<"B1">>, K, element(1, V)} end, 
                     lists:sublist(InitialKeys, 60) ++ AlternateKeys),
     
-
     ObjectSpecs = 
         generate_objectspecs(add, <<"B1">>, InitialKeys) ++
         generate_objectspecs(add, <<"B1">>, AlternateKeys) ++
@@ -1412,6 +1438,9 @@ load_tester(StoreType) ->
     Res5 = lists:usort(Folder5()),
     ?assertMatch(FinalState, Res5),
 
+    parallel = wait_until_parallel(Store0, 10),
+    parallel = wait_until_parallel(Store0, 0), % Cheat for coverage
+
     ok = store_close(Store0),
 
     {ok, {LastRebuildTime, false}, Store1} 
@@ -1471,11 +1500,146 @@ load_tester(StoreType) ->
     aae_util:clean_subdir(RootPath).
 
 
+load2_tester(StoreType) ->
+    RootPath = "test/keystore_rebuild/",
+    ok = filelib:ensure_dir(RootPath),
+    aae_util:clean_subdir(RootPath),
+
+    SortFun =
+        case StoreType of
+            leveled_ko ->
+                fun lists:reverse/1;
+            leveled_so ->
+                fun lists:sort/1
+        end,
+
+    GenerateKeyFun = aae_util:test_key_generator(v1),
+
+    KVL1 = lists:map(GenerateKeyFun, lists:seq(1, 1000)),
+    KVL2 = lists:map(GenerateKeyFun, lists:seq(601, 700)),
+    KVL3 = lists:map(GenerateKeyFun, lists:seq(601, 700)),
+    KVL4 = lists:map(GenerateKeyFun, lists:seq(601, 700)),
+
+    FinalState0 =  lists:ukeysort(1, KVL4 ++ KVL1),
+    
+    ObjectSpecs = 
+        generate_objectspecs(add, <<"B1">>, KVL1) ++
+        generate_objectspecs(add, <<"B1">>, KVL2) ++
+        generate_objectspecs(remove, <<"B1">>, KVL3) ++
+        generate_objectspecs(add, <<"B1">>, KVL4),
+    
+    SplitFun =
+        fun(_I, {Acc, Rem0}) ->
+            case length(Rem0) > 32 of
+                true ->
+                    {Batch, Rem1} = lists:split(32, Rem0),
+                    {[lists:reverse(Batch)|Acc], Rem1};
+                false ->
+                    {[lists:reverse(Rem0)|Acc], []}
+            end
+        end,
+    {BatchList0, []} =
+        lists:foldl(SplitFun, {[], ObjectSpecs}, lists:seq(1, 41)),
+    
+    {ok, {never, true}, Store0} =
+        store_parallelstart(RootPath, StoreType, undefined),
+    
+    lists:foreach(fun(B) -> store_mput(Store0, B, false) end,
+                    lists:reverse(BatchList0)),
+    
+    FoldObjectsFun =
+        fun(B, K, V, Acc) ->
+            {clock, VC} = lists:keyfind(clock, 1, V),
+            [{B, K, VC}|Acc]
+        end,
+    
+    {async, Folder0} = 
+        store_fold(Store0, all, all, FoldObjectsFun, [], [{clock, null}]),
+    
+    ExpectedResults0 =
+        lists:map(fun({K, V}) -> {<<"B1">>, K, element(1, V)} end, FinalState0),
+    
+    ?assertMatch(ExpectedResults0, SortFun(Folder0())),
+
+    ok = store_prompt(Store0, rebuild_start),
+
+    {async, Folder1} = 
+        store_fold(Store0, all, all, FoldObjectsFun, [], [{clock, null}]),
+
+    ?assertMatch(ExpectedResults0, SortFun(Folder1())),
+
+    LoadSpecs = generate_objectspecs(add, <<"B1">>, FinalState0),
+    {BatchList1, []} =
+        lists:foldl(SplitFun, {[], LoadSpecs}, lists:seq(1, 32)),
+    
+    KVL5 = lists:map(GenerateKeyFun, lists:seq(601, 700)),
+    KVL6 = lists:map(GenerateKeyFun, lists:seq(690, 700)),
+    KVL7 = lists:map(GenerateKeyFun, lists:seq(690, 700)),
+    KVL8 = lists:map(GenerateKeyFun, lists:seq(690, 700)),
+    KVL9 = lists:map(GenerateKeyFun, lists:seq(1001, 10000)),
+    FreshSpecs =
+        generate_objectspecs(add,
+            <<"B1">>,
+            KVL5 ++ KVL6 ++ KVL7 ++ KVL8 ++ KVL9),
+
+    {FreshList, []} =
+        lists:foldl(SplitFun, {[], FreshSpecs}, lists:seq(1, 286)),
+
+    {BL0, BL1} = lists:split(30, lists:reverse(BatchList1)),
+
+    RebuildStartTime = os:timestamp(),
+
+    lists:foreach(fun(B) -> store_mload(Store0, B) end, BL0),
+    lists:foreach(fun(B) -> store_mput(Store0, B, false) end,
+        lists:reverse(FreshList)),
+    lists:foreach(fun(B) -> store_mload(Store0, B) end, BL1),
+
+    FinalState1 = lists:ukeysort(1, KVL9 ++ KVL8 ++ KVL5 ++ FinalState0),
+    ExpectedResults1 =
+        lists:map(fun({K, V}) -> {<<"B1">>, K, element(1, V)} end, FinalState1),
+    
+    {async, Folder2} = 
+        store_fold(Store0, all, all, FoldObjectsFun, [], [{clock, null}]),
+    ?assertMatch(ExpectedResults1, SortFun(Folder2())),
+
+    RebuildCompleteTime = os:timestamp(),
+    ok = store_prompt(Store0, rebuild_complete),
+    {async, Folder3} = 
+        store_fold(Store0, all, all, FoldObjectsFun, [], [{clock, null}]),
+    ?assertMatch(ExpectedResults1, SortFun(Folder3())),
+
+    parallel = wait_until_parallel(Store0, 50),
+
+    io:format(user, "~nReload on rebuild completion took ~w ms~n",
+        [timer:now_diff(os:timestamp(), RebuildCompleteTime) div 1000]),
+    io:format(user, "Total rebuild time took ~w ms~n",
+        [timer:now_diff(os:timestamp(), RebuildStartTime) div 1000]),
+
+    {async, Folder4} = 
+        store_fold(Store0, all, all, FoldObjectsFun, [], [{clock, null}]),
+    ?assertMatch(ExpectedResults1, SortFun(Folder4())),
+
+    ok = store_close(Store0),
+    aae_util:clean_subdir(RootPath).
+
+
 split_lists(L, SplitSize, Acc) when length(L) =< SplitSize ->
     [L|Acc];
 split_lists(L, SplitSize, Acc) ->
     {LL, RL} = lists:split(SplitSize, L),
     split_lists(RL, SplitSize, [LL|Acc]).
+
+
+wait_until_parallel(Pid, 0) ->
+    element(1, sys:get_state(Pid));
+wait_until_parallel(Pid, LoopCount) ->
+    case sys:get_state(Pid) of
+        {parallel, _} ->
+            parallel;
+        {loading, _} ->
+            timer:sleep(10),
+            wait_until_parallel(Pid, LoopCount - 1)
+    end.
 
 
 fetch_clock_test() ->
@@ -1515,8 +1679,6 @@ fetch_clock_test() ->
     ok = close_store(leveled_so, Store0, destroy),
     aae_util:clean_subdir(RootPath).
     
-
-
 
 so_big_load_test_() ->
     {timeout, 180, fun so_big_load_tester/0}.
