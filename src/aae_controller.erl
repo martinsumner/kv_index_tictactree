@@ -695,13 +695,12 @@ handle_call({rebuild_store, SplitObjFun}, _From, State)->
                         generate_objectspec(B, K, SegmentID, IdxN,
                                             V, VC, CH, 
                                             State#state.object_splitfun),
-                    UpdSpecL = [ObjSpec|Acc],
                     case length(Acc) >= ?BATCH_LENGTH of
                         true ->
-                            flush_load(State#state.key_store, UpdSpecL),
+                            flush_load(State#state.key_store, [ObjSpec|Acc]),
                             [];
                         false ->
-                            [ObjSpec|UpdSpecL]
+                            [ObjSpec|Acc]
                     end
                 end,
             FinishFun =
