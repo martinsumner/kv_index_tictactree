@@ -38,6 +38,7 @@
             aae_rebuildtrees/5,
             aae_rebuildtrees/4,
             aae_rebuildstore/2,
+            aae_rebuildstore/3,
             aae_fold/6,
             aae_fold/8,
             aae_bucketlist/1,
@@ -136,8 +137,10 @@
 -type object_splitter()
         :: fun((binary()) ->
                 {pos_integer(), pos_integer(), non_neg_integer(),
-                    list(erlang:timestamp()), binary()}).
-
+                    list(erlang:timestamp())|undefined, binary()}).
+-type fold_objects_fun()
+        :: fun((aae_keystore:bucket(), aae_keystore:key(), term(), list())
+                    -> list()).
 
 -export_type([responsible_preflist/0,
                 keystore_type/0,
@@ -357,9 +360,12 @@ aae_close(Pid) ->
 aae_destroy(Pid) ->
     gen_server:call(Pid, destroy, ?SYNC_TIMEOUT).
 
--spec aae_rebuildtrees(pid(), 
-                        list(responsible_preflist()), fun()|null, fun(),
-                        boolean()) -> ok|skipped|loading. 
+-spec aae_rebuildtrees(
+    pid(), 
+    list(responsible_preflist()),
+    fun((aae_keystore:bucket(), aae_keystore:key()) -> term())|null,
+    fun((fun(() -> term()), fun((term()) -> ok)) -> ok),
+    boolean()) -> ok|skipped|loading. 
 %% @doc
 %% Rebuild the tree caches for a store.  Note that this rebuilds the caches
 %% but not the actual key_store itself (required in the case of parallel 
@@ -384,10 +390,12 @@ aae_rebuildtrees(Pid, IndexNs, PreflistFun, WorkerFun, OnlyIfBroken) ->
             R
     end.
 
--spec aae_rebuildtrees(pid(), 
-                        list(responsible_preflist()), fun()|null,
-                        boolean()) -> 
-                            {ok, fun(), fun()}|skipped|loading.
+-spec aae_rebuildtrees(
+    pid(), 
+    list(responsible_preflist()),
+    fun((aae_keystore:bucket(), aae_keystore:key()) -> term())|null,
+    boolean()) ->
+        {ok, fun(() -> term()), fun((term()) -> ok)}|skipped|loading.
 %% @doc
 %% Call aae_rebuildtrees/4 to avoid use of a passed in WorkerFun
 aae_rebuildtrees(Pid, IndexNs, PreflistFun, OnlyIfBroken) ->
@@ -397,19 +405,25 @@ aae_rebuildtrees(Pid, IndexNs, PreflistFun, OnlyIfBroken) ->
                         OnlyIfBroken},
                     infinity).
 
--spec aae_rebuildstore(pid(), fun()) -> {ok, fun()|skip, fun()}|ok.
+-spec aae_rebuildstore(
+    pid(),
+    fun((aae_keystore:bucket(), aae_keystore:key(), term())
+        -> {non_neg_integer(), term()}))
+    ->
+        {ok, fold_objects_fun(), fun((list()) -> ok)}|ok.
 %% @doc
 %% Prompt the rebuild of the actual AAE key store.  This should return an
 %% object fold fun, and a finish fun.  The object fold fun may be skip if it 
 %% is a native store and so no fold is required.  The finish fun should be 
 %% called once the fold is completed (or immediately if the fold fun is skip).
-%%
-%% The SplitValueFun must be able to take the {B, K, V} to be used in the 
-%% object fold and convert it into {B, K, {IndexN, CurrentClock}} 
-aae_rebuildstore(Pid, SplitObjectFun) ->
-    gen_server:call(Pid,
-                    {rebuild_store, SplitObjectFun},
-                    infinity).
+aae_rebuildstore(Pid, PreflistClockFun) ->
+    aae_rebuildstore(Pid, PreflistClockFun, fun handle_corrupted_object/4).
+
+aae_rebuildstore(Pid, PreflistClockFun, HandleBadObjFun) ->
+    gen_server:call(
+        Pid,
+        {rebuild_store, PreflistClockFun, HandleBadObjFun},
+        infinity).
 
 -spec aae_loglevel(pid(), aae_util:log_levels()) -> ok.
 %% @doc
@@ -674,7 +688,7 @@ handle_call({rebuild_trees, IndexNs, PreflistFun, OnlyIfBroken},
                     {reply, loading, State}
             end
     end;
-handle_call({rebuild_store, SplitObjFun}, _From, State)->
+handle_call({rebuild_store, PreflClockFun, HandleBadObjFun}, _From, State) ->
     aae_util:log("AAE12", [State#state.parallel_keystore],
                     logs(), State#state.log_levels),
     ok = maybe_flush_puts(State#state.key_store, 
@@ -684,35 +698,26 @@ handle_call({rebuild_store, SplitObjFun}, _From, State)->
     ok = aae_keystore:store_prompt(State#state.key_store, rebuild_start),
     case State#state.parallel_keystore of 
         true ->
-            FoldObjectsFun = 
-                fun(B, K, V, Acc) ->
-                    {IdxN, VC} = SplitObjFun(B, K, V),
-                    BinaryKey = aae_util:make_binarykey(B, K),
-                    SegmentID = 
-                        leveled_tictac:keyto_segment48(BinaryKey),
-                    {CH, _OH} = hash_clocks(VC, none),
-                    ObjSpec = 
-                        generate_objectspec(B, K, SegmentID, IdxN,
-                                            V, VC, CH, 
-                                            State#state.object_splitfun),
-                    case length(Acc) >= ?BATCH_LENGTH of
-                        true ->
-                            flush_load(State#state.key_store, [ObjSpec|Acc]),
-                            [];
-                        false ->
-                            [ObjSpec|Acc]
-                    end
-                end,
+            FlushFun =
+                fun(SpecList) ->
+                    flush_load(State#state.key_store, SpecList)
+                end, 
+            FoldObjectsFun =
+                rebuild_fold(
+                    PreflClockFun, State#state.object_splitfun,
+                    HandleBadObjFun,
+                    FlushFun),
             FinishFun =
                 fun(Acc) ->
-                    flush_load(State#state.key_store, Acc),
-                    ok = aae_keystore:store_prompt(State#state.key_store,
-                                                    rebuild_complete)
+                    FlushFun(Acc),
+                    ok = aae_keystore:store_prompt(
+                        State#state.key_store, rebuild_complete)
                 end,
             {reply, {ok, FoldObjectsFun, FinishFun}, State};
         false ->
-            ok = aae_keystore:store_prompt(State#state.key_store,
-                                            rebuild_complete),
+            ok = 
+                aae_keystore:store_prompt(
+                    State#state.key_store, rebuild_complete),
             {reply, ok, State}
     end;
 handle_call({fold, RLimiter, SLimiter, LMDLimiter, MaxObjectCount,
@@ -1053,8 +1058,9 @@ code_change(_OldVsn, State, _Extra) ->
 %%% External functions
 %%%============================================================================
 
--spec foldobjects_buildtrees(list(responsible_preflist()),
-                                aae_util:log_levels()) -> {fun(), list()}.
+-spec foldobjects_buildtrees(
+    list(responsible_preflist()), aae_util:log_levels()) ->
+        {fold_objects_fun(), list()}.
 %% @doc
 %% Return an object fold fun for building hashtrees, with an initialised 
 %% accumulator
@@ -1091,7 +1097,8 @@ foldobjects_buildtrees(IndexNs, LogLevels) ->
         end,
     
     {FoldObjectsFun, InitAcc}.
-    
+
+-spec wrapped_splitobjfun(fun((term()) -> term())) -> object_splitter().
 wrapped_splitobjfun(ObjectSplitFun) ->
     fun(Obj) ->
         case ObjectSplitFun(Obj) of
@@ -1110,6 +1117,32 @@ wrapped_splitobjfun(ObjectSplitFun) ->
 %%%============================================================================
 %%% Internal functions
 %%%============================================================================
+
+handle_corrupted_object(B, K, Error, Reason) ->
+    aae_util:log("AAE17", [B, K, Error, Reason], logs()).
+
+rebuild_fold(PreflistClockFun, ObjectSplitFun, HandleBadObjFun, FlushFun) ->
+    fun(B, K, V, Acc) ->
+        try
+            {IdxN, VC} = PreflistClockFun(B, K, V),
+            BinaryKey = aae_util:make_binarykey(B, K),
+            SegmentID = leveled_tictac:keyto_segment48(BinaryKey),
+            {CH, _OH} = hash_clocks(VC, none),
+            ObjSpec = 
+                generate_objectspec(
+                    B, K, SegmentID, IdxN, V, VC, CH, ObjectSplitFun),
+            case length(Acc) >= ?BATCH_LENGTH of
+                true ->
+                    FlushFun([ObjSpec|Acc]),
+                    [];
+                false ->
+                    [ObjSpec|Acc]
+            end
+        catch Error:Reason ->
+            HandleBadObjFun(B, K, Error, Reason),
+            Acc
+        end
+    end.
 
 
 -spec generate_returnfun(string(), fun((any()) -> ok)) ->
@@ -1227,7 +1260,7 @@ schedule_rebuild({MegaSecs, Secs, MicroSecs}, {MinHours, JitterSeconds}) ->
 -spec generate_objectspec(binary(), binary(), leveled_tictac:segment48(), 
                             tuple(),
                             binary(), version_vector(), integer()|none, 
-                            fun()) -> tuple().
+                            object_splitter()) -> tuple().
 %% @doc                            
 %% Generate an object specification for a parallel key store
 generate_objectspec(Bucket, Key, SegmentID, _IndexN,
@@ -1338,7 +1371,9 @@ logs() ->
         {"AAE15",
             {info, "Ping showed time difference of ~w ms"}},
         {"AAE16",
-            {info, "Keystore ~w when tree rebuild requested"}}
+            {info, "Keystore ~w when tree rebuild requested"}},
+        {"AAE17",
+            {warn, "Corrupted object with B=~p K=~p for ~w ~w"}}
     
     ].
 
@@ -1353,6 +1388,27 @@ logs() ->
 -define(ALTERNATIVE_PARTITION, {1, 3}).
 -define(TEST_MINHOURS, 1).
 -define(TEST_JITTERSECONDS, 300).
+
+rebuild_fold_bad_test() ->
+    BadPreflistClockFun = fun(_B, _K, _V) -> throw({error, badarg}) end,
+    GoodPreflistClockFun = fun(_B, _K, _V) -> {0, [{a, 1}]} end,
+    BadSplitObjFun = fun(_Obj) -> throw({error, badarg}) end,
+    FlushFun = fun(_L) ->  ok end,
+    FoldFunA = 
+        rebuild_fold(
+            BadPreflistClockFun,
+            BadSplitObjFun,
+            fun handle_corrupted_object/4,
+            FlushFun),
+    FoldFunB =
+        rebuild_fold(
+            GoodPreflistClockFun,
+            BadSplitObjFun,
+            fun handle_corrupted_object/4,
+            FlushFun),
+    ?assertMatch([], FoldFunA(<<"B">>, <<"K">>, <<"V">>, [])),
+    ?assertMatch([], FoldFunB(<<"B">>, <<"K">>, <<"V">>, [])).
+
 
 rebuild_notempty_test() ->
     RootPath = "test/notemptycntrllr/",
@@ -1889,8 +1945,8 @@ wrap_splitfun_test() ->
     SplitObjFun = 
         fun(_Obj) -> {1000, 2, 0, term_to_binary(null)} end,
     WrappedFun = wrapped_splitobjfun(SplitObjFun),
-    SplitObj = WrappedFun(null),
-    ?assertMatch(true, is_tuple(SplitObj)),
+    SplitObj = WrappedFun(<<"bin">>),
+    ?assert(is_tuple(SplitObj)),
     ?assertMatch(5, tuple_size(SplitObj)),
     ?assertMatch(undefined, element(4, SplitObj)). 
 
