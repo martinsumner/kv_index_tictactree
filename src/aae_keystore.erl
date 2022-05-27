@@ -1485,11 +1485,11 @@ fetch_clock_test() ->
     % When fetching clocks we may have multiple matches on a segment ID
     % Want to prove that here.  Rather than trying to force a hash collision
     % on the segment ID, we will just generate false segment IDs
-    ObjSplitFun = fun(static) -> {0, 1, 0, null} end,
+    ObjSplitFun = fun(<<"static">>) -> {0, 1, 0, null} end,
     WrappedFun = aae_controller:wrapped_splitobjfun(ObjSplitFun),
     GenVal =
         fun(Clock) ->
-            generate_value({1, 3}, 1, Clock, 0, WrappedFun(static))
+            generate_value({1, 3}, 1, Clock, 0, WrappedFun(<<"static">>))
         end,
     Spc1 = define_addobjectspec(<<"B1">>, <<"K2">>, GenVal([{"a", 1}])),
     Spc2 = define_addobjectspec(<<"B1">>, <<"K3">>, GenVal([{"b", 1}])),
