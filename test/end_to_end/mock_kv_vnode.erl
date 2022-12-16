@@ -453,6 +453,7 @@ handle_call(bucketlist_aae, _From, State) ->
     {reply, R, State};
 handle_call(close, _From, State) ->
     ok = aae_controller:aae_close(State#state.aae_controller),
+    ok = leveled_bookie:book_close(State#state.vnode_store),
     {stop, normal, ok, State}.
 
 handle_cast({push, Bucket, Key, UpdClock, ObjectBin, IndexN}, State) ->
