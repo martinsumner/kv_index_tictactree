@@ -43,7 +43,9 @@ store_notsupported(_Config) ->
     io:format("Exchange id ~s~n", [GUID1]),
     {ExchangeState1, 0} = testutil:start_receiver(),
     io:format("ExchangeState ~w~n", [ExchangeState1]),
-    true = ExchangeState1 == not_supported.
+    true = ExchangeState1 == not_supported,
+    aae_controller:aae_close(Cntrl1),
+    RootPath = testutil:reset_filestructure().
 
 
 
