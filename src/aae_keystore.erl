@@ -95,11 +95,14 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
--define(LEVELED_BACKEND_OPTS, [{cache_size, 2000},
-                                    {sync_strategy, none},
-                                    {max_journalsize, 100000000},
-                                    {compression_method, native},
-                                    {compression_point, on_receipt}]).
+-define(LEVELED_BACKEND_OPTS, 
+    [{cache_size, 2000},
+        {sync_strategy, none},
+        {max_journalsize, 100000000},
+        {compression_method, native},
+        {compression_point, on_receipt},
+        {snapshot_timeout_short, 3600},
+        {snapshot_timeout_long, 172800}]).
 -define(CHANGEQ_LOGFREQ, 100000).
 -define(STATE_BUCKET, <<"state">>).
 -define(MANIFEST_FN, "keystore"). 
