@@ -151,8 +151,6 @@
             start/7,
             reply/3]).
 
--include_lib("eunit/include/eunit.hrl").
-
 -record(state, {root_compare_deltas = [] :: list(),
                 branch_compare_deltas = [] :: list(),
                 tree_compare_deltas = [] :: list(),
@@ -1081,6 +1079,8 @@ logs() ->
 %%%============================================================================
 
 -ifdef(TEST).
+
+-include_lib("eunit/include/eunit.hrl").
 
 select_id_test() ->
     L0 = [1, 2, 3],

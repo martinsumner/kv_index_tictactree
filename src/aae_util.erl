@@ -7,8 +7,6 @@
 
 -include("include/aae.hrl").
 
--include_lib("eunit/include/eunit.hrl").
-
 -export([log/3,
             log/4,
             log_timer/4,
@@ -21,8 +19,11 @@
 
 -export([clean_subdir/1,
             test_key_generator/1,
-            flip_byte/3,
-            get_segmentid/2]).         
+            flip_byte/3]).         
+
+-ifdef(TEST).
+-export([get_segmentid/2]).
+-endif.
 
 -define(DEFAULT_LOGLEVEL, [info, warn, error, critical]).
 -define(DEFAULT_LOGBASE, [
@@ -251,6 +252,8 @@ clean_subdir(DirPath) ->
     end.
 
 -ifdef(TEST).
+
+-include_lib("eunit/include/eunit.hrl").
 
 get_segmentid(B, K) ->
     Seg32 = leveled_tictac:keyto_segment32(make_binarykey(B, K)),
