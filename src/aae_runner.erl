@@ -18,8 +18,6 @@
             runner_work/2,
             runner_stop/1]).
 
--include_lib("eunit/include/eunit.hrl").
-
 -record(state, {result_size = 0 :: integer(),
                 query_count = 0 :: integer(),
                 query_time  = 0 :: integer(),
@@ -155,6 +153,8 @@ logs() ->
 %%%============================================================================
 
 -ifdef(TEST).
+
+-include_lib("eunit/include/eunit.hrl").
 
 runner_fail_test() ->
     {ok, R} = runner_start(undefined),

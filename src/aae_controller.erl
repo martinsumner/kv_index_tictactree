@@ -50,11 +50,13 @@
             hash_clocks/2,
             wrapped_splitobjfun/1]).
 
--export([rebuild_worker/1, wait_on_sync/5]).
+-export([wait_on_sync/5]).
 
 -export([generate_returnfun/2]).
 
--include_lib("eunit/include/eunit.hrl").
+-ifdef(TEST).
+-export([rebuild_worker/1]).
+-endif.
 
 -define(STORE_PATH, "keystore/").
 -define(TREE_PATH, "aaetree/").
@@ -1383,6 +1385,8 @@ logs() ->
 %%%============================================================================
 
 -ifdef(TEST).
+
+-include_lib("eunit/include/eunit.hrl").
 
 -define(TEST_DEFAULT_PARTITION, {0, 3}).
 -define(ALTERNATIVE_PARTITION, {1, 3}).

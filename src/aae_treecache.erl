@@ -30,8 +30,6 @@
             cache_loglevel/2,
             cache_close/1]).
 
--include_lib("eunit/include/eunit.hrl").
-
 -define(PENDING_EXT, ".pnd").
 -define(FINAL_EXT, ".aae").
 -define(START_SQN, 1).
@@ -458,6 +456,8 @@ logs() ->
 %%%============================================================================
 
 -ifdef(TEST).
+
+-include_lib("eunit/include/eunit.hrl").
 
 setup_savedcaches(RootPath) ->
     Tree0 = leveled_tictac:new_tree(test),

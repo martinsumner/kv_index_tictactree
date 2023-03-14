@@ -74,7 +74,7 @@
                 load_counter = 0 :: integer(),
                 current_guid :: list()|undefined,
                 root_path :: list()|undefined,
-                last_rebuild :: os:timestamp()|never,
+                last_rebuild :: erlang:timestamp()|never,
                 load_store :: pid()|undefined,
                 load_guid :: list()|undefined,
                 backend_opts = [] :: list(),
@@ -90,10 +90,8 @@
                         segment_id :: integer(),
                         bucket :: binary(),
                         key :: binary(),
-                        last_mod_dates :: undefined|list(os:timestamp()),
+                        last_mod_dates :: undefined|list(erlang:timestamp()),
                         value = null :: tuple()|null}).
-
--include_lib("eunit/include/eunit.hrl").
 
 -define(LEVELED_BACKEND_OPTS, 
     [{cache_size, 2000},
@@ -183,6 +181,7 @@
     value_v2().
     % Value v1 has been an dgone pre-release, so no backwards compatability has
     % been maintained
+-type fold_fun() :: fun((bucket(), key(), any(), any()) -> any()).
 
 -type value_element() 
     :: {preflist|clock|hash|size|sibcount|indexhash|aae_segment|lmd|md, 
@@ -210,10 +209,9 @@
 %%% API
 %%%============================================================================
 
--spec store_parallelstart(list(),
-                            parallel_stores(),
-                            aae_util:log_levels()|undefined) -> 
-                {ok, {os:timestamp()|never, boolean()}, pid()}.
+-spec store_parallelstart(
+    list(), parallel_stores(), aae_util:log_levels()|undefined) ->
+        {ok, {erlang:timestamp()|never, boolean()}, pid()}.
 %% @doc
 %% Start a store to be run in parallel mode
 store_parallelstart(Path, leveled_so, LogLevels) ->
@@ -239,9 +237,9 @@ store_parallelstart(Path, leveled_ko, LogLevels) ->
     {ok, Pid} = gen_fsm:start_link(?MODULE, [Opts], []),
     store_startupdata(Pid).
 
--spec store_nativestart(list(), native_stores(), pid(),
-                        aae_util:log_levels()|undefined) ->
-                {ok, {os:timestamp()|never, boolean()}, pid()}.
+-spec store_nativestart(
+    list(), native_stores(), pid(), aae_util:log_levels()|undefined) ->
+        {ok, {erlang:timestamp()|never, boolean()}, pid()}.
 %% @doc
 %% Start a keystore in native mode.  In native mode the store is just a pass
 %% through for queries - and there will be no puts
@@ -255,7 +253,7 @@ store_nativestart(Path, NativeStoreType, BackendPid, LogLevels) ->
 
 
 -spec store_startupdata(pid()) ->
-                {ok, {os:timestamp()|never, boolean()}, pid()}.
+        {ok, {erlang:timestamp()|never, boolean()}, pid()}.
 %% @doc
 %% Get the startup metadata from the store
 store_startupdata(Pid) ->
@@ -348,8 +346,8 @@ store_currentstatus(Pid) ->
                     segment_limiter(),
                     modified_limiter(),
                     count_limiter(),
-                    fun(), any(), 
-                    list(value_element())) -> any()|{async, fun()}.
+                    fold_fun(), any(), 
+                    list(value_element())) -> any()|{async, fun(() -> any())}.
 %% @doc
 %% Return a fold function to asynchronously run a fold over a snapshot of the
 %% store
@@ -363,8 +361,8 @@ store_fold(Pid, RLimiter, SLimiter, LMDLimiter, MaxObjectCount,
                             infinity).
 
 
--spec store_fetchclock(pid(), binary(), binary())
-                                            -> aae_controller:version_vector().
+-spec store_fetchclock(
+    pid(), binary(), binary()) -> aae_controller:version_vector().
 %% @doc
 %% Return the clock of a given Bucket and Key
 store_fetchclock(Pid, Bucket, Key) ->
@@ -694,11 +692,14 @@ generate_treesegment(SegmentID) ->
     Seg32_int = leveled_tictac:keyto_segment32(SegmentID),
     leveled_tictac:get_segment(Seg32_int, ?TREE_SIZE).
 
--spec generate_value(tuple(), integer(), 
-                        aae_controller:version_vector(), integer(), 
-                        {integer(), integer(), integer(), 
-                            list(os:timestamp())|undefined, metadata()})
-                                                        -> value_v2().
+-spec generate_value(
+    tuple(),
+    integer(),
+    aae_controller:version_vector(),
+    integer(), 
+    {integer(), integer(), integer(),
+            list(erlang:timestamp())|undefined, metadata()})
+        -> value_v2().
 %% @doc
 %% Create a value based on the current active version number
 %% Currently the "head" is ignored.  This may be changed to support other 
@@ -723,8 +724,10 @@ generate_value(PreflistID, SegTS_int, Clock, Hash,
 %% These value functions will change between native and parallel stores
 
 
--spec value(parallel|native, {atom(), fun()|null}, {bucket(), key(), value()})
-                                                                    -> any().
+-spec value(
+    parallel|native,
+    {atom(), fun((bucket(), key()) -> any())|null},
+    {bucket(), key(), value()}) -> any().
 %% @doc
 %% Return the value referenced by the secend input from the tuple containing
 %% {Bucket, Key, Value}.  For the parallel store this should be a straight 
@@ -845,8 +848,8 @@ maybe_trim(StoreType, TrimCount, Store) ->
     end.
             
 
--spec fold_elements_fun(fun(), list(value_element()), native|parallel) 
-                                                                    -> fun().
+-spec fold_elements_fun(
+    fold_fun(), list(value_element()), native|parallel) -> fold_fun().
 %% @doc
 %% Add a filter to the Fold Objects Fun so that the passed in fun sees a tuple
 %% whose elements are the requested elements passed in, rather than the actual
@@ -1004,7 +1007,7 @@ do_fetchclock(leveled_so, Store, Bucket, Key, Seg) ->
     Folder().
 
 
--spec bucket_list(parallel_stores(), pid()) -> {async, fun()}.
+-spec bucket_list(parallel_stores(), pid()) -> {async, fun(() -> any())}.
 %% @doc
 %% List buckets in backend - using fast skipping method native to leveled if
 %% the backend is key-ordered.
@@ -1027,11 +1030,16 @@ bucket_list(leveled_nko, Store) ->
     leveled_bookie:book_bucketlist(Store, ?RIAK_TAG, {FoldFun, []}, all).
 
 
--spec do_fold(parallel_stores(), pid(), 
-                        range_limiter(), segment_limiter(),
-                        modified_limiter(), count_limiter(),
-                        fun(), any(),
-                        list(value_element())) -> {async, fun()}.
+-spec do_fold(
+    parallel_stores(),
+    pid(),
+    range_limiter(),
+    segment_limiter(),
+    modified_limiter(),
+    count_limiter(),
+    fold_fun(),
+    any(),
+    list(value_element())) -> {async, fun(() -> any())}.
 %% @doc
 %% Fold over the store applying FoldObjectsFun to each object and the 
 %% accumulator.  The store can be limited by a list of segments or a list
@@ -1234,7 +1242,7 @@ clear_pendingpath(Manifest, RootPath) ->
             Manifest#manifest{pending_guid = undefined}
     end.
 
--spec disklog_filename(string(), string()) -> filename:filename().
+-spec disklog_filename(string(), string()) -> file:filename_all().
 disklog_filename(RootPath, GUID) ->
     filename:join(RootPath, GUID ++ ?DISKLOG_EXT).
 
@@ -1276,6 +1284,7 @@ logs() ->
 
 -ifdef(TEST).
 
+-include_lib("eunit/include/eunit.hrl").
 
 store_fold(Pid, RLimiter, SLimiter, FoldObjectsFun, InitAcc, Elements) ->
     store_fold(Pid, RLimiter, SLimiter, all, false, 
