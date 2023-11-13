@@ -126,7 +126,7 @@ backend_delete(Vnode, Bucket, Key, IndexN) ->
 %% time and trigger a rebuild.  As well as the next rebuild time the response
 %$ includes if a rebuild is currently in progress
 rebuild(Vnode, ForceRebuild) ->
-    gen_server:call(Vnode, {rebuild, ForceRebuild}, 60000).
+    gen_server:call(Vnode, {rebuild, ForceRebuild}).
 
 -spec rebuild_complete(pid(), store|tree) -> ok.
 %% @doc
