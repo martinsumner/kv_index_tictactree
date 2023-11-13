@@ -76,13 +76,15 @@
 
 
 -type r_object() :: #r_object{}.
--type preflist_fun() :: null|fun().
+-type preflist_fun() :: null|fun((term(), term()) -> non_neg_integer()).
+-type fold_objects_fun() :: fun((term(), term(), term(), term()) -> term()).
+-type folder() :: fun(() -> term()).
 
 %%%============================================================================
 %%% API
 %%%============================================================================
 
--spec open(list(), atom(), list(tuple()), fun()|null) -> {ok, pid()}.
+-spec open(list(), atom(), list(tuple()), preflist_fun()|null) -> {ok, pid()}.
 %% @doc
 %% Open a mock vnode
 open(Path, AAEType, IndexNs, PreflistFun) ->
@@ -140,8 +142,8 @@ rehash(Vnode, Bucket, Key, IndexN) ->
 
 -spec fold_aae(pid(), 
                 aae_keystore:range_limiter(), aae_keystore:segment_limiter(),
-                fun(), any(), 
-                list(aae_keystore:value_element())) -> {async, fun()}.
+                fold_objects_fun(), any(), 
+                list(aae_keystore:value_element())) -> {async, folder()}.
 %% @doc
 %% Fold over the heads in the aae store (which may be the key store when 
 %% running in native mode)
