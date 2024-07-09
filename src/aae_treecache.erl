@@ -5,8 +5,7 @@
 
 -behaviour(gen_server).
 
--include("include/aae.hrl").
-
+-include("../include/aae.hrl").
 
 -export([
             init/1,
@@ -182,13 +181,18 @@ init([Opts]) ->
         end,
     aae_util:log("C0005", [IsRestored, PartitionID], logs(), LogLevels),
     process_flag(trap_exit, true),
-    {ok, #state{save_sqn = SaveSQN, 
-                tree = StartTree, 
-                is_restored = IsRestored,
-                root_path = RootPath0,
-                partition_id = PartitionID,
-                log_levels = LogLevels,
-                safe_save = IsRestored or IgnoreDisk}}.
+    {ok,
+        #state{
+            save_sqn = SaveSQN, 
+            tree = StartTree, 
+            is_restored = IsRestored,
+            root_path = RootPath0,
+            partition_id = PartitionID,
+            log_levels = LogLevels,
+            safe_save = IsRestored or IgnoreDisk
+        },
+        hibernate
+    }.
     
 
 handle_call(is_restored, _From, State) ->
@@ -210,11 +214,14 @@ handle_call(close, _From, State) ->
     {stop, normal, ok, State}.
 
 handle_cast({alter, Key, CurrentHash, OldHash}, State) ->
-    {Tree0, Segment} = leveled_tictac:add_kv(State#state.tree, 
-                                                Key, 
-                                                {CurrentHash, OldHash}, 
-                                                fun binary_extractfun/2,
-                                                true),
+    {Tree0, Segment} =
+        leveled_tictac:add_kv(
+            State#state.tree,
+            Key,
+            {CurrentHash, OldHash},
+            fun binary_extractfun/2,
+            true
+        ),
     State0 = 
         case State#state.loading of
             true ->
@@ -235,19 +242,20 @@ handle_cast({alter, Key, CurrentHash, OldHash}, State) ->
 handle_cast(start_load, State=#state{loading=Loading}) 
                                                     when Loading == false ->
     {noreply, 
-        State#state{loading = true, 
-                    change_queue = [],
-                    queued_changes = 0,
-                    dirty_segments = [], 
-                    active_fold = undefined}};
+        State#state{
+            loading = true, 
+            change_queue = [],
+            queued_changes = 0,
+            dirty_segments = [], 
+            active_fold = undefined
+        }
+    };
 handle_cast({complete_load, Tree}, State=#state{loading=Loading}) 
                                                     when Loading == true ->
     LoadFun = 
         fun({Key, CH, OH}, AccTree) ->
-            leveled_tictac:add_kv(AccTree, 
-                                    Key, 
-                                    {CH, OH}, 
-                                    fun binary_extractfun/2)
+            leveled_tictac:add_kv(
+                AccTree, Key, {CH, OH}, fun binary_extractfun/2)
         end,
     Tree0 = lists:foldr(LoadFun, Tree, State#state.change_queue),
     aae_util:log("C0008",
@@ -255,11 +263,15 @@ handle_cast({complete_load, Tree}, State=#state{loading=Loading})
                     logs(),
                     State#state.log_levels),
     {noreply,
-        State#state{loading = false,
-                    change_queue = [],
-                    queued_changes = 0,
-                    tree = Tree0,
-                    safe_save = true}};
+        State#state{
+            loading = false,
+            change_queue = [],
+            queued_changes = 0,
+            tree = Tree0,
+            safe_save = true
+        },
+        hibernate
+    };
 handle_cast({mark_dirtysegments, SegmentList, FoldGUID}, State) ->
     case State#state.loading of 
         true ->
