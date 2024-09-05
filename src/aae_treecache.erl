@@ -5,7 +5,7 @@
 
 -behaviour(gen_server).
 
--include("aae.hrl").
+-include("include/aae.hrl").
 
 -export([
             init/1,
@@ -14,7 +14,7 @@
             handle_info/2,
             terminate/2,
             code_change/3,
-            format_status/2]).
+            format_status/1]).
 
 -export([cache_open/3,
             cache_new/3,
@@ -42,7 +42,7 @@
                 loading = false :: boolean(),
                 dirty_segments = [] :: list(),
                 active_fold :: string()|undefined,
-                change_queue = [] :: list()|not_logged,
+                change_queue = [] :: list()|redacted,
                 queued_changes = 0 :: non_neg_integer(),
                 log_levels :: aae_util:log_levels()|undefined,
                 safe_save = false :: boolean()}).
@@ -318,10 +318,18 @@ handle_cast({log_levels, LogLevels}, State) ->
 handle_info(_Info, State) ->
     {stop, normal, State}.
 
-format_status(normal, [_PDict, State]) ->
-    State;
-format_status(terminate, [_PDict, State]) ->
-    State#state{change_queue = not_logged}.
+format_status(Status) ->
+    case maps:get(reason, Status, normal) of
+        terminate ->
+            State = maps:get(state, Status),
+            maps:update(
+                state,
+                State#state{change_queue = redacted},
+                Status
+            );
+        _ ->
+            Status
+    end.
 
 
 terminate(_Reason, _State) ->
@@ -601,16 +609,19 @@ corrupt_save_tester() ->
     aae_util:clean_subdir(RootPath).
 
 format_status_test() ->
-    RootPath = "test/foratstatus/",
+    RootPath = "test/formatstatus/",
     PartitionID = 99,
     aae_util:clean_subdir(RootPath ++ "/" ++ integer_to_list(PartitionID)),
     {ok, C0} = cache_new(RootPath, PartitionID, undefined),
-    {status, C0, {module, gen_server}, SItemL} = sys:get_status(C0),
-    S = lists:keyfind(state, 1, lists:nth(5, SItemL)),
+    {status, _C0, {module, gen_server}, SItemL} = sys:get_status(C0),
+    {data,[{"State", S}]} = lists:nth(3, lists:nth(5, SItemL)),
     ?assert(is_list(S#state.change_queue)),
-    ST = format_status(terminate, [dict:new(), S]),
-    ?assertMatch(not_logged, ST#state.change_queue),
-
+    RedactedStatus = format_status(#{reason => terminate, state => S}),
+    RST = maps:get(state, RedactedStatus),
+    ?assertMatch(redacted, RST#state.change_queue),
+    NormStatus = format_status(#{reason => normal, state => S}),
+    NST = maps:get(state, NormStatus),
+    ?assert(is_list(NST#state.change_queue)),
     ok = cache_destroy(C0).
 
 simple_test() ->
