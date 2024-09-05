@@ -3,12 +3,10 @@ name: Erlang CI
 on:
   push:
     branches:
-    - develop-3.1
-    - develop-3.0
+    - develop-3.4
   pull_request:
     branches:
-    - develop-3.1
-    - develop-3.0
+    - develop-3.4
 
 jobs:
 
@@ -17,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
 
     container:
-      image: erlang:22.3.3
+      image: erlang:26.2.4
 
     steps:
     - uses: actions/checkout@v2
