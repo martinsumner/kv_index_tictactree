@@ -44,7 +44,7 @@
                 active_fold :: string()|undefined,
                 change_queue = [] :: list()|redacted,
                 queued_changes = 0 :: non_neg_integer(),
-                log_levels :: aae_util:log_levels()|undefined,
+                log_levels :: aae_util:log_levels(),
                 safe_save = false :: boolean()}).
 
 -type partition_id() :: integer()|{integer(), integer()}.
@@ -54,8 +54,8 @@
 %%% API
 %%%============================================================================
 
--spec cache_open(list(), partition_id(), aae_util:log_levels()|undefined)
-                                                        -> {boolean(), pid()}.
+-spec cache_open(
+    list(), partition_id(), aae_util:log_levels()) -> {boolean(), pid()}.
 %% @doc
 %% Open a tree cache, using any previously saved one for this tree cache as a 
 %% starting point.  Return is_empty boolean as true to indicate if a new cache 
@@ -68,8 +68,8 @@ cache_open(RootPath, PartitionID, LogLevels) ->
     IsRestored = gen_server:call(Pid, is_restored, infinity),
     {IsRestored, Pid}.
 
--spec cache_new(list(), partition_id(), aae_util:log_levels()|undefined)
-                                                        -> {ok, pid()}.
+-spec cache_new(
+    list(), partition_id(), aae_util:log_levels()) -> {ok, pid()}.
 %% @doc
 %% Open a tree cache, without restoring from file
 cache_new(RootPath, PartitionID, LogLevels) ->
@@ -179,7 +179,7 @@ init([Opts]) ->
                     ?START_SQN, 
                     false}
         end,
-    aae_util:log("C0005", [IsRestored, PartitionID], logs(), LogLevels),
+    aae_util:log(c0005, [IsRestored, PartitionID], LogLevels),
     process_flag(trap_exit, true),
     {ok,
         #state{
@@ -258,10 +258,9 @@ handle_cast({complete_load, Tree}, State=#state{loading=Loading})
                 AccTree, Key, {CH, OH}, fun binary_extractfun/2)
         end,
     Tree0 = lists:foldr(LoadFun, Tree, State#state.change_queue),
-    aae_util:log("C0008",
-                    [length(State#state.change_queue)],
-                    logs(),
-                    State#state.log_levels),
+    aae_util:log(
+        c0008, [length(State#state.change_queue)], State#state.log_levels
+    ),
     {noreply,
         State#state{
             loading = false,
@@ -286,10 +285,11 @@ handle_cast({replace_dirtysegments, SegmentMap, FoldGUID}, State) ->
         fun({SegID, NewHash}, TreeAcc) ->
             case lists:member(SegID, State#state.dirty_segments) of 
                 true ->
-                    aae_util:log("C0006", 
-                                    [State#state.partition_id, SegID, NewHash],
-                                    logs(),
-                                    State#state.log_levels),
+                    aae_util:log(
+                        c0006,
+                        [State#state.partition_id, SegID, NewHash],
+                        State#state.log_levels
+                    ),
                     leveled_tictac:alter_segment(SegID, NewHash, TreeAcc);
                 false ->
                     TreeAcc
@@ -306,10 +306,7 @@ handle_cast({replace_dirtysegments, SegmentMap, FoldGUID}, State) ->
             {noreply, State}
     end;
 handle_cast(destroy, State) ->
-    aae_util:log("C0004",
-                    [State#state.partition_id],
-                    logs(),
-                    State#state.log_levels),
+    aae_util:log(c0004, [State#state.partition_id], State#state.log_levels),
     {stop, normal, State};
 handle_cast({log_levels, LogLevels}, State) ->
     {noreply, State#state{log_levels = LogLevels}}.
@@ -351,10 +348,9 @@ flatten_id({Index, N}) ->
 flatten_id(ID) ->
     integer_to_list(ID).
 
--spec save_to_disk(list(),
-                    integer(),
-                    leveled_tictac:tictactree(),
-                    aae_util:log_levels()|undefined) -> ok.
+-spec save_to_disk(
+    list(), integer(), leveled_tictac:tictactree(), aae_util:log_levels())
+        -> ok.
 %% @doc
 %% Save the TreeCache to disk, with a checksum so thatit can be 
 %% validated on read.
@@ -363,15 +359,16 @@ save_to_disk(RootPath, SaveSQN, TreeCache, LogLevels) ->
     CRC32 = erlang:crc32(Serialised),
     ok = filelib:ensure_dir(RootPath),
     PendingName = integer_to_list(SaveSQN) ++ ?PENDING_EXT,
-    aae_util:log("C0003", [RootPath, PendingName], logs(), LogLevels),
+    aae_util:log(c0003, [RootPath, PendingName], LogLevels),
     ok = file:write_file(filename:join(RootPath, PendingName),
                             <<CRC32:32/integer, Serialised/binary>>,
                             [raw]),
     file:rename(filename:join(RootPath, PendingName), 
                     form_cache_filename(RootPath, SaveSQN)).
 
--spec open_from_disk(list(), aae_util:log_levels()|undefined)
-                            -> {leveled_tictac:tictactree()|none, integer()}.
+-spec open_from_disk(
+    list(), aae_util:log_levels())
+        -> {leveled_tictac:tictactree()|none, integer()}.
 %% @doc
 %% Open most recently saved TicTac tree cache file on disk, deleting all 
 %% others both used and unused - to save an out of date tree from being used
@@ -383,7 +380,7 @@ open_from_disk(RootPath, LogLevels) ->
         fun(FN, FinalFiles) ->
             case filename:extension(FN) of 
                 ?PENDING_EXT ->
-                    aae_util:log("C0001", [FN], logs(), LogLevels),
+                    aae_util:log(c0001, [FN], LogLevels),
                     ok = file:delete(filename:join(RootPath, FN)),
                     FinalFiles;
                 ?FINAL_EXT ->
@@ -412,7 +409,7 @@ open_from_disk(RootPath, LogLevels) ->
                     {leveled_tictac:import_tree(binary_to_term(STC)), 
                         HeadSQN +  1};
                 {error, Reason} ->
-                    aae_util:log("C0002", [FileToUse, Reason], logs(), LogLevels),
+                    aae_util:log(c0002, [FileToUse, Reason], LogLevels),
                     {none, 1}
             end
     end.
@@ -452,24 +449,6 @@ binary_extractfun(Key, {CurrentHash, OldHash}) ->
                 OldHash bxor AltHash
         end,
     {Key, {is_hash, CurrentHash bxor RemoveH}}.
-
-%%%============================================================================
-%%% log definitions
-%%%============================================================================
-
--spec logs() -> list(tuple()).
-%% @doc
-%% Define log lines for this module
-logs() ->
-    [{"C0001", {info, "Pending filename ~s found and will delete"}},
-        {"C0002", {warn, "File ~w opened with error=~w so will be ignored"}},
-        {"C0003", {info, "Saving tree cache to path ~s and filename ~s"}},
-        {"C0004", {info, "Destroying tree cache for partition ~w"}},
-        {"C0005", {info, "Starting cache with is_restored=~w and IndexN of ~w"}},
-        {"C0006", {debug, "Altering segment for PartitionID=~w ID=~w Hash=~w"}},
-        {"C0007", {warn, "Treecache exiting after trapping exit from Pid=~w"}},
-        {"C0008", {info, "Complete load of tree with length of change_queue=~w"}},
-        {"C0009", {info, "During cache rebuild reached length of change_queue=~w"}}].
 
 %%%============================================================================
 %%% Test

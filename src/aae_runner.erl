@@ -22,7 +22,7 @@
                 query_count = 0 :: integer(),
                 query_time  = 0 :: integer(),
                 aae_controller :: pid()|undefined,
-                log_levels :: aae_util:log_levels()|undefined}).
+                log_levels :: aae_util:log_levels()}).
 
 -define(LOG_FREQUENCY, 10).
 
@@ -33,7 +33,7 @@
 %%%============================================================================
 
 
--spec runner_start(aae_util:log_levels()|undefined) -> {ok, pid()}.
+-spec runner_start(aae_util:log_levels()) -> {ok, pid()}.
 %% @doc
 %% Start an AAE runner to manage folds 
 runner_start(LogLevels) ->
@@ -70,13 +70,12 @@ handle_cast({work, Folder, ReturnFun, SizeFun}, State) ->
     State0 =
         try Folder() of
             query_backlog ->
-                aae_util:log("R0002", [], logs(), State#state.log_levels),
+                aae_util:log(r0002, [], State#state.log_levels),
                 ReturnFun({error, query_backlog}),
                 State;
             Results ->
                 QueryTime = timer:now_diff(os:timestamp(), SW),
-                aae_util:log("R0003", [QueryTime], logs(),
-                                State#state.log_levels),
+                aae_util:log(r0003, [QueryTime], State#state.log_levels),
                 RS0 = State#state.result_size + SizeFun(Results),
                 QT0 = State#state.query_time + QueryTime,
                 QC0 = State#state.query_count + 1,
@@ -91,15 +90,14 @@ handle_cast({work, Folder, ReturnFun, SizeFun}, State) ->
                             query_count = QC1}
         catch
             Error:Pattern ->
-                aae_util:log("R0005", [Error, Pattern], logs(),
-                                State#state.log_levels),
+                aae_util:log(r0005, [Error, Pattern], State#state.log_levels),
                 ReturnFun({error, Error}),
                 State
         end,
     {noreply, State0, 0}.
 
 handle_info(timeout, State) ->
-    aae_util:log("R0004", [], logs(), State#state.log_levels),
+    aae_util:log(r0004, [], State#state.log_levels),
     ok = aae_controller:aae_runnerprompt(State#state.aae_controller),
     {noreply, State}.
 
@@ -121,32 +119,8 @@ code_change(_OldVsn, State, _Extra) ->
 maybe_log(RS_Acc, QT_Acc, QC_Acc, LogFreq, _LogLs) when QC_Acc < LogFreq ->
     {RS_Acc, QT_Acc, QC_Acc};
 maybe_log(RS_Acc, QT_Acc, QC_Acc, _LogFreq, LogLs) ->
-    aae_util:log("R0001", [RS_Acc, QT_Acc, QC_Acc], logs(), LogLs),
+    aae_util:log(r0001, [RS_Acc, QT_Acc, QC_Acc], LogLs),
     {0, 0, 0}.
-
-
-%%%============================================================================
-%%% log definitions
-%%%============================================================================
-
--spec logs() -> list(tuple()).
-%% @doc
-%% Define log lines for this module
-logs() ->
-    [{"R0001", 
-            {info, "AAE fetch clock runner has seen results=~w " ++ 
-                    "query_time=~w for a query_count=~w queries"}},
-        {"R0002",
-            {info, "Query backlog resulted in dummy fold"}},
-        {"R0003",
-            {debug, "Query complete in time ~w"}},
-        {"R0004",
-            {debug, "Prompting controller"}},
-        {"R0005",
-            {warn, "Query lead to error ~w pattern ~w"}}
-    
-    ].
-
 
 %%%============================================================================
 %%% Test

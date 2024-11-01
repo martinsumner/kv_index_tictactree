@@ -79,7 +79,7 @@
                 load_guid :: list()|undefined,
                 backend_opts = [] :: list(),
                 trim_count = 0 :: integer(),
-                log_levels :: aae_util:log_levels()|undefined}).
+                log_levels :: aae_util:log_levels()}).
 
 -record(manifest, {current_guid :: list()|undefined, 
                     pending_guid :: list()|undefined, 
@@ -210,7 +210,7 @@
 %%%============================================================================
 
 -spec store_parallelstart(
-    list(), parallel_stores(), aae_util:log_levels()|undefined) ->
+    list(), parallel_stores(), aae_util:log_levels()) ->
         {ok, {erlang:timestamp()|never, boolean()}, pid()}.
 %% @doc
 %% Start a store to be run in parallel mode
@@ -238,7 +238,7 @@ store_parallelstart(Path, leveled_ko, LogLevels) ->
     store_startupdata(Pid).
 
 -spec store_nativestart(
-    list(), native_stores(), pid(), aae_util:log_levels()|undefined) ->
+    list(), native_stores(), pid(), aae_util:log_levels()) ->
         {ok, {erlang:timestamp()|never, boolean()}, pid()}.
 %% @doc
 %% Start a keystore in native mode.  In native mode the store is just a pass
@@ -436,10 +436,9 @@ loading({mload, ObjectSpecs}, _From, State) ->
         LoadCount1 div ?CHANGEQ_LOGFREQ > LoadCount0 div ?CHANGEQ_LOGFREQ,
     case ToLog of 
         true ->
-            aae_util:log("KS004",
-                            [State#state.id, LoadCount1],
-                            logs(),
-                            State#state.log_levels);
+            aae_util:log(
+                ks004, [State#state.id, LoadCount1], State#state.log_levels
+            );
         false ->
             ok
     end,
@@ -502,20 +501,19 @@ loading({mput, ObjectSpecs}, State) ->
         ObjectCount1 div ?CHANGEQ_LOGFREQ > ObjectCount0 div ?CHANGEQ_LOGFREQ,
     case ToLog of 
         true ->
-            aae_util:log("KS001",
-                            [State#state.id, ObjectCount1],
-                            logs(),
-                            State#state.log_levels);
+            aae_util:log(
+                ks001, [State#state.id, ObjectCount1], State#state.log_levels
+            );
         false ->
             ok
     end,
     {next_state, loading, State#state{change_queue_counter = ObjectCount1}};
 loading({prompt, rebuild_complete}, State) ->
-    aae_util:log("KS008",
-                    [State#state.change_queue_counter,
-                        State#state.load_counter],
-                    logs(),
-                    State#state.log_levels),
+    aae_util:log(
+        ks008,
+        [State#state.change_queue_counter, State#state.load_counter],
+        State#state.log_levels
+    ),
     store_prompt(self(), queue_complete),
     {next_state,
         loading,
@@ -530,10 +528,9 @@ loading({prompt, queue_complete}, State) ->
             GUID = State#state.load_guid,
             LoadStore = State#state.load_store,
             LastRebuild = os:timestamp(),
-            aae_util:log("KS007",
-                    [rebuild_complete, GUID],
-                    logs(),
-                    State#state.log_levels),
+            aae_util:log(
+                ks007, [rebuild_complete, GUID], State#state.log_levels
+            ),
             ok = store_manifest(State#state.root_path, 
                                 #manifest{current_guid = GUID,
                                             last_rebuild = LastRebuild},
@@ -567,10 +564,7 @@ parallel({mput, ObjectSpecs}, State) ->
     {next_state, parallel, State#state{trim_count = TrimCount}};
 parallel({prompt, rebuild_start}, State) ->
     GUID = leveled_util:generate_uuid(),
-    aae_util:log("KS007",
-                    [rebuild_start, GUID],
-                    logs(),
-                    State#state.log_levels),
+    aae_util:log(ks007,[rebuild_start, GUID], State#state.log_levels),
     {ok, Store} =  open_store(State#state.store_type, 
                                 State#state.backend_opts, 
                                 State#state.root_path, 
@@ -591,18 +585,12 @@ parallel({prompt, rebuild_start}, State) ->
 
 native({prompt, rebuild_start}, State) ->
     GUID = leveled_util:generate_uuid(),
-    aae_util:log("KS007",
-                    [rebuild_start, GUID],
-                    logs(),
-                    State#state.log_levels),
+    aae_util:log(ks007, [rebuild_start, GUID], State#state.log_levels),
     
     {next_state, native, State#state{current_guid = GUID}};
 native({prompt, rebuild_complete}, State) ->
     GUID = State#state.current_guid,
-    aae_util:log("KS007",
-                    [rebuild_complete, GUID],
-                    logs(),
-                    State#state.log_levels),
+    aae_util:log(ks007, [rebuild_complete, GUID], State#state.log_levels),
     LastRebuild = os:timestamp(),
     ok = store_manifest(State#state.root_path, 
                         #manifest{current_guid = GUID,
@@ -1188,8 +1176,7 @@ range_check(_Range, _B, _K) ->
     false.
 
 
--spec open_manifest(list(), aae_util:log_levels()|undefined)
-                                                    -> {ok, manifest()}|false.
+-spec open_manifest(list(), aae_util:log_levels()) -> {ok, manifest()}|false.
 %% @doc
 %% Open the manifest file, check the CRC and return the active folder 
 %% reference
@@ -1198,26 +1185,19 @@ open_manifest(RootPath, LogLevels) ->
     case aae_util:safe_open(FN) of
         {ok, BinaryContents} ->
             M = binary_to_term(BinaryContents),
-            aae_util:log("KS005",
-                            [M#manifest.current_guid],
-                            logs(),
-                            LogLevels),
+            aae_util:log(ks005,[M#manifest.current_guid], LogLevels),
             {ok, M};
         {error, Reason} ->
-            aae_util:log("KS002",
-                            [RootPath, Reason],
-                            logs(),
-                            LogLevels),
+            aae_util:log(ks002, [RootPath, Reason], LogLevels),
             false
     end.
             
--spec store_manifest(list(), manifest(), aae_util:log_levels()|undefined)
-                                                                        -> ok.
+-spec store_manifest(list(), manifest(), aae_util:log_levels()) -> ok.
 %% @doc
 %% Store tham manifest file, adding a CRC, and ensuring it is readable before
 %% returning
 store_manifest(RootPath, Manifest, LogLevels) ->
-    aae_util:log("KS003", [Manifest#manifest.current_guid], logs(), LogLevels),
+    aae_util:log(ks003, [Manifest#manifest.current_guid], LogLevels),
     ManBin = term_to_binary(Manifest),
     CRC32 = erlang:crc32(ManBin),
     PFN = filename:join(RootPath, ?MANIFEST_FN ++ ?PENDING_EXT),
@@ -1238,7 +1218,7 @@ clear_pendingpath(Manifest, RootPath) ->
             Manifest;
         GUID ->
             PendingPath = filename:join(RootPath, GUID),
-            aae_util:log("KS006", [PendingPath], logs()),
+            aae_util:log(ks006, [PendingPath]),
             Manifest#manifest{pending_guid = undefined}
     end.
 
@@ -1246,36 +1226,6 @@ clear_pendingpath(Manifest, RootPath) ->
 disklog_filename(RootPath, GUID) ->
     filename:join(RootPath, GUID ++ ?DISKLOG_EXT).
 
-
-%%%============================================================================
-%%% log definitions
-%%%============================================================================
-
--spec logs() -> list(tuple()).
-%% @doc
-%% Define log lines for this module
-logs() ->
-    [{"KS001", 
-            {info, "Key Store loading with id=~w has reached " 
-                    ++ "deferred count=~w"}},
-        {"KS002",
-            {warn, "No valid manifest found for AAE keystore at ~s "
-                    ++ "reason ~s"}},
-        {"KS003",
-            {info, "Storing manifest with current GUID ~s"}},
-        {"KS004", 
-            {info, "Key Store building with id=~w has reached " 
-                    ++ "loaded_count=~w"}},
-        {"KS005",
-            {info, "Clean opening of manifest with current GUID ~s"}},
-        {"KS006",
-            {warn, "Pending store is garbage and should be deleted at ~s"}},
-        {"KS007",
-            {info, "Rebuild prompt ~w with GUID ~s"}},
-        {"KS008",
-            {info, "Rebuild queue load backlog_items=~w loaded_count=~w"}}
-
-        ].
 
 
 %%%============================================================================
@@ -1325,7 +1275,7 @@ bad_manifest_test() ->
     ?assertMatch(false, open_manifest(RootPath, undefined)),
     Manifest = #manifest{current_guid = "aaa-111"},
     ok = store_manifest(RootPath, Manifest, undefined),
-    ?assertMatch({ok, Manifest}, open_manifest(RootPath, [])),
+    ?assertMatch({ok, Manifest}, open_manifest(RootPath, [info])),
     ManifestFN = filename:join(RootPath, ?MANIFEST_FN ++ ?COMLPETE_EXT),
     {ok, Bin0} = file:read_file(ManifestFN),
     Bin1 = aae_util:flip_byte(Bin0, 0, byte_size(Bin0)),
@@ -1334,7 +1284,10 @@ bad_manifest_test() ->
     ?assertMatch(false, open_manifest(RootPath, undefined)),
     ok = file:delete(ManifestFN),
     ok = file:write_file(ManifestFN, Bin0),
-    ?assertMatch({ok, Manifest}, open_manifest(RootPath, [])),
+    ?assertMatch(
+        {ok, Manifest},
+        open_manifest(RootPath, [warning, error, critical])
+    ),
     aae_util:clean_subdir(RootPath).
 
 empty_manifest_test() ->

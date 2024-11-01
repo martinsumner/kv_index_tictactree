@@ -1,6 +1,6 @@
 -module(basic_SUITE).
 -include_lib("common_test/include/ct.hrl").
--export([all/0]).
+-export([all/0, init_per_suite/1, end_per_suite/1]).
 -export([dual_store_compare_medium_so/1,
             dual_store_compare_medium_ko/1,
             dual_store_compare_large_so/1,
@@ -13,8 +13,14 @@ all() -> [dual_store_compare_medium_so,
             dual_store_compare_large_ko,
             store_notsupported
         ].
-    
 
+init_per_suite(Config) ->
+    testutil:init_per_suite([{suite, "basic"}|Config]),
+    Config.
+
+end_per_suite(Config) ->
+    testutil:end_per_suite(Config).
+        
 store_notsupported(_Config) ->
     RootPath = testutil:reset_filestructure(),
     VnodePath1 = filename:join(RootPath, "vnode1/"),

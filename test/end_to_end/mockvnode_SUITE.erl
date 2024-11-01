@@ -1,6 +1,6 @@
 -module(mockvnode_SUITE).
 -include_lib("common_test/include/ct.hrl").
--export([all/0]).
+-export([all/0, init_per_suite/1, end_per_suite/1]).
 -export([coveragefold_nativemedium/1,
             coveragefold_nativesmall/1,
             coveragefold_parallelmedium/1,
@@ -23,9 +23,14 @@ all() -> [
             loadexchangeandrebuild_tuplebucketko
         ].
 
-
 -include("testutil.hrl").
 
+init_per_suite(Config) ->
+    testutil:init_per_suite([{suite, "mockvnode"}|Config]),
+    Config.
+
+end_per_suite(Config) ->
+    testutil:end_per_suite(Config).
 
 loadexchangeandrebuild_stbucketko(_Config) ->
     mock_vnode_loadexchangeandrebuild_tester(false, parallel_ko),

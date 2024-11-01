@@ -7,10 +7,9 @@
 
 -include("include/aae.hrl").
 
--export([log/3,
-            log/4,
+-export([log/2,
+            log/3,
             log_timer/4,
-            log_timer/5,
             get_opt/2,
             get_opt/3,
             make_binarykey/2,
@@ -25,82 +24,162 @@
 -export([get_segmentid/2]).
 -endif.
 
--define(DEFAULT_LOGLEVEL, [info, warn, error, critical]).
--define(DEFAULT_LOGBASE, [
+-define(DEFAULT_LOG_LEVELS, [warning, error, critical]).
 
-    {"G0001",
-        {info, "Generic log point"}},
-    {"G0002",
-        {info, "Generic log point with term ~w"}},
-    {"D0001",
-        {debug, "Generic debug log"}}
-    ]).
-
--define(UNDEFINED_LOG, {"G0003", {info, "Undefined log reference"}}).
-
--type log_level() :: debug|info|warn|error|critical.
--type log_levels() :: list(log_level()).
+-type log_levels() :: list(leveled_log:log_level())|undefined.
 
 -export_type([log_levels/0]).
+
+-define(LOGBASE,
+    #{
+        g0001 => 
+            {info, <<"Generic log point">>},
+        g0002 =>
+            {info, <<"Generic log point with term ~w">>},
+        d0001 =>
+            {debug, <<"Generic debug log">>},
+        aae01 => 
+            {warning,
+                <<
+                    "AAE Key Store rebuild required on startup due to mismatch between vnode store state ~w "
+                    "and AAE key store state of ~w maybe restart with node excluded from coverage "
+                    "queries to improve AAE operation until rebuild is complete"
+                >>
+            },
+        aae02 =>
+            {info, <<"Native KeyStore type ~w startup request">>},
+        aae03 =>
+            {debug,
+                <<"Unexpected Bucket ~w Key ~w passed with IndexN ~w that does not match any of ~w">>
+            },
+        aae04 =>
+            {warning, <<"Misrouted request for IndexN ~w">>},
+        aae06 =>
+            {info, <<"Received rebuild trees request for IndexNs ~w">>},
+        aae07 =>
+            {info, <<"Dispatching test fold">>},
+        aae08 =>
+            {info, <<"Spawned worker receiving test fold">>},
+        aae09 =>
+            {info, <<"Change in IndexNs detected at rebuild - new IndexN ~w">>},
+        aae10 =>
+            {info, <<"AAE controller started with IndexNs ~w and StoreType ~w">>},
+        aae11 =>
+            {info, <<"Next rebuild scheduled for ~w">>},
+        aae12 =>
+            {info, <<"Received rebuild store for parallel store ~w">>},
+        aae13 =>
+            {info, <<"Completed tree rebuild">>},
+        aae14 =>
+            {debug, <<"Mismatch finding unexpected IndexN in fold of ~w">>},
+        aae15 =>
+            {info, <<"Ping showed time difference of ~w ms">>},
+        aae16 =>
+            {info, <<"Keystore ~w when tree rebuild requested">>},
+        aae17 =>
+            {warning, <<"Corrupted object with B=~p K=~p for ~w ~w">>},
+        ex001 => 
+            {info, <<"Exchange id=~s with target_count=~w expected purpose=~w">>},
+        ex002 =>
+            {error, <<"~w with pending_state=~w and missing_count=~w for exchange id=~s purpose=~w">>},
+        ex003 =>
+            {info,
+                <<
+                    "Normal exit for full exchange purpose=~w in_sync=~w pending_state=~w for exchange id=~s "
+                    "scope of mismatched_segments=~w root_compare_loops=~w branch_compare_loops=~w keys_passed_for_repair=~w"
+                >>
+            },
+        ex004 =>
+            {info, <<"Exchange id=~s purpose=~w led to prompting  of repair_count=~w">>},
+        ex005 =>
+            {info, <<"Exchange id=~s throttled count=~w at state=~w">>},
+        ex006 =>
+            {debug, <<"State change to ~w for exchange id=~s">>},
+        ex007 => 
+            {debug, <<"Reply received for colour=~w in exchange id=~s">>},
+        ex008 => 
+            {debug, <<"Comparison between BlueList ~w and PinkList ~w">>},
+        ex009 =>
+            {info, 
+                <<
+                    "Normal exit for full exchange purpose=~w in_sync=~w pending_state=~w for exchange id=~s "
+                    "scope of mismatched_segments=~w tree_compare_loops=~w  keys_passed_for_repair=~w"
+                >>
+            },
+        ex010 =>
+            {warning, <<"Exchange not_supported in exchange id=~s for colour=~w purpose=~w">>},
+        ks001 => 
+            {info, <<"Key Store loading with id=~w has reached deferred count=~w">>},
+        ks002 =>
+            {warning, <<"No valid manifest found for AAE keystore at ~s reason ~s">>},
+        ks003 =>
+            {info, <<"Storing manifest with current GUID ~s">>},
+        ks004 =>
+            {info, <<"Key Store building with id=~w has reached loaded_count=~w">>},
+        ks005 =>
+            {info, <<"Clean opening of manifest with current GUID ~s">>},
+        ks006 =>
+            {warning, <<"Pending store is garbage and should be deleted at ~s">>},
+        ks007 =>
+            {info, <<"Rebuild prompt ~w with GUID ~s">>},
+        ks008 =>
+            {info, <<"Rebuild queue load backlog_items=~w loaded_count=~w">>},
+        r0001 =>
+            {info, <<"AAE fetch clock runner has seen results=~w query_time=~w for a query_count=~w queries">>},
+        r0002 =>
+            {info, <<"Query backlog resulted in dummy fold">>},
+        r0003 =>
+            {debug, <<"Query complete in time ~w">>},
+        r0004 =>
+            {debug, <<"Prompting controller">>},
+        r0005 =>
+            {warning, <<"Query lead to error ~w pattern ~w">>},
+        c0001 =>
+            {info, <<"Pending filename ~s found and will delete">>},
+        c0002 =>
+            {warning, <<"File ~w opened with error=~w so will be ignored">>},
+        c0003 =>
+            {info, <<"Saving tree cache to path ~s and filename ~s">>},
+        c0004 =>
+            {info, <<"Destroying tree cache for partition ~w">>},
+        c0005 =>
+            {info, <<"Starting cache with is_restored=~w and IndexN of ~w">>},
+        c0006 =>
+            {debug, <<"Altering segment for PartitionID=~w ID=~w Hash=~w">>},
+        c0007 =>
+            {warning, <<"Treecache exiting after trapping exit from Pid=~w">>},
+        c0008 =>
+            {info, <<"Complete load of tree with length of change_queue=~w">>},
+        c0009 =>
+            {info, <<"During cache rebuild reached length of change_queue=~w">>}
+
+    }).
+
 
 %%%============================================================================
 %%% External functions
 %%%============================================================================
 
--spec log(list(), list(), list()) -> ok.
+-spec log(atom(), list()) -> term().
 %% @doc
 %% Pick the log out of the logbase based on the reference 
-log(LogReference, Subs, LogBase) ->
-    log(LogReference, Subs, LogBase, ?DEFAULT_LOGLEVEL).
+log(LogReference, Subs) ->
+    log(LogReference, Subs, undefined).
 
-log(LogRef, Subs, LogBase, undefined) ->
-    log(LogRef, Subs, LogBase, ?DEFAULT_LOGLEVEL);
-log(LogRef, Subs, LogBase, SupportedLogLevels) ->
-    {LogRef0, {LogLevel, LogText}} = get_logreference(LogRef, LogBase),
-    case lists:member(LogLevel, SupportedLogLevels) of
-        true ->
-            io:format(format_time() ++ "  log_level="
-                        ++ atom_to_list(LogLevel) ++ " log_ref="
-                        ++ LogRef0 ++ " pid=~w "
-                        ++ LogText ++ "~n",
-                        [self()|Subs]);
-        false ->
-            ok
-    end.
+-spec log(atom(), list(), aae_util:log_levels()) -> term().
+log(LogReference, Subs, undefined) ->
+    log(LogReference, Subs, ?DEFAULT_LOG_LEVELS);
+log(LogReference, Subs, LogLevels) ->
+    leveled_log:log(LogReference, Subs, LogLevels, ?LOGBASE, tictacaae).
 
-
--spec log_timer(list(), list(), tuple(), list()) -> ok.
-%% @doc
-%% Pick the log out of the logbase based on the reference, and also log
-%% the time between the strat time and making the log
-log_timer(LogReference, Subs, StartTime, LogBase) ->
-    log_timer(LogReference, Subs, StartTime, LogBase, ?DEFAULT_LOGLEVEL).
-
-log_timer(LogRef, Subs, StartTime, LogBase, undefined) ->
-    log_timer(LogRef, Subs, StartTime, LogBase, ?DEFAULT_LOGLEVEL);
-log_timer(LogRef, Subs, StartTime, LogBase, SupportedLogLevels) ->
-    {LogRef0, {LogLevel, LogText}} = get_logreference(LogRef, LogBase),
-    case lists:member(LogLevel, SupportedLogLevels) of
-        true ->
-            DurationText =
-                case timer:now_diff(os:timestamp(), StartTime) of
-                    US when US > 1000 ->
-                        " with us_duration=" ++ integer_to_list(US) ++
-                        " or ms_duration="
-                        ++ integer_to_list(US div 1000);
-                    US ->
-                        " with us_duration=" ++ integer_to_list(US)
-                end,
-            io:format(format_time() ++ "  log_level="
-                        ++ atom_to_list(LogLevel) ++ " log_ref="
-                        ++ LogRef0 ++ " pid=~w "
-                        ++ LogText
-                        ++ DurationText ++ "~n",
-                        [self()|Subs]);
-        false ->
-            ok
-    end.
-
+-spec log_timer(
+    atom(), list(), erlang:timestamp(), aae_util:log_levels()) -> term().
+log_timer(LogReference, Subs, StartTime, undefined) ->
+    log_timer(LogReference, Subs, StartTime, ?DEFAULT_LOG_LEVELS);
+log_timer(LogReference, Subs, StartTime, LogLevels) ->
+    leveled_log:log_timer(
+        LogReference, Subs, StartTime, LogLevels, ?LOGBASE, tictacaae
+    ).
 
 -spec get_opt(atom(), list()) -> any().
 %% @doc 
@@ -129,7 +208,7 @@ make_binarykey({Type, Bucket}, Key)
 make_binarykey(Bucket, Key) when is_binary(Bucket), is_binary(Key) ->
     <<Bucket/binary, Key/binary>>.
 
--spec min_loglevel(log_levels()|undefined) -> log_level().
+-spec min_loglevel(aae_util:log_levels()) -> leveled_log:log_level().
 %% @doc
 %% Return the lowest log level to be used in leveled startup
 min_loglevel(undefined) ->
@@ -140,32 +219,6 @@ min_loglevel([MinLevel|_Rest]) ->
 %%%============================================================================
 %%% Internal functions
 %%%============================================================================
-
-get_logreference(LogRef, LogBase) ->
-    case lists:keyfind(LogRef, 1, LogBase) of
-        false ->
-            case lists:keyfind(LogRef, 1, ?DEFAULT_LOGBASE) of
-                false ->
-                    ?UNDEFINED_LOG;
-                Log ->
-                    Log
-            end;
-        Log ->
-            Log 
-    end.
-
-format_time() ->
-    format_time(localtime_ms()).
-
-localtime_ms() ->
-    {_, _, Micro} = Now = os:timestamp(),
-    {Date, {Hours, Minutes, Seconds}} = calendar:now_to_local_time(Now),
-    {Date, {Hours, Minutes, Seconds, Micro div 1000 rem 1000}}.
-
-format_time({{Y, M, D}, {H, Mi, S, Ms}}) ->
-    io_lib:format("~b-~2..0b-~2..0b", [Y, M, D]) ++ "T" ++
-        io_lib:format("~2..0b:~2..0b:~2..0b.~3..0b", [H, Mi, S, Ms]).
-
 
 -spec safe_open(string()) -> {ok, binary()}|{error, atom()}.
 safe_open(FileName) ->
@@ -258,19 +311,6 @@ clean_subdir(DirPath) ->
 get_segmentid(B, K) ->
     Seg32 = leveled_tictac:keyto_segment32(make_binarykey(B, K)),
     leveled_tictac:get_segment(Seg32, ?TREE_SIZE).
-
-log_test() ->
-    log("D0001", [], []),
-    log_timer("G0001", [], os:timestamp(), []).
-
-log_warn_test() ->
-    ok = log("G0001", [], [], [warn, error]),
-    ok = log("G8888", [], [], [info, warn, error]),
-    SW = os:timestamp(),
-    ok = log_timer("G0001", [], SW, [], [warn, error]),
-    ok = log_timer("G8888", [], SW, [], [info, warn, error]),
-    timer:sleep(2),
-    ok = log_timer("G0001", [], SW, [], [info, warn, error]).
 
 flipbyte_test() ->
     Bin0 = <<0:256/integer>>,
