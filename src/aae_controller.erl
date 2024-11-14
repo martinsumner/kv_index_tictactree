@@ -966,20 +966,32 @@ handle_cast({put, IndexN, Bucket, Key, Clock, PrevClock, BinaryObj}, State) ->
     case State0#state.parallel_keystore of 
         true ->
             SegmentID = leveled_tictac:keyto_segment48(BinaryKey),
-            ObjSpec =  generate_objectspec(Bucket, Key, SegmentID, IndexN,
-                                            BinaryObj, 
-                                            Clock, CH, 
-                                            State#state.object_splitfun),
+            ObjSpec =
+                generate_objectspec(
+                    Bucket,
+                    Key,
+                    SegmentID,
+                    IndexN,
+                    BinaryObj, 
+                    Clock,
+                    CH, 
+                    State#state.object_splitfun
+                ),
             UpdSpecL = [ObjSpec|State0#state.objectspecs_queue],
             case length(UpdSpecL) >= ?BATCH_LENGTH of 
                 true ->
                     % Push to the KeyStore as batch is now at least full
-                    maybe_flush_puts(State0#state.key_store,
-                                        UpdSpecL,
-                                        true,
-                                        State#state.block_next_put),
-                    {noreply, State0#state{objectspecs_queue = [],
-                                            block_next_put = false}};
+                    maybe_flush_puts(
+                        State0#state.key_store,
+                        UpdSpecL,
+                        true,
+                        State#state.block_next_put
+                    ),
+                    {
+                        noreply,
+                        State0#state{
+                            objectspecs_queue = [], block_next_put = false}
+                    };
                 false ->
                     {noreply, State0#state{objectspecs_queue = UpdSpecL}}
             end;
@@ -1818,7 +1830,7 @@ put_keys(Cntrl, _Preflists, KeyList, 0) ->
     ok = aae_ping(Cntrl, os:timestamp(), {sync, 10000}),
     KeyList;
 put_keys(Cntrl, Preflists, KeyList, Count) ->
-    Preflist = lists:nth(leveled_rand:uniform(length(Preflists)), Preflists),
+    Preflist = lists:nth(rand:uniform(length(Preflists)), Preflists),
     Bucket = integer_to_binary(Count rem 5),  
     Key = list_to_binary(string:right(integer_to_list(Count), 6, $0)),
     VersionVector = add_randomincrement([]),
@@ -1848,9 +1860,15 @@ remove_keys(Cntrl, [{B, K, C, PL}|Rest]) ->
     remove_keys(Cntrl, Rest).
 
 add_randomincrement(Clock) ->
-    RandIncr = leveled_rand:uniform(100),
-    RandNode = lists:nth(leveled_rand:uniform(9), 
-                            ["a", "b", "c", "d", "e", "f", "g", "h", "i"]),
+    RandIncr = rand:uniform(100),
+    RandNode =
+        lists:nth(
+            rand:uniform(9), 
+            [
+                <<"a">>, <<"b">>, <<"c">>, <<"d">>, <<"e">>,
+                <<"f">>, <<"g">>, <<"h">>, <<"i">>
+            ]
+        ),
     UpdClock = 
         case lists:keytake(RandNode, 1, Clock) of 
             false ->

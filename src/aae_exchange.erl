@@ -295,7 +295,6 @@ reply(Exchange, Result, Colour) ->
 
 init([{Type, Filters},
         BlueList, PinkList, RepairFun, ReplyFun, ExChID, Opts]) ->
-    leveled_rand:seed(),
     PinkTarget = length(PinkList),
     BlueTarget = length(BlueList),
     State = #state{blue_list = BlueList, 
@@ -1014,7 +1013,7 @@ select_ids(IDList, MaxOutput, StateName, ExchangeID, LogLevels)
     Selections = 
         lists:sublist(lists:sort(SpaceIdxL), MaxOutput),
     {_ChosenSpace, ChosenIdx} =
-        lists:nth(leveled_rand:uniform(length(Selections)), Selections),
+        lists:nth(rand:uniform(length(Selections)), Selections),
     lists:sublist(IDList0, ChosenIdx, MaxOutput);
 select_ids(IDList, _MaxOutput, _StateName, _ExchangeID, _LogLevels) ->
     lists:sort(IDList).
@@ -1024,7 +1023,7 @@ select_ids(IDList, _MaxOutput, _StateName, _ExchangeID, _LogLevels) ->
 %% Jitter a pause, so if multiple FSMs started at once, they don't all use
 %% the network at the same time
 jitter_pause(Timeout) ->
-    leveled_rand:uniform(Timeout) + Timeout div 2.
+    rand:uniform(Timeout) + Timeout div 2.
 
 
 -spec reset({pos_integer(), pos_integer()}) 

@@ -24,7 +24,7 @@ end_per_suite(Config) ->
 store_notsupported(_Config) ->
     RootPath = testutil:reset_filestructure(),
     VnodePath1 = filename:join(RootPath, "vnode1/"),
-    SplitF = fun(_X) -> {leveled_rand:uniform(1000), 1, 0, null} end,
+    SplitF = fun(_X) -> {rand:uniform(1000), 1, 0, null} end,
     RPid = self(),
     ReturnFun = fun(R) -> RPid ! {result, R} end,
     RepairFun = fun(_KL) -> null end,  
@@ -86,7 +86,7 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
     RootPath = testutil:reset_filestructure(),
     VnodePath1 = filename:join(RootPath, "vnode1/"),
     VnodePath2 = filename:join(RootPath, "vnode2/"),
-    SplitF = fun(_X) -> {leveled_rand:uniform(1000), 1, 0, null} end,
+    SplitF = fun(_X) -> {rand:uniform(1000), 1, 0, null} end,
     RPid = self(),
     ReturnFun = fun(R) -> RPid ! {result, R} end,
     RepairFun = fun(_KL) -> null end,  

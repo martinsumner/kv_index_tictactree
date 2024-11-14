@@ -725,7 +725,7 @@ dirty_segment_test() ->
     AddFun = 
         fun(I) ->
             K = integer_to_binary(I),
-            H = erlang:phash2(leveled_rand:uniform(100000)),
+            H = erlang:phash2(rand:uniform(100000)),
             cache_alter(AAECache0, K, H, 0)
         end,
 
@@ -746,8 +746,8 @@ dirty_segment_test() ->
 
     ?assertMatch(false, Leaf0 == 0),
 
-    H1 = erlang:phash2(leveled_rand:uniform(100000)),
-    H2 = erlang:phash2(leveled_rand:uniform(100000)),
+    H1 = erlang:phash2(rand:uniform(100000)),
+    H2 = erlang:phash2(rand:uniform(100000)),
     {_HK1, TTH1} = leveled_tictac:tictac_hash(K1, {is_hash, H1}),
     {_HK2, TTH2} = leveled_tictac:tictac_hash(K2, {is_hash, H2}),
 

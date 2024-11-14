@@ -158,9 +158,9 @@ gen_riakobjects(Count, ObjectList, TupleBuckets) ->
                 integer_to_binary(Count rem 5)
         end,
     Key = list_to_binary(string:right(integer_to_list(Count), 6, $0)),
-    Value = leveled_rand:rand_bytes(512),
+    Value = crypto:strong_rand_bytes(512),
     MD = [{last_modified_date, os:timestamp()}, 
-            {random, leveled_rand:uniform(3)}],
+            {random, rand:uniform(3)}],
     Obj = #r_object{bucket = Bucket,
                     key = Key,
                     contents = [#r_content{metadata = MD, value = Value}]},
@@ -168,9 +168,15 @@ gen_riakobjects(Count, ObjectList, TupleBuckets) ->
 
 
 add_randomincrement(Clock) ->
-    RandIncr = leveled_rand:uniform(100),
-    RandNode = lists:nth(leveled_rand:uniform(9), 
-                            ["a", "b", "c", "d", "e", "f", "g", "h", "i"]),
+    RandIncr = rand:uniform(100),
+    RandNode =
+        lists:nth(
+            rand:uniform(9), 
+            [
+                <<"a">>, <<"b">>, <<"c">>, <<"d">>, <<"e">>,
+                <<"f">>, <<"g">>, <<"h">>, <<"i">>
+            ]
+        ),
     UpdClock = 
         case lists:keytake(RandNode, 1, Clock) of 
             false ->

@@ -31,7 +31,7 @@ aae_fold_tester(ParallelStoreType, KeyCount) ->
     SplitF = 
         fun(X) -> 
             T = binary_to_term(X),
-            {leveled_rand:uniform(1000), 1, 0, element(1, T), element(2, T)}
+            {rand:uniform(1000), 1, 0, element(1, T), element(2, T)}
         end,
     
     {ok, Cntrl1} = 
