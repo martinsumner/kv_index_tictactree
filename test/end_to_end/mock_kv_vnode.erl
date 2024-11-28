@@ -188,22 +188,63 @@ init([Opts]) ->
     {ok, VnSt} = 
         leveled_bookie:book_start(RP, 4000, 100000000, none),
     IsEmpty = leveled_bookie:book_isempty(VnSt, ?RIAK_TAG),
-    KeyStoreType = 
+    BackendOpts = aae_keystore:store_generate_backendoptions(),
+    {KeyStoreType, UpdBackendOpts} = 
         case Opts#options.aae of 
             native ->
-                {native, leveled_nko, VnSt};
+                {
+                    {native, leveled_nko, VnSt},
+                    BackendOpts
+                };
             parallel_so ->
-                {parallel, leveled_so};
+                {
+                    {parallel, leveled_so},
+                    aae_keystore:store_setbackendoption(
+                        max_pencillercachesize,
+                        12000,
+                        BackendOpts
+                    )
+                };
             parallel_ko ->
-                {parallel, leveled_ko}
+                AltOpts =
+                    [
+                        {max_journalobjectcount, 1000},
+                        {database_id, 65534},
+                        {snapshot_timeout_short, 360},
+                        {snapshot_timeout_long, 3600},
+                        {compression_method, zstd},
+                        {
+                            forced_logs,
+                            [b0015, b0016, b0017, b0018, p0032, sst12]
+                        },
+                        {log_level, warn},
+                        {stats_logfrequency, 120}
+                    ],
+                
+                {
+                    {parallel, leveled_ko},
+                    lists:foldl(
+                        fun({K, S}, AccOpts) ->
+                            aae_keystore:store_setbackendoption(
+                                K, S, AccOpts
+                            )
+                        end,
+                        BackendOpts,
+                        AltOpts
+                    )
+                }
         end,
     {ok, AAECntrl} = 
-        aae_controller:aae_start(KeyStoreType, 
-                                    IsEmpty, 
-                                    ?REBUILD_SCHEDULE, 
-                                    Opts#options.index_ns, 
-                                    RP, 
-                                    fun from_aae_binary/1),
+        aae_controller:aae_start(
+            KeyStoreType, 
+            IsEmpty, 
+            ?REBUILD_SCHEDULE, 
+            Opts#options.index_ns, 
+            RP, 
+            fun from_aae_binary/1,
+            undefined,
+            UpdBackendOpts
+        ),
     erlang:send_after(?POKE_TIME, self(), poke),
     {ok, #state{root_path = RP,
                 aae_type = KeyStoreType,
