@@ -25,6 +25,7 @@
 
 -export([aae_start/6,
             aae_start/7,
+            aae_start/8,
             aae_nextrebuild/1,
             aae_put/7,
             aae_close/1,
@@ -44,7 +45,8 @@
             aae_bucketlist/1,
             aae_loglevel/2,
             aae_ping/3,
-            aae_runnerprompt/1]).
+            aae_runnerprompt/1
+        ]).
 
 -export([foldobjects_buildtrees/2,
             hash_clocks/2,
@@ -68,7 +70,6 @@
     % May depend on x2 underlying 30s timeout
 -define(MAX_RUNNER_QUEUEDEPTH, 4).
 
-
 -record(state, {key_store :: pid()|undefined,
                 tree_caches = [] :: tree_caches(),
                 index_ns = [] :: list(responsible_preflist()),
@@ -87,14 +88,19 @@
                 queue_backlog = false :: boolean(),
                 block_next_put = false :: boolean()}).
 
--record(options, {keystore_type :: keystore_type(),
-                    store_isempty :: boolean(),
-                    rebuild_schedule :: rebuild_schedule(),
-                    index_ns :: list(responsible_preflist()),
-                    object_splitfun,
-                    root_path :: list(),
-                    log_levels :: aae_util:log_levels()}).
-
+-record(options,
+    {
+        keystore_type :: keystore_type(),
+        store_isempty :: boolean(),
+        rebuild_schedule :: rebuild_schedule(),
+        index_ns :: list(responsible_preflist()),
+        object_splitfun,
+        root_path :: list(),
+        log_levels :: aae_util:log_levels(),
+        leveled_options :: aae_keystore:leveled_options()
+    }
+).
+    
 -type controller_state() :: #state{}.
 
 -type responsible_preflist() :: {integer(), integer()}. 
@@ -156,42 +162,47 @@
 %%% API
 %%%============================================================================
 
--spec aae_start(keystore_type(), 
-                boolean(), 
-                rebuild_schedule(),
-                list(responsible_preflist()), 
-                list(),
-                object_splitter()) -> {ok, pid()}.
+aae_start(KeyStoreT, IsEmpty, RS, PLs, Path, ObjSplitFun) ->
+    aae_start(
+        KeyStoreT, IsEmpty, RS, PLs, Path, ObjSplitFun, undefined
+    ).
+
+aae_start(KeyStoreT, IsEmpty, RS, PLs, Path, ObjSplitFun, LogLevels) ->
+    LeveledOpts = aae_keystore:store_generate_backendoptions(),
+    aae_start(
+        KeyStoreT, IsEmpty, RS, PLs, Path, ObjSplitFun, LogLevels, LeveledOpts
+    ).
+
+-spec aae_start(
+    keystore_type(), 
+    boolean(), 
+    rebuild_schedule(),
+    list(responsible_preflist()), 
+    list(),
+    object_splitter(),
+    aae_util:log_levels()|undefined,
+    aae_keystore:leveled_options()) -> {ok, pid()}.
 %% @doc
 %% Start an AAE controller 
 %% The ObjectsplitFun must take a vnode object in a binary form and output 
 %% {Size, SibCount, IndexHash, LMD, MD}.  If the SplitFun previously outputted
 %% {Size, SibCount, IndexHash, null} that output will be converted
-aae_start(KeyStoreT, IsEmpty, RebuildSch, Preflists, RootPath, ObjSplitFun) ->
-    aae_start(KeyStoreT, IsEmpty, RebuildSch,
-                Preflists, RootPath, ObjSplitFun, undefined).
-
--spec aae_start(keystore_type(), 
-                boolean(), 
-                rebuild_schedule(),
-                list(responsible_preflist()), 
-                list(),
-                object_splitter(),
-                aae_util:log_levels()|undefined) -> {ok, pid()}.
-
-aae_start(KeyStoreT, IsEmpty, RebuildSch,
-                Preflists, RootPath, ObjSplitFun, LogLevels) ->
+aae_start(
+        KeyStoreT, IsEmpty, RS, PLs, Path, ObjSplitFun, LogLevels, LeveledOpts
+    ) ->
     WrapObjSplitFun = wrapped_splitobjfun(ObjSplitFun),
     AAEopts =
-        #options{keystore_type = KeyStoreT,
-                    store_isempty = IsEmpty,
-                    rebuild_schedule = RebuildSch,
-                    index_ns = Preflists,
-                    root_path = RootPath,
-                    object_splitfun = WrapObjSplitFun,
-                    log_levels = LogLevels},
+        #options{
+            keystore_type = KeyStoreT,
+            store_isempty = IsEmpty,
+            rebuild_schedule = RS,
+            index_ns = PLs,
+            root_path = Path,
+            object_splitfun = WrapObjSplitFun,
+            log_levels = LogLevels,
+            leveled_options = LeveledOpts
+        },
     gen_server:start(?MODULE, [AAEopts], []).
-
 
 -spec aae_nextrebuild(pid()) -> erlang:timestamp().
 %% @doc
@@ -463,6 +474,7 @@ aae_ping(Pid, RequestTime, From) ->
 aae_runnerprompt(Pid) ->
     gen_server:cast(Pid, runner_prompt).
 
+
 %%%============================================================================
 %%% gen_server callbacks
 %%%============================================================================
@@ -478,42 +490,55 @@ init([Opts]) ->
         case Opts#options.keystore_type of 
             {parallel, StoreType} ->
                 StoreRP = filename:join([RootPath, StoreType, ?STORE_PATH]),
+                LeveledOpts = Opts#options.leveled_options,
                 {ok, {LastRebuild, IsEmpty}, Pid} =
-                    aae_keystore:store_parallelstart(StoreRP,
-                                                        StoreType,
-                                                        LogLevels),
+                    aae_keystore:store_parallelstart(
+                        StoreRP, StoreType, LogLevels, LeveledOpts),
                 case Opts#options.store_isempty of 
                     IsEmpty ->
                         RebuildTS = 
                             schedule_rebuild(LastRebuild, RebuildSchedule),
-                        {ok, #state{key_store = Pid, 
-                                        next_rebuild = RebuildTS,
-                                        rebuild_schedule = RebuildSchedule,
-                                        reliable = true,
-                                        parallel_keystore = true}};
+                        {
+                            ok,
+                            #state{
+                                key_store = Pid, 
+                                next_rebuild = RebuildTS,
+                                rebuild_schedule = RebuildSchedule,
+                                reliable = true,
+                                parallel_keystore = true
+                            }
+                        };
                     StoreState ->
                         aae_util:log(aae01, [StoreState, IsEmpty], LogLevels),
-                        {ok, #state{key_store = Pid, 
-                                        next_rebuild = os:timestamp(), 
-                                        rebuild_schedule = RebuildSchedule,
-                                        reliable = false,
-                                        parallel_keystore = true}}
+                        {
+                            ok, 
+                            #state{
+                                key_store = Pid, 
+                                next_rebuild = os:timestamp(), 
+                                rebuild_schedule = RebuildSchedule,
+                                reliable = false,
+                                parallel_keystore = true
+                            }
+                        }
                 end;
             {native, StoreType, BackendPid} ->
                 aae_util:log(aae02, [StoreType], LogLevels),
                 StoreRP = filename:join([RootPath, StoreType, ?STORE_PATH]),
                 {ok, {LastRebuild, _IsE}, KeyStorePid} =
-                    aae_keystore:store_nativestart(StoreRP, 
-                                                    StoreType, 
-                                                    BackendPid,
-                                                    LogLevels),
+                    aae_keystore:store_nativestart(
+                        StoreRP, StoreType, BackendPid, LogLevels),
                 RebuildTS = 
                     schedule_rebuild(LastRebuild, RebuildSchedule),
-                {ok, #state{key_store = KeyStorePid, 
-                                next_rebuild = RebuildTS, 
-                                rebuild_schedule = RebuildSchedule,
-                                reliable = true,
-                                parallel_keystore = false}}
+                {
+                    ok, 
+                    #state{
+                        key_store = KeyStorePid, 
+                        next_rebuild = RebuildTS, 
+                        rebuild_schedule = RebuildSchedule,
+                        reliable = true,
+                        parallel_keystore = false
+                    }
+                }
         end,
 
     % Start the TreeCaches

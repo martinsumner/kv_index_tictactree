@@ -13,7 +13,6 @@
             get_opt/2,
             get_opt/3,
             make_binarykey/2,
-            min_loglevel/1,
             safe_open/1]).
 
 -export([clean_subdir/1,
@@ -207,14 +206,6 @@ make_binarykey({Type, Bucket}, Key)
     <<Type/binary, Bucket/binary, Key/binary>>;
 make_binarykey(Bucket, Key) when is_binary(Bucket), is_binary(Key) ->
     <<Bucket/binary, Key/binary>>.
-
--spec min_loglevel(aae_util:log_levels()) -> leveled_log:log_level().
-%% @doc
-%% Return the lowest log level to be used in leveled startup
-min_loglevel(undefined) ->
-    info;
-min_loglevel([MinLevel|_Rest]) ->
-    MinLevel.
 
 %%%============================================================================
 %%% Internal functions

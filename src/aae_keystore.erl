@@ -42,19 +42,25 @@
             native/2,
             native/3]).
 
--export([store_parallelstart/3,
-            store_nativestart/4,
-            store_startupdata/1,
-            store_close/1,
-            store_destroy/1,
-            store_mput/3,
-            store_mload/2,
-            store_prompt/2,
-            store_currentstatus/1,
-            store_fold/8,
-            store_fetchclock/3,
-            store_bucketlist/1,
-            store_loglevel/2]).
+-export(
+    [
+        store_generate_backendoptions/0,
+        store_setbackendoption/3,
+        store_parallelstart/4,
+        store_nativestart/4,
+        store_startupdata/1,
+        store_close/1,
+        store_destroy/1,
+        store_mput/3,
+        store_mload/2,
+        store_prompt/2,
+        store_currentstatus/1,
+        store_fold/8,
+        store_fetchclock/3,
+        store_bucketlist/1,
+        store_loglevel/2
+    ]
+).
 
 -export([define_addobjectspec/3,
             define_delobjectspec/3,
@@ -92,15 +98,20 @@
                         key :: binary(),
                         last_mod_dates :: undefined|list(erlang:timestamp()),
                         value = null :: tuple()|null}).
-
--define(LEVELED_BACKEND_OPTS, 
-    [{cache_size, 2000},
-        {sync_strategy, none},
-        {max_journalsize, 100000000},
+                    
+-define(LEVELED_DEFAULTS,
+    [
+        {max_pencillercachesize, 16000},
+        {max_journalobjectcount, 20000},
         {compression_method, native},
-        {compression_point, on_receipt},
         {snapshot_timeout_short, 3600},
-        {snapshot_timeout_long, 172800}]).
+        {snapshot_timeout_long, 172800},
+        {database_id, 65535},
+        {log_level, info},
+        {forced_logs, []},
+        {stats_logfrequency, 60}
+    ]
+).
 -define(CHANGEQ_LOGFREQ, 100000).
 -define(STATE_BUCKET, <<"state">>).
 -define(MANIFEST_FN, "keystore"). 
@@ -129,6 +140,26 @@
 -define(LOAD_PAUSE, 1000). % On backlog when loading a parallel store
 -define(LOAD_BATCH, 256).
 
+-type backend_mpcs() ::
+    {max_pencillercachesize, 2000..32000}.
+-type backend_mjoc() ::
+    {max_journalobjectcount, pos_integer()}.
+-type backend_cm() :: native|zstd.
+-type backend_sto() ::
+    {snapshot_timeout_long|snapshot_timeout_short, pos_integer()}.
+-type backend_lll() ::
+    {log_level, debug|info|warn}.
+-type backend_fls() :: 
+    {forced_logs, list(atom())}.
+-type backend_slf() ::
+    {stats_logfrequency, pos_integer()}.
+-type leveled_options() ::
+    [
+        backend_mpcs()|backend_mjoc()|
+        backend_cm()|
+        backend_sto()|
+        backend_lll()|backend_fls()|backend_slf()
+    ].
 -type bucket() :: binary()|{binary(),binary()}.
 -type key() :: binary().
 -type parallel_stores() :: leveled_so|leveled_ko. 
@@ -191,48 +222,84 @@
     % needs to be calculated (like IndexN in native stores)
 
 
--export_type([parallel_stores/0,
-                native_stores/0,
-                manifest/0,
-                objectspec/0,
-                value_element/0,
-                range_limiter/0,
-                segment_limiter/0,
-                modified_limiter/0,
-                count_limiter/0,
-                rebuild_prompts/0,
-                bucket/0,
-                key/0]).
+-export_type(
+    [
+        leveled_options/0,
+        parallel_stores/0,
+        native_stores/0,
+        manifest/0,
+        objectspec/0,
+        value_element/0,
+        range_limiter/0,
+        segment_limiter/0,
+        modified_limiter/0,
+        count_limiter/0,
+        rebuild_prompts/0,
+        bucket/0,
+        key/0
+    ]
+).
 
 
 %%%============================================================================
 %%% API
 %%%============================================================================
 
+-spec store_generate_backendoptions() -> leveled_options().
+store_generate_backendoptions() ->
+    ?LEVELED_DEFAULTS.
+
+-spec store_setbackendoption(
+    atom(), any(), leveled_options()) -> leveled_options().
+store_setbackendoption(max_pencillercachesize, MPCS, LeveledOpts)
+        when is_integer(MPCS), MPCS =< 32000, MPCS >= 2000 ->
+    lists:ukeysort(1, [{max_pencillercachesize, MPCS}|LeveledOpts]);
+store_setbackendoption(max_journalobjectcount, MJOC, LeveledOpts)
+        when is_integer(MJOC), MJOC > 0 ->
+    lists:ukeysort(1, [{max_journalobjectcount, MJOC}|LeveledOpts]);
+store_setbackendoption(compression_method, CM, LeveledOpts)
+        when CM == native; CM == zstd; CM == lz4 ->
+    lists:ukeysort(1, [{compression_method, CM}|LeveledOpts]);
+store_setbackendoption(snapshot_timeout_short, STS, LeveledOpts)
+        when is_integer(STS), STS > 0 ->
+    lists:ukeysort(1, [{snapshot_timeout_short, STS}|LeveledOpts]);
+store_setbackendoption(snapshot_timeout_long, STL, LeveledOpts)
+        when is_integer(STL), STL > 0 ->
+    lists:ukeysort(1, [{snapshot_timeout_long, STL}|LeveledOpts]);
+store_setbackendoption(database_id, DID, LeveledOpts)
+        when is_integer(DID), DID >= 0 ->
+    lists:ukeysort(1, [{database_id, DID}|LeveledOpts]);
+store_setbackendoption(log_level, LLL, LeveledOpts)
+        when LLL == debug; LLL == info; LLL == warn ->
+    lists:ukeysort(1, [{log_level, LLL}|LeveledOpts]);
+store_setbackendoption(forced_logs, FLS, LeveledOpts)
+        when is_list(FLS) ->
+    lists:ukeysort(1, [{forced_logs, FLS}|LeveledOpts]);
+store_setbackendoption(stats_logfrequency, SLF, LeveledOpts)
+        when is_integer(SLF), SLF > 0 ->
+    lists:ukeysort(1, [{stats_logfrequency, SLF}|LeveledOpts]).
+
 -spec store_parallelstart(
-    list(), parallel_stores(), aae_util:log_levels()) ->
+    list(),
+    parallel_stores(),
+    aae_util:log_levels(),
+    leveled_options()) ->
         {ok, {erlang:timestamp()|never, boolean()}, pid()}.
 %% @doc
 %% Start a store to be run in parallel mode
-store_parallelstart(Path, leveled_so, LogLevels) ->
-    MinLevel = aae_util:min_loglevel(LogLevels),
-    AddOpts = [{max_pencillercachesize, 8000}, {log_level, MinLevel}],
+store_parallelstart(Path, leveled_so, LogLevels, LeveledOpts) ->
     Opts = 
         [{root_path, Path}, 
             {native, {false, leveled_so}}, 
-            {backend_opts,
-                lists:ukeysort(1, AddOpts ++ ?LEVELED_BACKEND_OPTS)},
+            {backend_opts, LeveledOpts},
             {log_levels, LogLevels}],
     {ok, Pid} = gen_fsm:start_link(?MODULE, [Opts], []),
     store_startupdata(Pid);
-store_parallelstart(Path, leveled_ko, LogLevels) ->
-    MinLevel = aae_util:min_loglevel(LogLevels),
-    AddOpts = [{max_pencillercachesize, 32000}, {log_level, MinLevel}],
+store_parallelstart(Path, leveled_ko, LogLevels, LeveledOpts) ->
     Opts = 
         [{root_path, Path}, 
             {native, {false, leveled_ko}}, 
-            {backend_opts, 
-                lists:ukeysort(1, AddOpts ++ ?LEVELED_BACKEND_OPTS)},
+            {backend_opts, LeveledOpts},
             {log_levels, LogLevels}],
     {ok, Pid} = gen_fsm:start_link(?MODULE, [Opts], []),
     store_startupdata(Pid).
@@ -609,12 +676,9 @@ handle_sync_event(ping, _From, StateName, State) ->
     {reply, pong, StateName, State}.
 
 handle_event({log_level, LogLevels}, StateName, State) ->
-    MinLevel = aae_util:min_loglevel(LogLevels),
-    BackendOpts = [{log_level, MinLevel}|?LEVELED_BACKEND_OPTS],
-        % Change of log level will take place after next store is started
     {next_state,
         StateName,
-        State#state{log_levels = LogLevels, backend_opts = BackendOpts}}.
+        State#state{log_levels = LogLevels}}.
 
 handle_info(_Msg, StateName, State) ->
     {next_state, StateName, State}.
@@ -1250,7 +1314,7 @@ empty_buildandclose_tester(StoreType) ->
     RootPath = "test/keystore0/",
     aae_util:clean_subdir(RootPath),
     {ok, {never, true}, Store0} =
-        store_parallelstart(RootPath, StoreType, undefined),
+        store_parallelstart(RootPath, StoreType, undefined, ?LEVELED_DEFAULTS),
     
     {ok, Manifest0} = open_manifest(RootPath, undefined),
     {parallel, CurrentGUID} = store_currentstatus(Store0),
@@ -1262,7 +1326,7 @@ empty_buildandclose_tester(StoreType) ->
     ?assertMatch(CurrentGUID, Manifest1#manifest.current_guid),
     
     {ok, {never, true}, Store1} =
-        store_parallelstart(RootPath, StoreType, undefined),
+        store_parallelstart(RootPath, StoreType, undefined, ?LEVELED_DEFAULTS),
     ?assertMatch({parallel, CurrentGUID}, store_currentstatus(Store1)),
     ok = store_close(Store1),
     
@@ -1339,7 +1403,7 @@ load_tester(StoreType) ->
     {L4, L5} = lists:split(32, R3),
 
     {ok, {never, true}, Store0} =
-        store_parallelstart(RootPath, StoreType, undefined),
+        store_parallelstart(RootPath, StoreType, undefined, ?LEVELED_DEFAULTS),
     ok = store_mput(Store0, L1, false),
     ok = store_mput(Store0, L2, false),
     ok = store_mput(Store0, L3, false),
@@ -1406,8 +1470,8 @@ load_tester(StoreType) ->
 
     ok = store_close(Store0),
 
-    {ok, {LastRebuildTime, false}, Store1} 
-        = store_parallelstart(RootPath, StoreType, undefined),
+    {ok, {LastRebuildTime, false}, Store1} =
+        store_parallelstart(RootPath, StoreType, undefined, ?LEVELED_DEFAULTS),
     
     ?assertMatch(true, LastRebuildTime > RebuildCompleteTime),
    
@@ -1505,7 +1569,7 @@ load2_tester(StoreType) ->
         lists:foldl(SplitFun, {[], ObjectSpecs}, lists:seq(1, 41)),
     
     {ok, {never, true}, Store0} =
-        store_parallelstart(RootPath, StoreType, undefined),
+        store_parallelstart(RootPath, StoreType, undefined, ?LEVELED_DEFAULTS),
     
     lists:foreach(fun(B) -> store_mput(Store0, B, false) end,
                     lists:reverse(BatchList0)),
@@ -1623,10 +1687,13 @@ fetch_clock_test() ->
     Spc3 = define_addobjectspec(<<"B2">>, <<"K1">>, GenVal([{"c", 1}])),
     Spc4 = define_addobjectspec(<<"B1">>, <<"K1">>, GenVal([{"d", 1}])),
 
-    {ok, Store0} = open_store(leveled_so, 
-                                ?LEVELED_BACKEND_OPTS, 
-                                RootPath,
-                                leveled_util:generate_uuid()),
+    {ok, Store0} =
+        open_store(
+            leveled_so,
+            ?LEVELED_DEFAULTS,
+            RootPath,
+            leveled_util:generate_uuid()
+        ),
 
     do_load(leveled_so, Store0, [Spc1, Spc2, Spc3, Spc4]),
 
@@ -1664,7 +1731,7 @@ big_load_tester(StoreType) ->
     GenerateKeyFun = aae_util:test_key_generator(v1),
 
     {ok, {never, true}, Store0} =
-        store_parallelstart(RootPath, StoreType, undefined),
+        store_parallelstart(RootPath, StoreType, undefined, ?LEVELED_DEFAULTS),
 
     InitialKeys = 
         lists:map(GenerateKeyFun, lists:seq(1, KeyCount)),
@@ -1695,8 +1762,8 @@ big_load_tester(StoreType) ->
 
     ok = store_close(Store0),
 
-    {ok, {RebuildTS, false}, Store1} 
-        = store_parallelstart(RootPath, StoreType, undefined),
+    {ok, {RebuildTS, false}, Store1} =
+        store_parallelstart(RootPath, StoreType, undefined, ?LEVELED_DEFAULTS),
     ?assertMatch(true, RebuildTS < os:timestamp()),
     
     timed_fold(Store1, KeyCount, FoldObjectsFun, StoreType, true),
@@ -1721,8 +1788,8 @@ big_load_tester(StoreType) ->
     M0 = clear_pendingpath(PendingManifest, RootPath),
     ?assertMatch(undefined, M0#manifest.pending_guid),
 
-    {ok, {RebuildTS2, false}, Store2} 
-        = store_parallelstart(RootPath, StoreType, undefined),
+    {ok, {RebuildTS2, false}, Store2} =
+        store_parallelstart(RootPath, StoreType, undefined, ?LEVELED_DEFAULTS),
     ?assertMatch(RebuildTS, RebuildTS2),
 
     timed_fold(Store2, KeyCount, FoldObjectsFun, StoreType, true),
