@@ -428,7 +428,7 @@ binary_extractfun(Key, {CurrentHash, OldHash}) ->
     % - requires secret knowledge of implementation to perform
     % alter
     UpdateHash = 
-        case {CurrentHash, OldHash} of 
+        case {CurrentHash, OldHash} of
             {none, OldHash} when is_integer(OldHash) ->
                 % Remove - treat like adding back in
                 % the tictac will bxor this with the key - so don't need to
@@ -437,6 +437,13 @@ binary_extractfun(Key, {CurrentHash, OldHash}) ->
             {CurrentHash, none} when is_integer(CurrentHash) ->
                 % Nothing to remove - straight add
                 CurrentHash;
+            {none, none} ->
+                % This may be prompted in rehash.
+                % In this case ant to produce a neutral update (when bxor'd
+                % with the key hash) - so return the relevant hash of the key
+                {_SegmentHash, AltHash}
+                    = leveled_tictac:keyto_doublesegment32(Key),
+                AltHash;
             {CurrentHash, OldHash}
                     when is_integer(CurrentHash), is_integer(OldHash) ->
                 % Alter - need to account for hashing with key
@@ -729,6 +736,13 @@ replace_test() ->
     % Removing the key => as if it was never there
     NewRoot = cache_root(AAECache0),
     ?assertMatch(Root, NewRoot),
+
+    cache_alter(AAECache0, <<"K_WithNeutralChange">>, 1, none),
+    cache_alter(AAECache0, <<"K_WithNeutralChange">>, none, none),
+    cache_alter(AAECache0, <<"K_WithNeutralChange">>, none, 1),
+
+    UnchangedRoot = cache_root(AAECache0),
+    ?assertMatch(Root, UnchangedRoot),
 
     ok = cache_destroy(AAECache0).
 
