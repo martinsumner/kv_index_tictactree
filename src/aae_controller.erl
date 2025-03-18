@@ -1314,20 +1314,20 @@ handle_unexpected_key(Bucket, Key, IndexN, TreeCaches, LogLevels) ->
     aae_util:log("AAE03", [Bucket, Key, IndexN, RespPreflists],
                     logs(), LogLevels).
 
--spec hash_clocks(version_vector(), version_vector()) 
-                                                    -> {integer(), integer()}.
+-spec hash_clocks(
+    version_vector(), version_vector()) -> {integer()|none, integer()|none}.
 %% @doc
-%% Has the version vectors 
+%% Hash the version vectors, if there is one 
 hash_clocks(CurrentVV, PrevVV) ->
     {hash_clock(CurrentVV), hash_clock(PrevVV)}.
 
 hash_clock(none) ->
-    0;
+    none;
 hash_clock(Clock) ->
     erlang:phash2(lists:sort(Clock)).
 
--spec wait_on_sync(atom(), atom(), pid(), tuple()|atom(), pos_integer())
-                                                                    -> any().
+-spec wait_on_sync(
+    atom(), atom(), pid(), tuple()|atom(), pos_integer()) -> any().
 %% @doc
 %% Wait on a sync call until timeout - but don't crash on the timeout
 wait_on_sync(Mod, Fun, Pid, Call, Timeout) ->
@@ -1349,7 +1349,6 @@ preflist_wrapper_fun(FoldObjectsFun, IndexNs) ->
                 Acc
         end
     end.
-
 
 %%%============================================================================
 %%% log definitions
