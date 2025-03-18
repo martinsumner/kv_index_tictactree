@@ -439,8 +439,9 @@ binary_extractfun(Key, {CurrentHash, OldHash}) ->
                 CurrentHash;
             {none, none} ->
                 % This may be prompted in rehash.
-                % In this case ant to produce a neutral update (when bxor'd
-                % with the key hash) - so return the relevant hash of the key
+                % In this case a neutral update is required (when bxor'd with
+                % the key hash it should produce no change) - so return the
+                % relevant hash of the key
                 {_SegmentHash, AltHash}
                     = leveled_tictac:keyto_doublesegment32(Key),
                 AltHash;
