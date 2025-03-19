@@ -219,7 +219,7 @@ handle_cast({alter, Key, CurrentHash, OldHash}, State) ->
             State#state.tree,
             Key,
             {CurrentHash, OldHash},
-            fun binary_extractfun/2,
+            fun alterhash_fun/2,
             true
         ),
     State0 = 
@@ -255,7 +255,7 @@ handle_cast({complete_load, Tree}, State=#state{loading=Loading})
     LoadFun = 
         fun({Key, CH, OH}, AccTree) ->
             leveled_tictac:add_kv(
-                AccTree, Key, {CH, OH}, fun binary_extractfun/2)
+                AccTree, Key, {CH, OH}, fun alterhash_fun/2)
         end,
     Tree0 = lists:foldr(LoadFun, Tree, State#state.change_queue),
     aae_util:log("C0008",
@@ -417,16 +417,26 @@ form_cache_filename(RootPath, SaveSQN) ->
     filename:join(RootPath, integer_to_list(SaveSQN) ++ ?FINAL_EXT).
 
 
--spec binary_extractfun(
+-spec alterhash_fun(
     binary(),
     {integer()|none, integer()|none}) -> {binary(), {is_hash, integer()}}.
 %% @doc 
 %% Function to calculate the hash change need to make an alter into a straight
 %% add as the BinExtractfun in leveled_tictac
-binary_extractfun(Key, {CurrentHash, OldHash}) ->
+alterhash_fun(Key, {CurrentHash, OldHash}) ->
     % TODO: Should move this function to leveled_tictac
     % - requires secret knowledge of implementation to perform
     % alter
+    % 
+    % What we know about the addition of a value into a leveled_tictac tree is
+    % that an addition is made be doing:
+    % SegHash bxor (AltKeyHash bxor ClockHash)
+    % 
+    % The ClockHash in this case is the output of this function.  When an
+    % alteration is being made the resulting Hash needs to still include the
+    % AltKeyHash, so it is necessary apply bxor AltKeyHash an odd number of
+    % times.  Hence an alteration or a null change must include the AltKeyHash
+    % within the ClockHash
     UpdateHash = 
         case {CurrentHash, OldHash} of
             {none, OldHash} when is_integer(OldHash) ->
@@ -442,16 +452,16 @@ binary_extractfun(Key, {CurrentHash, OldHash}) ->
                 % In this case a neutral update is required (when bxor'd with
                 % the key hash it should produce no change) - so return the
                 % relevant hash of the key
-                {_SegmentHash, AltHash}
+                {_SegmentHash, AltKeyHash}
                     = leveled_tictac:keyto_doublesegment32(Key),
-                AltHash;
+                AltKeyHash;
             {CurrentHash, OldHash}
                     when is_integer(CurrentHash), is_integer(OldHash) ->
                 % Alter - need to account for hashing with key
                 % to remove the original
-                {_SegmentHash, AltHash}
+                {_SegmentHash, AltKeyHash}
                     = leveled_tictac:keyto_doublesegment32(Key),
-                CurrentHash bxor (OldHash bxor AltHash)
+                CurrentHash bxor (OldHash bxor AltKeyHash)
         end,
     {Key, {is_hash, UpdateHash}}.
 
