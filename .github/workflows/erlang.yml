@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        otp: [22, 24]
+        otp: [24]
         os: [ubuntu-latest]
 
     steps:
