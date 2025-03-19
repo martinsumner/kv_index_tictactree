@@ -126,7 +126,7 @@
         % scheduled by adding a random integer number of seconds (between 0 
         % and the jitter value) to the minimum time
 -type version_vector()
-        :: list(tuple())|none|undefined.
+        :: list(tuple())|none.
         % The version vector is normally a list of tuples.  The vector could 
         % be none if this is a put of a new item (when the previous vector 
         % would be none), or a deletion of an existing item (when the current
@@ -149,6 +149,11 @@
 -type fold_objects_fun()
         :: fun((aae_keystore:bucket(), aae_keystore:key(), term(), list())
                     -> list()).
+-type clock_hash() :: integer()|none.
+        % Hash of the clock which is either an integer 1..(2^32 - 1) or none
+        % to represent there was no clock to hash.  The hash of the clock part
+        % impacts only 27-bits, but may be combined with a hash of the key,
+        % where that has is 0..(2^32 - 1) 
 
 -export_type([responsible_preflist/0,
                 keystore_type/0,
@@ -210,17 +215,19 @@ aae_start(
 aae_nextrebuild(Pid) ->
     gen_server:call(Pid, rebuild_time, ?SYNC_TIMEOUT).
 
--spec aae_put(pid(), responsible_preflist(), 
-                            aae_keystore:bucket(), aae_keystore:key(),
-                            version_vector(), version_vector(),
-                            binary()) -> ok.
+-spec aae_put(
+    pid(),
+    responsible_preflist(), 
+    aae_keystore:bucket(),
+    aae_keystore:key(),
+    version_vector(), version_vector()|undefined,
+    binary()) -> ok.
 %% @doc
 %% Put a change into the AAE system - updating the TicTac tree, and the 
 %% KeyStore where a parallel Keystore is used.
 aae_put(Pid, IndexN, Bucket, Key, CurrentVV, PrevVV, BinaryObj) ->
-    gen_server:cast(Pid, 
-                    {put, IndexN, Bucket, Key, CurrentVV, PrevVV, BinaryObj}).
-
+    gen_server:cast(
+        Pid, {put, IndexN, Bucket, Key, CurrentVV, PrevVV, BinaryObj}).
 
 -spec aae_fetchroot(pid(), list(responsible_preflist()), returner()) -> ok.
 %% @doc
@@ -1322,20 +1329,20 @@ handle_unexpected_key(Bucket, Key, IndexN, TreeCaches, LogLevels) ->
     RespPreflists = lists:map(fun({RP, _TC}) ->  RP end, TreeCaches),
     aae_util:log(aae03, [Bucket, Key, IndexN, RespPreflists], LogLevels).
 
--spec hash_clocks(version_vector(), version_vector()) 
-                                                    -> {integer(), integer()}.
+-spec hash_clocks(
+    version_vector(), version_vector()) -> {clock_hash(), clock_hash()}.
 %% @doc
-%% Has the version vectors 
+%% Hash the version vectors, if there is one 
 hash_clocks(CurrentVV, PrevVV) ->
     {hash_clock(CurrentVV), hash_clock(PrevVV)}.
 
 hash_clock(none) ->
-    0;
+    none;
 hash_clock(Clock) ->
     erlang:phash2(lists:sort(Clock)).
 
--spec wait_on_sync(atom(), atom(), pid(), tuple()|atom(), pos_integer())
-                                                                    -> any().
+-spec wait_on_sync(
+    atom(), atom(), pid(), tuple()|atom(), pos_integer()) -> any().
 %% @doc
 %% Wait on a sync call until timeout - but don't crash on the timeout
 wait_on_sync(Mod, Fun, Pid, Call, Timeout) ->
@@ -1357,7 +1364,6 @@ preflist_wrapper_fun(FoldObjectsFun, IndexNs) ->
                 Acc
         end
     end.
-
 
 %%%============================================================================
 %%% Test

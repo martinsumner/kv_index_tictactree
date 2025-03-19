@@ -91,7 +91,7 @@ cache_destroy(AAECache) ->
 cache_close(AAECache) ->
     gen_server:call(AAECache, close, ?SYNC_TIMEOUT).
 
--spec cache_alter(pid(), binary(), integer(), integer()) -> ok.
+-spec cache_alter(pid(), binary(), integer()|none, integer()|none) -> ok.
 %% @doc
 %% Change the hash tree to reflect an addition and removal of a hash value
 cache_alter(AAECache, Key, CurrentHash, OldHash) -> 
@@ -219,7 +219,7 @@ handle_cast({alter, Key, CurrentHash, OldHash}, State) ->
             State#state.tree,
             Key,
             {CurrentHash, OldHash},
-            fun binary_extractfun/2,
+            fun alterhash_fun/2,
             true
         ),
     State0 = 
@@ -255,7 +255,7 @@ handle_cast({complete_load, Tree}, State=#state{loading=Loading})
     LoadFun = 
         fun({Key, CH, OH}, AccTree) ->
             leveled_tictac:add_kv(
-                AccTree, Key, {CH, OH}, fun binary_extractfun/2)
+                AccTree, Key, {CH, OH}, fun alterhash_fun/2)
         end,
     Tree0 = lists:foldr(LoadFun, Tree, State#state.change_queue),
     aae_util:log(
@@ -422,33 +422,53 @@ form_cache_filename(RootPath, SaveSQN) ->
     filename:join(RootPath, integer_to_list(SaveSQN) ++ ?FINAL_EXT).
 
 
--spec binary_extractfun(binary(), {integer(), integer()}) -> 
-                                            {binary(), {is_hash, integer()}}.
+-spec alterhash_fun(
+    binary(),
+    {integer()|none, integer()|none}) -> {binary(), {is_hash, integer()}}.
 %% @doc 
-%% Function to calulate the hash change need to make an alter into a straight
+%% Function to calculate the hash change need to make an alter into a straight
 %% add as the BinExtractfun in leveled_tictac
-binary_extractfun(Key, {CurrentHash, OldHash}) ->
+alterhash_fun(Key, {CurrentHash, OldHash}) ->
     % TODO: Should move this function to leveled_tictac
     % - requires secret knowledge of implementation to perform
     % alter
-    RemoveH = 
-        case {CurrentHash, OldHash} of 
-            {0, _} ->
+    % 
+    % What we know about the addition of a value into a leveled_tictac tree is
+    % that an addition is made be doing:
+    % SegHash bxor (AltKeyHash bxor ClockHash)
+    % 
+    % The ClockHash in this case is the output of this function.  When an
+    % alteration is being made the resulting Hash needs to still include the
+    % AltKeyHash, so it is necessary apply bxor AltKeyHash an odd number of
+    % times.  Hence an alteration or a null change must include the AltKeyHash
+    % within the ClockHash
+    UpdateHash = 
+        case {CurrentHash, OldHash} of
+            {none, OldHash} when is_integer(OldHash) ->
                 % Remove - treat like adding back in
                 % the tictac will bxor this with the key - so don't need to
                 % bxor this here again
                 OldHash;
-            {_, 0} ->
-                % Add 
-                0;
-            _ ->
+            {CurrentHash, none} when is_integer(CurrentHash) ->
+                % Nothing to remove - straight add
+                CurrentHash;
+            {none, none} ->
+                % This may be prompted in rehash.
+                % In this case a neutral update is required (when bxor'd with
+                % the key hash it should produce no change) - so return the
+                % relevant hash of the key
+                {_SegmentHash, AltKeyHash}
+                    = leveled_tictac:keyto_doublesegment32(Key),
+                AltKeyHash;
+            {CurrentHash, OldHash}
+                    when is_integer(CurrentHash), is_integer(OldHash) ->
                 % Alter - need to account for hashing with key
                 % to remove the original
-                {_SegmentHash, AltHash}
+                {_SegmentHash, AltKeyHash}
                     = leveled_tictac:keyto_doublesegment32(Key),
-                OldHash bxor AltHash
+                CurrentHash bxor (OldHash bxor AltKeyHash)
         end,
-    {Key, {is_hash, CurrentHash bxor RemoveH}}.
+    {Key, {is_hash, UpdateHash}}.
 
 %%%============================================================================
 %%% Test
@@ -513,7 +533,7 @@ dirty_saveopen_test() ->
     RP0 = filename:join(RootPath, integer_to_list(1)) ++ "/",
     {ok, Cpid0} = cache_new(RootPath, 1, undefined),
     Hash0 = erlang:phash2({<<"K1">>, <<"C1">>}),
-    cache_alter(Cpid0, <<"K1">>, Hash0, 0),
+    cache_alter(Cpid0, <<"K1">>, Hash0, none),
     ok = cache_close(Cpid0),
     ?assertMatch(true, filelib:is_file(form_cache_filename(RP0, 1))),
     {true, Cpid1} = cache_open(RootPath, 1, undefined),
@@ -539,7 +559,7 @@ dirty_saveopen_test() ->
     ?assertMatch(false, filelib:is_file(form_cache_filename(RP0, 4))),
     {false, Cpid4} = cache_open(RootPath, 1, undefined),
     cache_startload(Cpid4),
-    cache_alter(Cpid4, <<"K1">>, Hash3, 0),
+    cache_alter(Cpid4, <<"K1">>, Hash3, none),
     T0 = leveled_tictac:new_tree(raw, ?TREE_SIZE),
     cache_completeload(Cpid4, T0),
     ok = cache_close(Cpid4),
@@ -646,7 +666,6 @@ simple_test() ->
     Root = cache_root(AAECache1),
     ?assertMatch(Root, CompareRoot),
 
-
     ok = cache_destroy(AAECache1).
 
 
@@ -675,16 +694,15 @@ replace_test() ->
     KHL0 = lists:sublist(InitialKeys, 60) ++ AlternateKeys,
     DirectAddFun =
         fun({K, H}, TreeAcc) ->
-            leveled_tictac:add_kv(TreeAcc, 
-                                    K, H, 
-                                    fun(Key, Value) -> 
-                                        {Key, {is_hash, Value}} 
-                                    end)
+            leveled_tictac:add_kv(
+                TreeAcc, 
+                K, H, 
+                fun(Key, Value) ->  {Key, {is_hash, Value}} end
+            )
         end,
     CompareTree = 
-        lists:foldl(DirectAddFun, 
-                        leveled_tictac:new_tree(raw, ?TREE_SIZE), 
-                        KHL0),
+        lists:foldl(
+            DirectAddFun, leveled_tictac:new_tree(raw, ?TREE_SIZE), KHL0),
     
     %% The load tree is a tree as would have been produced by a fold over a 
     %% snapshot taken at the time all the initial keys added.
@@ -704,6 +722,28 @@ replace_test() ->
     Root = cache_root(AAECache0),
     ?assertMatch(Root, CompareRoot),
 
+    cache_alter(AAECache0, <<"K_With0Hash">>, 0, none),
+        % Key added with a Vclock  that hashes to 0
+    cache_alter(AAECache0, <<"K_With0Hash">>, (1 bsl 27) - 1, 0),
+        % Key now has a Vclock that hashes to 2 ^ 27 -1 (the top of the hash range)
+    CompareTree1 = DirectAddFun({<<"K_With0Hash">>, (1 bsl 27) - 1}, CompareTree),
+    AlterRoot = cache_root(AAECache0),
+    AlterComapreRoot = leveled_tictac:fetch_root(CompareTree1),
+    % Altering a key which had a hash of 0 has the same impact as inserting from scratch 
+    ?assertMatch(AlterRoot, AlterComapreRoot),
+
+    cache_alter(AAECache0, <<"K_With0Hash">>, none, (1 bsl 27) - 1),
+
+    % Removing the key => as if it was never there
+    NewRoot = cache_root(AAECache0),
+    ?assertMatch(Root, NewRoot),
+
+    cache_alter(AAECache0, <<"K_WithNeutralChange">>, 1, none),
+    cache_alter(AAECache0, <<"K_WithNeutralChange">>, none, none),
+    cache_alter(AAECache0, <<"K_WithNeutralChange">>, none, 1),
+
+    UnchangedRoot = cache_root(AAECache0),
+    ?assertMatch(Root, UnchangedRoot),
 
     ok = cache_destroy(AAECache0).
 
@@ -726,7 +766,7 @@ dirty_segment_test() ->
         fun(I) ->
             K = integer_to_binary(I),
             H = erlang:phash2(rand:uniform(100000)),
-            cache_alter(AAECache0, K, H, 0)
+            cache_alter(AAECache0, K, H, none)
         end,
 
     lists:foreach(AddFun, lists:seq(2350000, 2380000)),
@@ -751,7 +791,7 @@ dirty_segment_test() ->
     {_HK1, TTH1} = leveled_tictac:tictac_hash(K1, {is_hash, H1}),
     {_HK2, TTH2} = leveled_tictac:tictac_hash(K2, {is_hash, H2}),
 
-    cache_alter(AAECache0, K1, H1, 0),
+    cache_alter(AAECache0, K1, H1, none),
 
     Leaf1 = get_leaf(AAECache0, BranchID, LeafID),
     ?assertMatch(Leaf1, Leaf0 bxor TTH1),
@@ -770,7 +810,7 @@ dirty_segment_test() ->
 
     GUID1 = leveled_util:generate_uuid(),
     cache_markdirtysegments(AAECache0, [S0], GUID1),
-    cache_alter(AAECache0, K2, H2, 0),
+    cache_alter(AAECache0, K2, H2, none),
     Leaf2 = get_leaf(AAECache0, BranchID, LeafID),
     ?assertMatch(Leaf2, Leaf0 bxor TTH2),
     cache_replacedirtysegments(AAECache0, [{S0, Leaf0}], GUID1),
@@ -806,7 +846,7 @@ test_setup_funs(InitialKeys) ->
     AddFun = 
         fun(CachePid) ->
             fun({K, H}) ->
-                cache_alter(CachePid, K, H, 0)
+                cache_alter(CachePid, K, H, none)
             end
         end,
     AlterFun =
@@ -820,7 +860,7 @@ test_setup_funs(InitialKeys) ->
         fun(CachePid) ->
             fun({K, _H}) ->
                 {K, OH} = lists:keyfind(K, 1, InitialKeys),
-                cache_alter(CachePid, K, 0, OH)
+                cache_alter(CachePid, K, none, OH)
             end
         end,
     {AddFun, AlterFun, RemoveFun}.
