@@ -970,12 +970,14 @@ intersect_ids(IDs0, IDs1) ->
 %% will wastefully correct the same data - so randomly chose one of the better
 %% lists
 select_ids(IDList, MaxOutput, StateName, ExchangeID, LogLevels)
-                                            when length(IDList) > MaxOutput ->
+        when length(IDList) > MaxOutput ->
     IDList0 = lists:sort(IDList),
-    aae_util:log("EX005", 
-                    [ExchangeID, length(IDList0), StateName],
-                    logs(),
-                    LogLevels),
+    aae_util:log(
+        "EX005", 
+        [ExchangeID, length(IDList0), StateName],
+        logs(),
+        LogLevels
+    ),
     IDList1 =
         lists:sublist(IDList0, 1 + length(IDList0) - MaxOutput),
     IDList2 =
@@ -986,8 +988,21 @@ select_ids(IDList, MaxOutput, StateName, ExchangeID, LogLevels)
         end,
     {_EndIdx, SpaceIdxL} =
         lists:foldl(FoldFun, {1, []}, lists:zip(IDList1, IDList2)),
-    Selections = 
-        lists:sublist(lists:sort(SpaceIdxL), MaxOutput),
+    Selections =
+        case length(SpaceIdxL) of
+            L when L > MaxOutput ->
+                {MaxResults, TailResults} =
+                    lists:split(MaxOutput, lists:sort(SpaceIdxL)),
+                {LastChosenScore, _LastChosenIdx} = lists:last(MaxResults),
+                TiedSelections =
+                    lists:takewhile(
+                        fun({S, _I}) -> S == LastChosenScore end,
+                        TailResults
+                    ),
+                MaxResults ++ TiedSelections;
+            _ ->
+                lists:sort(SpaceIdxL)
+        end,
     {_ChosenSpace, ChosenIdx} =
         lists:nth(leveled_rand:uniform(length(Selections)), Selections),
     lists:sublist(IDList0, ChosenIdx, MaxOutput);
@@ -1002,8 +1017,8 @@ jitter_pause(Timeout) ->
     leveled_rand:uniform(Timeout) + Timeout div 2.
 
 
--spec reset({pos_integer(), pos_integer()}) 
-                                        -> {non_neg_integer(), pos_integer()}.
+-spec reset(
+    {pos_integer(), pos_integer()}) -> {non_neg_integer(), pos_integer()}.
 %% @doc
 %% Rest the count back to 0
 reset({Target, Target}) -> {0, Target}. 
@@ -1110,6 +1125,25 @@ select_best_id_rand_test() ->
         end,
     ?assertMatch({true, true, true},
                     lists:foldl(F, {false, false, false}, lists:seq(1, 1000))).
+
+
+select_id_withties_test() ->
+    L0 = lists:seq(1, 1000),
+    RL = select_ids(L0, 32, root_confirm, "t0.0", undefined),
+    ?assertMatch(32, length(RL)),
+    Select100 =
+        lists:map(
+            fun(_I) -> 
+                hd(select_ids(L0, 32, root_confirm, "t0.1", undefined))
+            end,
+            lists:seq(1, 100)
+        ),
+    % Expect to see heads evenly distributed
+    % - check we see both above and below 500
+    Above500 = lists:filter(fun(H) -> H > 500 end, Select100),
+    Below500 = lists:filter(fun(H) -> H < 500 end, Select100),
+    ?assert(length(Above500) > 0),
+    ?assert(length(Below500) > 0).
 
 compare_clocks_test() ->
     KV1 = {<<"B1">>, <<"K1">>, [{a, 1}]},
