@@ -17,40 +17,46 @@
 -include("include/aae.hrl").
 
 -export([init/1,
-            handle_call/3,
-            handle_cast/2,
-            handle_info/2,
-            terminate/2,
-            code_change/3]).
+         handle_call/3,
+         handle_cast/2,
+         handle_info/2,
+         terminate/2,
+         code_change/3]).
 
 -export([aae_start/6,
-            aae_start/7,
-            aae_start/8,
-            aae_nextrebuild/1,
-            aae_put/7,
-            aae_close/1,
-            aae_destroy/1,
-            aae_fetchroot/3,
-            aae_mergeroot/3,
-            aae_fetchbranches/4,
-            aae_mergebranches/4,
-            aae_fetchclocks/5,
-            aae_fetchclocks/7,
-            aae_rebuildtrees/5,
-            aae_rebuildtrees/4,
-            aae_rebuildstore/2,
-            aae_rebuildstore/3,
-            aae_fold/6,
-            aae_fold/8,
-            aae_bucketlist/1,
-            aae_loglevel/2,
-            aae_ping/3,
-            aae_runnerprompt/1
+         aae_start/7,
+         aae_start/8,
+         aae_nextrebuild/1,
+         aae_set_rebuild_schedule/2,
+         aae_get_rebuild_schedule/1,
+         aae_prompt_nextrebuild/2,
+         aae_get_object_splitfun/1,
+         aae_set_object_splitfun/2,
+         aae_put/7,
+         aae_close/1,
+         aae_destroy/1,
+         aae_fetchroot/3,
+         aae_mergeroot/3,
+         aae_fetchbranches/4,
+         aae_mergebranches/4,
+         aae_fetchclocks/5,
+         aae_fetchclocks/7,
+         aae_rebuildtrees/5,
+         aae_rebuildtrees/4,
+         aae_rebuildstore/2,
+         aae_rebuildstore/3,
+         aae_fold/6,
+         aae_fold/8,
+         aae_bucketlist/1,
+         aae_loglevel/2,
+         aae_ping/3,
+         aae_runnerprompt/1,
+         aae_produce_progress_report/1
         ]).
 
 -export([foldobjects_buildtrees/2,
-            hash_clocks/2,
-            wrapped_splitobjfun/1]).
+         hash_clocks/2,
+         wrapped_splitobjfun/1]).
 
 -export([wait_on_sync/5]).
 
@@ -214,6 +220,37 @@ aae_start(
 %% When is the next keystore rebuild process scheduled for
 aae_nextrebuild(Pid) ->
     gen_server:call(Pid, rebuild_time, ?SYNC_TIMEOUT).
+
+-spec aae_prompt_nextrebuild(pid(), non_neg_integer()) -> ok.
+%% @doc
+%% Set the next_rebuild time to now + given delay
+aae_prompt_nextrebuild(Pid, Delay) ->
+    gen_server:call(Pid, {prompt_nextrebuild, Delay}, ?SYNC_TIMEOUT).
+
+-spec aae_get_rebuild_schedule(pid()) -> rebuild_schedule().
+%% @doc
+%% Get rebuild schedule
+aae_get_rebuild_schedule(Pid) ->
+    gen_server:call(Pid, get_rebuild_schedule, ?SYNC_TIMEOUT).
+
+-spec aae_set_rebuild_schedule(pid(), rebuild_schedule()) -> ok.
+%% @doc
+%% Set rebuild schedule
+aae_set_rebuild_schedule(Pid, RS) ->
+    gen_server:call(Pid, {set_rebuild_schedule, RS}, ?SYNC_TIMEOUT).
+
+-spec aae_get_object_splitfun(pid()) -> function().
+%% @doc
+%% Get object_splitfun field. It is only used to infer the value of 'storeheads'.
+aae_get_object_splitfun(Pid) ->
+    gen_server:call(Pid, get_object_splitfun, ?SYNC_TIMEOUT).
+
+-spec aae_set_object_splitfun(pid(), function()) -> ok.
+%% @doc
+%% Set object_splitfun. Used to emulate re-initing the controller
+%% with a different value of 'storeheads'.
+aae_set_object_splitfun(Pid, A) ->
+    gen_server:call(Pid, {set_object_splitfun, A}, ?SYNC_TIMEOUT).
 
 -spec aae_put(
     pid(),
@@ -481,6 +518,15 @@ aae_ping(Pid, RequestTime, From) ->
 aae_runnerprompt(Pid) ->
     gen_server:cast(Pid, runner_prompt).
 
+-spec aae_produce_progress_report(pid()) -> list({atom(), term()}).
+%% @doc
+%% Generate a 'progress report', with items such as status,
+%% last_rebuild, next_rebuild, for the aae controller handling this
+%% partition. This report can be displayed by `riak admin tictacaae
+%% treestatus` command.
+aae_produce_progress_report(Pid) ->
+    gen_server:call(Pid, produce_report).
+
 
 %%%============================================================================
 %%% gen_server callbacks
@@ -585,6 +631,17 @@ init([Opts]) ->
 
 handle_call(rebuild_time, _From, State) ->  
     {reply, State#state.next_rebuild, State};
+handle_call(get_rebuild_schedule, _From, State = #state{rebuild_schedule = RS}) ->
+    {reply, RS, State};
+handle_call({set_rebuild_schedule, RS}, _From, State) ->
+    {reply, ok, State#state{rebuild_schedule = RS}};
+handle_call(get_object_splitfun, _From, State = #state{object_splitfun = A}) ->
+    {reply, A, State};
+handle_call({set_object_splitfun, A}, _From, State) ->
+    {reply, ok, State#state{object_splitfun = A}};
+handle_call({prompt_nextrebuild, SecsFromNow}, _From, State) ->
+    {Mega, Sec, Micros} = os:timestamp(),
+    {reply, ok, State#state{next_rebuild = {Mega, Sec + SecsFromNow, Micros}}};
 handle_call(close, _From, State) ->
     ok = maybe_flush_puts(State#state.key_store, 
                             State#state.objectspecs_queue,
@@ -945,6 +1002,11 @@ handle_call(bucket_list,  _From, State) ->
                             true),
     R = aae_keystore:store_bucketlist(State#state.key_store),
     {reply, R, State};
+handle_call(produce_report, _From, State = #state{key_store = KeyStore,
+                                                  next_rebuild = NextRebuild,
+                                                  tree_caches = TreeCaches}) ->
+    R = produce_report(KeyStore, NextRebuild, TreeCaches),
+    {reply, R, State};
 handle_call({ping, RequestTime}, _From, State) ->
     T = max(0, timer:now_diff(os:timestamp(), RequestTime)),
     aae_util:log(aae15, [T div 1000], State#state.log_levels),
@@ -1153,6 +1215,16 @@ wrapped_splitobjfun(ObjectSplitFun) ->
                 T
         end
     end.
+
+produce_report(KeyStore, NextRebuild, TreeCaches) ->
+    TotalDirtySegments =
+        lists:sum(
+          [aae_treecache:cache_segment_count(P) || {_, P} <- TreeCaches]),
+    [{last_rebuild, aae_keystore:store_last_rebuild(KeyStore)},
+     {next_rebuild, NextRebuild},
+     {total_dirty_segments, TotalDirtySegments}
+    ].
+
 
 %%%============================================================================
 %%% Internal functions

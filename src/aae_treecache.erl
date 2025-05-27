@@ -17,17 +17,18 @@
             format_status/1]).
 
 -export([cache_open/3,
-            cache_new/3,
-            cache_alter/4,
-            cache_root/1,
-            cache_leaves/2,
-            cache_markdirtysegments/3,
-            cache_replacedirtysegments/3,
-            cache_destroy/1,
-            cache_startload/1,
-            cache_completeload/2,
-            cache_loglevel/2,
-            cache_close/1]).
+         cache_new/3,
+         cache_alter/4,
+         cache_root/1,
+         cache_leaves/2,
+         cache_markdirtysegments/3,
+         cache_replacedirtysegments/3,
+         cache_destroy/1,
+         cache_startload/1,
+         cache_completeload/2,
+         cache_loglevel/2,
+         cache_close/1,
+         cache_segment_count/1]).
 
 -define(PENDING_EXT, ".pnd").
 -define(FINAL_EXT, ".aae").
@@ -84,6 +85,12 @@ cache_new(RootPath, PartitionID, LogLevels) ->
 %% Close a cache without saving
 cache_destroy(AAECache) ->
     gen_server:cast(AAECache, destroy).
+
+-spec cache_segment_count(pid()) -> non_neg_integer().
+%% @doc
+%% Expose dirty_segments length, for aae-progress-report.
+cache_segment_count(AAECache) ->
+    gen_server:call(AAECache, segment_count, ?SYNC_TIMEOUT).
 
 -spec cache_close(pid()) -> ok.
 %% @doc
@@ -193,7 +200,7 @@ init([Opts]) ->
         },
         hibernate
     }.
-    
+
 
 handle_call(is_restored, _From, State) ->
     {reply, State#state.is_restored, State};
@@ -201,6 +208,8 @@ handle_call(fetch_root, _From, State) ->
     {reply, leveled_tictac:fetch_root(State#state.tree), State};
 handle_call({fetch_leaves, BranchIDs}, _From, State) ->
     {reply, leveled_tictac:fetch_leaves(State#state.tree, BranchIDs), State};
+handle_call(segment_count, _From, State = #state{dirty_segments = A}) ->
+    {reply, length(A), State};
 handle_call(close, _From, State) ->
     case State#state.safe_save of
         true ->

@@ -2,17 +2,26 @@
 -include_lib("common_test/include/ct.hrl").
 -export([all/0, init_per_suite/1, end_per_suite/1]).
 -export([dual_store_compare_medium_so/1,
-            dual_store_compare_medium_ko/1,
-            dual_store_compare_large_so/1,
-            dual_store_compare_large_ko/1,
-            store_notsupported/1]).
+         dual_store_compare_medium_ko/1,
+         dual_store_compare_large_so/1,
+         dual_store_compare_large_ko/1,
+         store_notsupported/1,
+         get_set_rebuild_schedule/1,
+         get_set_storeheads/1,
+         get_set_nextrebuild/1,
+         splitfun_compare_functions/1
+        ]).
 
 all() -> [dual_store_compare_medium_so,
-            dual_store_compare_medium_ko,
-            dual_store_compare_large_so,
-            dual_store_compare_large_ko,
-            store_notsupported
-        ].
+          dual_store_compare_medium_ko,
+          dual_store_compare_large_so,
+          dual_store_compare_large_ko,
+          store_notsupported,
+          get_set_rebuild_schedule,
+          get_set_storeheads,
+          get_set_nextrebuild,
+          splitfun_compare_functions
+         ].
 
 init_per_suite(Config) ->
     testutil:init_per_suite([{suite, "basic"}|Config]),
@@ -20,7 +29,197 @@ init_per_suite(Config) ->
 
 end_per_suite(Config) ->
     testutil:end_per_suite(Config).
-        
+
+get_set_rebuild_schedule(_Config) ->
+    RootPath = testutil:reset_filestructure(),
+    VnodePath1 = filename:join(RootPath, "vnode1/"),
+    SplitF = fun(_) -> {_SomeSensibleSize = 42, 1, 0, undefined, <<>>} end,
+    RS0 = {1, 300},
+
+    {ok, Cntrl} =
+        aae_controller:aae_start({parallel, leveled_ko},
+                                 true,
+                                 RS0,
+                                 [{2, 0}, {2, 1}],
+                                 VnodePath1,
+                                 SplitF),
+
+    ok = test_rebuild_schedule(Cntrl, RS0),
+
+    aae_controller:aae_close(Cntrl),
+    testutil:reset_filestructure().
+
+test_rebuild_schedule(Cntrl, RS0) ->
+    RS1 = {RS1a, RS1b} = aae_controller:aae_get_rebuild_schedule(Cntrl),
+    RS1 = RS0,
+    ok = aae_controller:aae_set_rebuild_schedule(Cntrl, {RS1a, RS1b + 1}),
+    {RS2a, RS2b} = aae_controller:aae_get_rebuild_schedule(Cntrl),
+    RS1a = RS2a,
+    RS2b = RS1b + 1,
+    ok = aae_controller:aae_set_rebuild_schedule(Cntrl, {RS1a + 1, RS1b}),
+    {RS3a, RS3b} = aae_controller:aae_get_rebuild_schedule(Cntrl),
+    RS3a = RS1a + 1,
+    RS1b = RS3b,
+    ok.
+
+get_set_nextrebuild(_Config) ->
+    RootPath = testutil:reset_filestructure(),
+    VnodePath1 = filename:join(RootPath, "vnode1/"),
+    SplitF = fun(_) -> {42, 1, 0, null} end,
+
+    {ok, Cntrl} =
+        aae_controller:aae_start({parallel, leveled_ko},
+                                 true,
+                                 {1, 300},
+                                 [{2, 0}, {2, 1}],
+                                 VnodePath1,
+                                 SplitF),
+
+    NextRebuild0 = aae_controller:aae_nextrebuild(Cntrl),
+    Now = os:timestamp(),
+    ok = aae_controller:aae_prompt_nextrebuild(Cntrl, 10),
+    NextRebuild1 = aae_controller:aae_nextrebuild(Cntrl),
+    true = (NextRebuild1 /= NextRebuild0),
+    Report = aae_controller:aae_produce_progress_report(Cntrl),
+    NextRebuild1Reported = proplists:get_value(next_rebuild, Report),
+    NextRebuild1Reported = NextRebuild1,
+    ApproxTenSec = timer:now_diff(NextRebuild1, Now) div 1000000,
+    true = (ApproxTenSec > 9),
+    true = (ApproxTenSec < 11),
+
+    aae_controller:aae_close(Cntrl),
+    testutil:reset_filestructure().
+
+-define(NKEYS, 15).
+-define(NKEYS_IN_RANGE, 9).
+-define(NKEYS_UPDATED, 5).
+-define(NEW_SIBLING_COUNT, (?NKEYS_IN_RANGE + (?NKEYS_IN_RANGE - ?NKEYS_UPDATED))).
+
+get_set_storeheads(_Config) ->
+    RootPath = testutil:reset_filestructure(),
+    VnodePath = filename:join(RootPath, "vnode1/"),
+    Preflist = [{2, 0}, {2, 1}],
+
+    StoreheadsOnSplitF = fun(_) -> {_SomeSensibleSize = 42, 1, 0, undefined, <<>>} end,
+    StoreheadsOffSplitF = fun(_) -> {42, _DoubleSiblingCount = 2, 0, undefined, <<>>} end,
+
+    {ok, Cntrl} =
+        aae_controller:aae_start({parallel, leveled_ko},
+                                 true,
+                                 {1, 300},
+                                 Preflist,
+                                 VnodePath,
+                                 StoreheadsOffSplitF,
+                                 [info, warn, error, critical]),  %% have one function
+
+    Bucket = <<"b1">>,
+    BKVList = testutil:gen_keys([], ?NKEYS, Bucket),
+    {BKVList1, _} = lists:split(?NKEYS_UPDATED, BKVList),
+    ok = testutil:put_keys(Cntrl, 2, BKVList, none),
+    ct:print("put ~b keys: ~p\n", [?NKEYS, BKVList]),
+
+    StartKey = list_to_binary(string:right(integer_to_list(0), 6, $0)),
+    EndKey = list_to_binary(string:right(integer_to_list(10), 6, $0)),
+
+    %% there be 9*2 siblings in the range
+    SCFolder0 = key_range_folder(Cntrl, Bucket, StartKey, EndKey),
+
+    %% test query
+    SCF0 = SCFolder0(),
+    ct:print("storeheads is initially off: test query should return ~b siblings:\n~b indeed\n",
+             [?NKEYS_IN_RANGE * 2, element(2, SCF0)]),
+    ?NKEYS_IN_RANGE * 2 = element(2, SCF0),
+
+    %% update split_function
+    ok = aae_controller:aae_set_object_splitfun(Cntrl, StoreheadsOnSplitF),
+    ct:print("storeheads now set to on\n"),
+
+    %% test query: no change in output
+    SCFolder1 = key_range_folder(Cntrl, Bucket, StartKey, EndKey),
+    SCF1 = SCFolder1(),
+    ct:print("after setting storeheads to on, expect no change in query output:\n"
+             "number of siblings returned is still ~b\n",
+             [element(2, SCF1)]),
+    ?NKEYS_IN_RANGE * 2 = element(2, SCF1),
+    true = (SCF0 == SCF1),
+
+    %% update some objects
+    BKVList1Updated =
+        [{B, K, [{<<V/binary, "UPDATED">>, C}]} || {B, K, [{V, C}]} <- BKVList1],
+    ok = testutil:put_keys(Cntrl, 2, BKVList1Updated, none),
+    ct:print("update ~b objects\n", [?NKEYS_UPDATED]),
+
+    %% test query to show partial change
+    SCFolder2 = key_range_folder(Cntrl, Bucket, StartKey, EndKey),
+    SCF2 = SCFolder2(),
+    ct:print("after updating, there should be a partial change (minus ~b siblings). Query returns ~b siblings:\n",
+             [?NKEYS_UPDATED, element(2, SCF2)]),
+    true = (SCF0 /= SCF2),
+    ?NEW_SIBLING_COUNT = element(2, SCF2),
+
+    aae_controller:aae_close(Cntrl),
+    RootPath = testutil:reset_filestructure().
+
+
+splitfun_compare_functions(_Config) ->
+    RootPath = testutil:reset_filestructure(),
+    VnodePath = filename:join(RootPath, "vnode1/"),
+    Preflist = [{2, 0}],
+
+    SplitF_1 = mock_aae_from_object_binary_for_storeheads(true),
+    SplitF_2 = mock_aae_from_object_binary_for_storeheads(false),
+
+    {ok, Cntrl} =
+        aae_controller:aae_start({parallel, leveled_ko},
+                                 true,
+                                 {1, 300},
+                                 Preflist,
+                                 VnodePath,
+                                 SplitF_1,
+                                 [info, warn, error, critical]),  %% have one function
+
+    %% this is essentially to test that two logically identical functions
+    %% created separately, do indeed compare equal
+    true = (aae_controller:wrapped_splitobjfun(SplitF_1) ==
+                aae_controller:aae_get_object_splitfun(Cntrl)),
+    ok = aae_controller:aae_set_object_splitfun(
+           Cntrl, aae_controller:wrapped_splitobjfun(SplitF_2)),
+    true = (aae_controller:wrapped_splitobjfun(SplitF_2) ==
+                aae_controller:aae_get_object_splitfun(Cntrl)),
+
+    aae_controller:aae_close(Cntrl),
+    RootPath = testutil:reset_filestructure().
+
+-define(APOINTINTIME, {1747,917445,410090}).
+mock_aae_from_object_binary_for_storeheads(true) ->
+    fun(_ObjBin) ->
+        {_Size = 42, _SibCount = 1, 0, _LastMods = [?APOINTINTIME], <<>>}
+    end;
+mock_aae_from_object_binary_for_storeheads(false) ->
+    fun(_) ->
+        {42, 1, 0, [?APOINTINTIME], term_to_binary(null)}
+    end.
+
+
+key_range_folder(Cntrl, Bucket, StartKey, EndKey) ->
+    Elements = [{sibcount, null}],
+    SCFoldFun =
+        fun(_FB, FK, FV, {FAccKL, FAccSc}) ->
+            {sibcount, FSc} = lists:keyfind(sibcount, 1, FV),
+            if (FK >= StartKey) and (FK < EndKey) ->
+                    {[FK|FAccKL], FAccSc + FSc};
+               el/=se ->
+                    {FAccKL, FAccSc}
+            end
+        end,
+    SCInitAcc = {[], 0},
+    {async, Folder} =
+        aae_controller:aae_fold(
+          Cntrl, {key_range, Bucket, StartKey, EndKey},
+          all, SCFoldFun, SCInitAcc, Elements),
+    Folder.
+
+
 store_notsupported(_Config) ->
     RootPath = testutil:reset_filestructure(),
     VnodePath1 = filename:join(RootPath, "vnode1/"),
