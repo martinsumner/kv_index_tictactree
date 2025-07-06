@@ -1,15 +1,14 @@
-{application, kv_index_tictactree,
- [
-  {description, "AAE helper service for KV vnode"},
-  {vsn, git},
-  {registered, []},
-  {applications, [
-                  kernel,
-                  stdlib,
-		  leveled
-                 ]},
-  {maintainers, ["Martin Sumner"]},
-  {licenses, ["Apache"]},
-  {links, [{"Github", "https://github.com/martinsumner/kv_index_tictactree"}]},
-  {env, [{root_path, "test"}]}
- ]}.
+{application, kv_index_tictactree, [
+    {description, "AAE helper service for KV vnode"},
+    {vsn, git},
+    {registered, []},
+    {applications, [
+        kernel,
+        stdlib,
+        leveled
+    ]},
+    {maintainers, ["Martin Sumner"]},
+    {licenses, ["Apache"]},
+    {links, [{"Github", "https://github.com/martinsumner/kv_index_tictactree"}]},
+    {env, [{root_path, "test"}]}
+]}.

@@ -1,23 +1,27 @@
 %% -------- Overview ---------
 %%
-%% Centralised definition of log functions.  To make switching to Lager in 
+%% Centralised definition of log functions.  To make switching to Lager in
 %% the future a bit easier, and avoid repeated codes across modules
 
 -module(aae_util).
 
 -include("include/aae.hrl").
 
--export([log/2,
-            log/3,
-            log_timer/4,
-            get_opt/2,
-            get_opt/3,
-            make_binarykey/2,
-            safe_open/1]).
+-export([
+    log/2,
+    log/3,
+    log_timer/4,
+    get_opt/2,
+    get_opt/3,
+    make_binarykey/2,
+    safe_open/1
+]).
 
--export([clean_subdir/1,
-            test_key_generator/1,
-            flip_byte/3]).         
+-export([
+    clean_subdir/1,
+    test_key_generator/1,
+    flip_byte/3
+]).
 
 -ifdef(TEST).
 -export([get_segmentid/2]).
@@ -25,10 +29,11 @@
 
 -define(DEFAULT_LOG_LEVELS, [warning, error, critical]).
 
--type log_levels() :: list(leveled_log:log_level())|undefined.
+-type log_levels() :: list(leveled_log:log_level()) | undefined.
 
 -export_type([log_levels/0]).
 
+%% erlfmt:ignore-begin
 -define(LOGBASE,
     #{
         g0001 => 
@@ -153,7 +158,7 @@
             {info, <<"During cache rebuild reached length of change_queue=~w">>}
 
     }).
-
+%% erlfmt:ignore-end
 
 %%%============================================================================
 %%% External functions
@@ -161,7 +166,7 @@
 
 -spec log(atom(), list()) -> term().
 %% @doc
-%% Pick the log out of the logbase based on the reference 
+%% Pick the log out of the logbase based on the reference
 log(LogReference, Subs) ->
     log(LogReference, Subs, undefined).
 
@@ -172,7 +177,8 @@ log(LogReference, Subs, LogLevels) ->
     leveled_log:log(LogReference, Subs, LogLevels, ?LOGBASE, tictacaae).
 
 -spec log_timer(
-    atom(), list(), erlang:timestamp(), aae_util:log_levels()) -> term().
+    atom(), list(), erlang:timestamp(), aae_util:log_levels()
+) -> term().
 log_timer(LogReference, Subs, StartTime, undefined) ->
     log_timer(LogReference, Subs, StartTime, ?DEFAULT_LOG_LEVELS);
 log_timer(LogReference, Subs, StartTime, LogLevels) ->
@@ -181,13 +187,13 @@ log_timer(LogReference, Subs, StartTime, LogLevels) ->
     ).
 
 -spec get_opt(atom(), list()) -> any().
-%% @doc 
+%% @doc
 %% Return an option from a KV list
 get_opt(Key, Opts) ->
     get_opt(Key, Opts, undefined).
 
 -spec get_opt(atom(), list(), any()) -> any().
-%% @doc 
+%% @doc
 %% Return an option from a KV list, or a default if not present
 get_opt(Key, Opts, Default) ->
     case proplists:get_value(Key, Opts) of
@@ -197,12 +203,12 @@ get_opt(Key, Opts, Default) ->
             Value
     end.
 
-
 -spec make_binarykey(aae_keystore:bucket(), aae_keystore:key()) -> binary().
 %% @doc
-%% Convert Bucket and Key into a single binary 
-make_binarykey({Type, Bucket}, Key)
-                    when is_binary(Type), is_binary(Bucket), is_binary(Key) ->
+%% Convert Bucket and Key into a single binary
+make_binarykey({Type, Bucket}, Key) when
+    is_binary(Type), is_binary(Bucket), is_binary(Key)
+->
     <<Type/binary, Bucket/binary, Key/binary>>;
 make_binarykey(Bucket, Key) when is_binary(Bucket), is_binary(Key) ->
     <<Bucket/binary, Key/binary>>.
@@ -211,13 +217,13 @@ make_binarykey(Bucket, Key) when is_binary(Bucket), is_binary(Key) ->
 %%% Internal functions
 %%%============================================================================
 
--spec safe_open(string()) -> {ok, binary()}|{error, atom()}.
+-spec safe_open(string()) -> {ok, binary()} | {error, atom()}.
 safe_open(FileName) ->
-    case filelib:is_file(FileName) of 
+    case filelib:is_file(FileName) of
         true ->
             case file:read_file(FileName) of
                 {ok, <<CRC32:32/integer, BinContent/binary>>} ->
-                    case erlang:crc32(BinContent) of 
+                    case erlang:crc32(BinContent) of
                         CRC32 ->
                             {ok, BinContent};
                         _ ->
@@ -225,11 +231,10 @@ safe_open(FileName) ->
                     end;
                 _ ->
                     {error, no_crc}
-            end;        
+            end;
         false ->
             {error, not_present}
     end.
-
 
 %%%============================================================================
 %%% Test
@@ -238,25 +243,25 @@ safe_open(FileName) ->
 flip_byte(Binary, Offset, Length) ->
     Byte1 = rand:uniform(Length) + Offset - 1,
     <<PreB1:Byte1/binary, A:8/integer, PostByte1/binary>> = Binary,
-    case A of 
+    case A of
         0 ->
             <<PreB1:Byte1/binary, 255:8/integer, PostByte1/binary>>;
         _ ->
             <<PreB1:Byte1/binary, 0:8/integer, PostByte1/binary>>
     end.
 
-test_key_generator(hash) -> 
-    ValueFun = 
-        fun() -> 
+test_key_generator(hash) ->
+    ValueFun =
+        fun() ->
             V = rand:uniform(1000),
-            <<Hash:32/integer, _Rest/binary>> 
-                = crypto:hash(md5, <<V:32/integer>>),
+            <<Hash:32/integer, _Rest/binary>> =
+                crypto:hash(md5, <<V:32/integer>>),
             Hash
         end,
     internal_generator(ValueFun);
 test_key_generator(v1) ->
-    ValueFun = 
-        fun() -> 
+    ValueFun =
+        fun() ->
             Clock = [{rand:uniform(1000), rand:uniform(1000)}],
             BClock = term_to_binary(Clock),
             Size = rand:uniform(100000),
@@ -277,20 +282,22 @@ clean_subdir(DirPath) ->
     case filelib:is_dir(DirPath) of
         true ->
             {ok, Files} = file:list_dir(DirPath),
-            lists:foreach(fun(FN) ->
-                                File = filename:join(DirPath, FN),
-                                io:format("Attempting deletion ~s~n", [File]),
-                                ok = 
-                                    case filelib:is_dir(File) of 
-                                        true -> 
-                                            clean_subdir(File),
-                                            file:del_dir(File);
-                                        false -> 
-                                            file:delete(File) 
-                                    end,
-                                io:format("Success deleting ~s~n", [File])
-                                end,
-                            Files);
+            lists:foreach(
+                fun(FN) ->
+                    File = filename:join(DirPath, FN),
+                    io:format("Attempting deletion ~s~n", [File]),
+                    ok =
+                        case filelib:is_dir(File) of
+                            true ->
+                                clean_subdir(File),
+                                file:del_dir(File);
+                            false ->
+                                file:delete(File)
+                        end,
+                    io:format("Success deleting ~s~n", [File])
+                end,
+                Files
+            );
         false ->
             ok
     end.
