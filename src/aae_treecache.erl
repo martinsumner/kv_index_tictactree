@@ -5,7 +5,7 @@
 
 -behaviour(gen_server).
 
--include("include/aae.hrl").
+-include("aae.hrl").
 
 -export([
     init/1,
@@ -43,7 +43,7 @@
     is_restored = false :: boolean(),
     tree :: leveled_tictac:tictactree() | undefined,
     root_path :: list() | undefined,
-    partition_id :: integer() | undefined,
+    partition_id :: {integer(), integer()} | integer() | undefined,
     loading = false :: boolean(),
     dirty_segments = [] :: list(),
     active_fold :: string() | undefined,
@@ -88,7 +88,8 @@ cache_new(RootPath, PartitionID, LogLevels) ->
         {ignore_disk, true},
         {log_levels, LogLevels}
     ],
-    gen_server:start_link(?MODULE, [Opts], []).
+    {ok, Pid} = gen_server:start_link(?MODULE, [Opts], []),
+    {ok, Pid}.
 
 -spec cache_destroy(pid()) -> ok.
 %% @doc
@@ -184,10 +185,30 @@ cache_loglevel(Pid, LogLevels) ->
 %%%============================================================================
 
 init([Opts]) ->
-    PartitionID = aae_util:get_opt(partition_id, Opts),
-    RootPath = aae_util:get_opt(root_path, Opts),
-    IgnoreDisk = aae_util:get_opt(ignore_disk, Opts, false),
-    LogLevels = aae_util:get_opt(log_levels, Opts),
+    PartitionID =
+        case aae_util:get_opt(partition_id, Opts) of
+            {Index, N} when is_integer(Index), is_integer(N) ->
+                {Index, N};
+            Index when is_integer(Index) ->
+                Index
+        end,
+    RootPath =
+        case aae_util:get_opt(root_path, Opts) of
+            RPOpt when is_list(RPOpt) ->
+                aae_util:check_rootpath(RPOpt)
+        end,
+    IgnoreDisk =
+        case aae_util:get_opt(ignore_disk, Opts, false) of
+            IgnoreOpt when is_boolean(IgnoreOpt) ->
+                IgnoreOpt
+        end,
+    LogLevels =
+        case aae_util:get_opt(log_levels, Opts) of
+            LLOpt when is_list(LLOpt) ->
+                aae_util:filter_log_levels(LLOpt);
+            undefined ->
+                undefined
+        end,
     RootPath0 = filename:join(RootPath, flatten_id(PartitionID)) ++ "/",
     {StartTree, SaveSQN, IsRestored} =
         case {open_from_disk(RootPath0, LogLevels), IgnoreDisk} of
@@ -218,27 +239,30 @@ init([Opts]) ->
 
 handle_call(is_restored, _From, State) ->
     {reply, State#state.is_restored, State};
-handle_call(fetch_root, _From, State) ->
+handle_call(fetch_root, _From, State = #state{tree = Tree}) when
+    Tree =/= undefined
+->
     {reply, leveled_tictac:fetch_root(State#state.tree), State};
-handle_call({fetch_leaves, BranchIDs}, _From, State) ->
+handle_call({fetch_leaves, BranchIDs}, _From, State = #state{tree = Tree}) when
+    Tree =/= undefined
+->
     {reply, leveled_tictac:fetch_leaves(State#state.tree, BranchIDs), State};
 handle_call(segment_count, _From, State = #state{dirty_segments = A}) ->
     {reply, length(A), State};
 handle_call(close, _From, State) ->
-    case State#state.safe_save of
-        true ->
+    case {State#state.safe_save, State#state.tree, State#state.root_path} of
+        {true, Tree, RP} when Tree =/= undefined, RP =/= undefined ->
             save_to_disk(
-                State#state.root_path,
-                State#state.save_sqn,
-                State#state.tree,
-                State#state.log_levels
+                RP, State#state.save_sqn, Tree, State#state.log_levels
             );
-        false ->
+        _ ->
             ok
     end,
     {stop, normal, ok, State}.
 
-handle_cast({alter, Key, CurrentHash, OldHash}, State) ->
+handle_cast(
+    {alter, Key, CurrentHash, OldHash}, State = #state{change_queue = CQ}
+) when is_list(CQ) ->
     {Tree0, Segment} =
         leveled_tictac:add_kv(
             State#state.tree,
@@ -250,7 +274,6 @@ handle_cast({alter, Key, CurrentHash, OldHash}, State) ->
     State0 =
         case State#state.loading of
             true ->
-                CQ = State#state.change_queue,
                 QCnt = State#state.queued_changes,
                 State#state{
                     change_queue = [{Key, CurrentHash, OldHash} | CQ],
@@ -394,10 +417,12 @@ save_to_disk(RootPath, SaveSQN, TreeCache, LogLevels) ->
         <<CRC32:32/integer, Serialised/binary>>,
         [raw]
     ),
-    file:rename(
-        filename:join(RootPath, PendingName),
-        form_cache_filename(RootPath, SaveSQN)
-    ).
+    ok =
+        file:rename(
+            filename:join(RootPath, PendingName),
+            form_cache_filename(RootPath, SaveSQN)
+        ),
+    ok.
 
 -spec open_from_disk(
     list(), aae_util:log_levels()
@@ -456,14 +481,15 @@ open_from_disk(RootPath, LogLevels) ->
 form_cache_filename(RootPath, SaveSQN) ->
     filename:join(RootPath, integer_to_list(SaveSQN) ++ ?FINAL_EXT).
 
--spec alterhash_fun(
-    binary(),
-    {integer() | none, integer() | none}
-) -> {binary(), {is_hash, integer()}}.
+-spec alterhash_fun(term(), term()) -> {binary(), {is_hash, integer()}}.
 %% @doc
 %% Function to calculate the hash change need to make an alter into a straight
 %% add as the BinExtractfun in leveled_tictac
-alterhash_fun(Key, {CurrentHash, OldHash}) ->
+alterhash_fun(Key, {CurrentHash, OldHash}) when
+    is_binary(Key),
+    is_integer(CurrentHash) orelse CurrentHash == none,
+    is_integer(OldHash) orelse OldHash == none
+->
     % TODO: Should move this function to leveled_tictac
     % - requires secret knowledge of implementation to perform
     % alter
@@ -543,7 +569,11 @@ clean_saveopen_test() ->
     UnrelatedFN = filename:join(RootPath, "alt.file"),
     ok = file:write_file(UnrelatedFN, <<"no_delete">>),
 
-    {Tree3, SaveSQN} = open_from_disk(RootPath, undefined),
+    {Tree3, SaveSQN} =
+        case open_from_disk(RootPath, undefined) of
+            {OT3, OT3SQN} when OT3 =/= none ->
+                {OT3, OT3SQN}
+        end,
     ?assertMatch(3, SaveSQN),
     ?assertMatch([], leveled_tictac:find_dirtyleaves(Tree2, Tree3)),
     ?assertMatch({none, 1}, open_from_disk(RootPath, undefined)),

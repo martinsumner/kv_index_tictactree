@@ -5,7 +5,6 @@
 -module(aae_runner).
 
 -behaviour(gen_server).
--include("include/aae.hrl").
 
 -export([
     init/1,
@@ -42,7 +41,8 @@
 %% @doc
 %% Start an AAE runner to manage folds
 runner_start(LogLevels) ->
-    gen_server:start_link(?MODULE, [LogLevels, self()], []).
+    {ok, Pid} = gen_server:start_link(?MODULE, [LogLevels, self()], []),
+    {ok, Pid}.
 
 -spec runner_work(pid(), aae_controller:runner_work() | queue_empty) -> ok.
 %% @doc
@@ -107,9 +107,9 @@ handle_cast({work, Folder, ReturnFun, SizeFun}, State) ->
         end,
     {noreply, State0, 0}.
 
-handle_info(timeout, State) ->
+handle_info(timeout, State = #state{aae_controller = C}) when C =/= undefined ->
     aae_util:log(r0004, [], State#state.log_levels),
-    ok = aae_controller:aae_runnerprompt(State#state.aae_controller),
+    ok = aae_controller:aae_runnerprompt(C),
     {noreply, State}.
 
 terminate(_Reason, State) ->
@@ -142,6 +142,7 @@ maybe_log(RS_Acc, QT_Acc, QC_Acc, _LogFreq, LogLs) ->
 -ifdef(TEST).
 
 -include_lib("eunit/include/eunit.hrl").
+-include_lib("kv_index_tictactree/include/aae.hrl").
 
 runner_fail_test() ->
     {ok, R} = runner_start(undefined),
