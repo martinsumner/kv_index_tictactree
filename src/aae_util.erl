@@ -5,7 +5,7 @@
 
 -module(aae_util).
 
--include("include/aae.hrl").
+-include("aae.hrl").
 
 -export([
     log/2,
@@ -14,7 +14,9 @@
     get_opt/2,
     get_opt/3,
     make_binarykey/2,
-    safe_open/1
+    safe_open/1,
+    filter_log_levels/1,
+    check_rootpath/1
 ]).
 
 -export([
@@ -185,6 +187,20 @@ log_timer(LogReference, Subs, StartTime, LogLevels) ->
     leveled_log:log_timer(
         LogReference, Subs, StartTime, LogLevels, ?LOGBASE, tictacaae
     ).
+
+-spec filter_log_levels(list()) -> list(leveled_log:log_level()).
+filter_log_levels(Inputs) ->
+    lists:filter(
+        fun(I) -> lists:member(I, [debug, info, warning, error, critical]) end,
+        Inputs
+    ).
+
+-spec check_rootpath(list()) -> string().
+check_rootpath(RootPath) ->
+    case io_lib:printable_list(RootPath) of
+        true ->
+            RootPath
+    end.
 
 -spec get_opt(atom(), list()) -> any().
 %% @doc

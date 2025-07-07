@@ -96,7 +96,7 @@
     ]}
 ).
 
--include("include/aae.hrl").
+-include("aae.hrl").
 
 -define(TRANSITION_PAUSE_MS, 500).
 % A pause between phases - allow queue lengths to change, and avoid
@@ -124,6 +124,8 @@
 % what this value is, at this level with a small tree it will save opening
 % all but one block in most slots (with the sst file).  I suspect the
 % optimal number is more likely to be higher than lower.
+
+-define(IS_DEF(Term), Term =/= undefined).
 
 -export([
     init/1,
@@ -361,7 +363,9 @@ prepare_full_exchange(timeout, State) ->
         State
     ).
 
-prepare_partial_exchange(timeout, State) ->
+prepare_partial_exchange(
+    timeout, State = #state{exchange_filters = Filters}
+) when Filters =/= none ->
     aae_util:log(
         ex006,
         [prepare_partial_exchange, State#state.exchange_id],
@@ -380,7 +384,9 @@ prepare_partial_exchange(timeout, State) ->
         State
     ).
 
-tree_compare(timeout, State) ->
+tree_compare(timeout, State = #state{exchange_filters = Filters}) when
+    Filters =/= none
+->
     aae_util:log(
         ex006,
         [root_compare, State#state.exchange_id],
@@ -402,7 +408,6 @@ tree_compare(timeout, State) ->
     % timing differences.  Ideally the natural deltas will be small enough so
     % that there should be no more than 2 tree compares before a segment filter
     % can be applied to accelerate the process.
-    Filters = State#state.exchange_filters,
     TreeSize = element(?FILTERIDX_TRS, Filters),
     case
         ((length(StillDirtyLeaves) > 0) and
@@ -589,7 +594,9 @@ branch_compare(timeout, State) ->
             )
     end.
 
-clock_compare(timeout, State) ->
+clock_compare(timeout, State = #state{repair_fun = RepairFun}) when
+    ?IS_DEF(RepairFun)
+->
     aae_util:log(
         ex006,
         [clock_compare, State#state.exchange_id],
@@ -601,7 +608,6 @@ clock_compare(timeout, State) ->
         State#state.log_levels
     ),
     RepairKeys = compare_clocks(State#state.blue_acc, State#state.pink_acc),
-    RepairFun = State#state.repair_fun,
     aae_util:log(
         ex004,
         [State#state.exchange_id, State#state.purpose, length(RepairKeys)],
@@ -694,7 +700,9 @@ handle_event(_Msg, StateName, State) ->
 handle_info(_Msg, StateName, State) ->
     {next_state, StateName, State}.
 
-terminate(normal, StateName, State) ->
+terminate(normal, StateName, State = #state{reply_fun = ReplyFun}) when
+    ?IS_DEF(ReplyFun)
+->
     case State#state.exchange_type of
         full ->
             case StateName of
@@ -770,7 +778,6 @@ terminate(normal, StateName, State) ->
                     )
             end
     end,
-    ReplyFun = State#state.reply_fun,
     ReplyFun({State#state.pending_state, length(State#state.key_deltas)}).
 
 code_change(_OldVsn, StateName, State, _Extra) ->
@@ -1052,44 +1059,46 @@ compare_clocks(BlueList, PinkList) ->
     % joined list
 
     BlueDeltaList =
-        lists:reverse(
-            ordsets:fold(
-                fun({B, K, VCB}, Acc) ->
-                    % Assume for now that element may be only
-                    % blue
-                    [{{B, K}, {VCB, none}} | Acc]
-                end,
-                [],
-                BlueDelta
-            )
+        lists:map(
+            fun({B, K, VCB}) ->
+                % Assume for now that element may be only blue
+                {{B, K}, {VCB, none}}
+            end,
+            ordsets:to_list(BlueDelta)
         ),
     % BlueDeltaList is the output of compare clocks, assuming the item
     % is only on the Blue side (so it compares the blue vector clock with
     % none)
-
-    PinkEnrichFun =
-        fun({B, K, VCP}, Acc) ->
-            case lists:keyfind({B, K}, 1, Acc) of
-                {{B, K}, {VCB, none}} ->
-                    ElementWithClockDiff =
-                        {{B, K}, {VCB, VCP}},
-                    lists:keyreplace({B, K}, 1, Acc, ElementWithClockDiff);
-                false ->
-                    ElementOnlyPink =
-                        {{B, K}, {none, VCP}},
-                    lists:keysort(1, [ElementOnlyPink | Acc])
-            end
-        end,
     % The Foldfun to be used on the PinkDelta, will now fill in the Pink
     % vector clock if the element also exists in Pink
 
-    AllDeltaList =
-        ordsets:fold(PinkEnrichFun, BlueDeltaList, PinkDelta),
+    AllDeltaList = compare_foldfun(ordsets:to_list(PinkDelta), BlueDeltaList),
     % The accumulator starts with the Blue side only perspective, and
     % either adds to it or enriches it by folding over the Pink side
     % view
 
     AllDeltaList.
+
+-spec compare_foldfun(list(tuple()), list(repair_input())) ->
+    list(repair_input()).
+compare_foldfun([], Acc) ->
+    Acc;
+compare_foldfun([{B, K, VCP} | PinkDeltaTail], Acc) ->
+    case lists:keyfind({B, K}, 1, Acc) of
+        {{B, K}, {VCB, none}} ->
+            ElementWithClockDiff =
+                {{B, K}, {VCB, VCP}},
+            compare_foldfun(
+                PinkDeltaTail,
+                lists:keyreplace({B, K}, 1, Acc, ElementWithClockDiff)
+            );
+        false ->
+            ElementOnlyPink =
+                {{B, K}, {none, VCP}},
+            compare_foldfun(
+                PinkDeltaTail, lists:keysort(1, [ElementOnlyPink | Acc])
+            )
+    end.
 
 -spec compare_trees(
     leveled_tictac:tictactree(),
