@@ -28,12 +28,14 @@
     aae_start/6,
     aae_start/7,
     aae_start/8,
+    aae_start/9,
     aae_nextrebuild/1,
     aae_set_rebuild_schedule/2,
     aae_get_rebuild_schedule/1,
     aae_prompt_nextrebuild/2,
     aae_get_object_splitfun/1,
     aae_set_object_splitfun/2,
+    aae_reset_key_filter/1,
     aae_put/7,
     aae_close/1,
     aae_destroy/1,
@@ -57,7 +59,6 @@
 ]).
 
 -export([
-    foldobjects_buildtrees/2,
     hash_clocks/2,
     wrapped_splitobjfun/1
 ]).
@@ -96,7 +97,8 @@
     log_levels :: aae_util:log_levels(),
     runner_queue = [] :: list(runner_work()),
     queue_backlog = false :: boolean(),
-    block_next_put = false :: boolean()
+    block_next_put = false :: boolean(),
+    key_filter = none :: key_filter_fun()
 }).
 
 -record(options, {
@@ -107,7 +109,8 @@
     object_splitfun,
     root_path :: list(),
     log_levels :: aae_util:log_levels(),
-    leveled_options :: aae_keystore:leveled_options()
+    leveled_options :: aae_keystore:leveled_options(),
+    key_filter = none :: key_filter_fun()
 }).
 
 -define(IS_DEF(Term), Term =/= undefined).
@@ -162,6 +165,9 @@
             binary()
         }
     ).
+-type key_filter_fun() ::
+    none |
+    fun(({aae_keystore:bucket(), aae_keystore:key()}|reset) -> boolean()).
 %% erlfmt:ignore-end
 
 -type clock_hash() :: integer() | none.
@@ -176,7 +182,8 @@
     rebuild_schedule/0,
     version_vector/0,
     clock_hash/0,
-    runner_work/0
+    runner_work/0,
+    key_filter_fun/0
 ]).
 
 %%%============================================================================
@@ -194,6 +201,21 @@ aae_start(KeyStoreT, IsEmpty, RS, PLs, Path, ObjSplitFun, LogLevels) ->
         KeyStoreT, IsEmpty, RS, PLs, Path, ObjSplitFun, LogLevels, LeveledOpts
     ).
 
+aae_start(
+    KeyStoreT, IsEmpty, RS, PLs, Path, ObjSplitFun, LogLevels, LeveledOpts
+) ->
+    aae_start(
+        KeyStoreT,
+        IsEmpty,
+        RS,
+        PLs,
+        Path,
+        ObjSplitFun,
+        LogLevels,
+        LeveledOpts,
+        none
+    ).
+
 -spec aae_start(
     keystore_type(),
     boolean(),
@@ -202,7 +224,8 @@ aae_start(KeyStoreT, IsEmpty, RS, PLs, Path, ObjSplitFun, LogLevels) ->
     list(),
     fun((term()) -> tuple()),
     aae_util:log_levels() | undefined,
-    aae_keystore:leveled_options()
+    aae_keystore:leveled_options(),
+    key_filter_fun()
 ) -> {ok, pid()}.
 %% @doc
 %% Start an AAE controller
@@ -210,7 +233,7 @@ aae_start(KeyStoreT, IsEmpty, RS, PLs, Path, ObjSplitFun, LogLevels) ->
 %% {Size, SibCount, IndexHash, LMD, MD}.  If the SplitFun previously outputted
 %% {Size, SibCount, IndexHash, null} that output will be converted
 aae_start(
-    KeyStoreT, IsEmpty, RS, PLs, Path, ObjSplitFun, LogLevels, LeveledOpts
+    KeyStoreT, IsEmpty, RS, PLs, Path, ObjSplitFun, LogLevels, LeveledOpts, KFF
 ) ->
     WrapObjSplitFun = wrapped_splitobjfun(ObjSplitFun),
     AAEopts =
@@ -222,7 +245,8 @@ aae_start(
             root_path = Path,
             object_splitfun = WrapObjSplitFun,
             log_levels = LogLevels,
-            leveled_options = LeveledOpts
+            leveled_options = LeveledOpts,
+            key_filter = KFF
         },
     {ok, Pid} = gen_server:start(?MODULE, [AAEopts], []),
     {ok, Pid}.
@@ -263,6 +287,12 @@ aae_get_object_splitfun(Pid) ->
 %% with a different value of 'storeheads'.
 aae_set_object_splitfun(Pid, A) ->
     gen_server:call(Pid, {set_object_splitfun, A}, ?SYNC_TIMEOUT).
+
+-spec aae_reset_key_filter(pid()) -> boolean().
+%% @doc
+%% Reset the key filter fun (e.g. to clear cache due to a bucket type change)
+aae_reset_key_filter(Pid) ->
+    gen_server:call(Pid, reset_key_filter, ?SYNC_TIMEOUT).
 
 -spec aae_put(
     pid(),
@@ -687,6 +717,7 @@ init([Opts]) ->
     ),
     {ok, State0#state{
         object_splitfun = Opts#options.object_splitfun,
+        key_filter = Opts#options.key_filter,
         index_ns = Opts#options.index_ns,
         tree_caches = TreeCaches,
         broken_trees = not AllTreesOK,
@@ -704,6 +735,8 @@ handle_call(get_object_splitfun, _From, State = #state{object_splitfun = A}) ->
     {reply, A, State};
 handle_call({set_object_splitfun, A}, _From, State) ->
     {reply, ok, State#state{object_splitfun = A}};
+handle_call(reset_key_filter, _From, State) ->
+    {reply, aae_util:apply_key_filter(State#state.key_filter, reset), State};
 handle_call({prompt_nextrebuild, SecsFromNow}, _From, State) ->
     {Mega, Sec, Micros} = os:timestamp(),
     {reply, ok, State#state{next_rebuild = {Mega, Sec + SecsFromNow, Micros}}};
@@ -755,7 +788,9 @@ handle_call({rebuild_trees, IndexNs, PreflistFun, OnlyIfBroken}, _From, State) -
 
                     % Setup a fold over the store
                     {FoldFun, InitAcc} =
-                        foldobjects_buildtrees(IndexNs, LogLevels),
+                        foldobjects_buildtrees(
+                            IndexNs, LogLevels, State#state.key_filter
+                        ),
                     CheckPresence = (StateName == native) and not OnlyIfBroken,
                     % If performing a scheduled rebuild on a native store
                     % then the fold needs to check for the presence of the key
@@ -987,6 +1022,8 @@ handle_call(
         InitMap
     ),
 
+    KFF = State#state.key_filter,
+
     FoldObjFun =
         fun(B, K, V, {Acc, SubTreeAcc}) ->
             {clock, VC} = lists:keyfind(clock, 1, V),
@@ -995,12 +1032,21 @@ handle_call(
             {preflist, PL} = lists:keyfind(preflist, 1, V),
             {PL, T, SegMap} = lists:keyfind(PL, 1, SubTreeAcc),
             {SegID, HashAcc} = lists:keyfind(SegID, 1, SegMap),
-            BinK = aae_util:make_binarykey(B, K),
-            {_, HashToAdd} = leveled_tictac:tictac_hash(BinK, {is_hash, H}),
-            UpdHash = HashAcc bxor HashToAdd,
-            SegMap0 = lists:keyreplace(SegID, 1, SegMap, {SegID, UpdHash}),
             SubTreeAcc0 =
-                lists:keyreplace(PL, 1, SubTreeAcc, {PL, T, SegMap0}),
+                case aae_util:apply_key_filter(KFF, {B, K}) of
+                    true ->
+                        BinK = aae_util:make_binarykey(B, K),
+                        {_, HashToAdd} =
+                            leveled_tictac:tictac_hash(BinK, {is_hash, H}),
+                        UpdHash = HashAcc bxor HashToAdd,
+                        SegMap0 =
+                            lists:keyreplace(
+                                SegID, 1, SegMap, {SegID, UpdHash}
+                            ),
+                        lists:keyreplace(PL, 1, SubTreeAcc, {PL, T, SegMap0});
+                    false ->
+                        SubTreeAcc
+                end,
             {[{B, K, VC} | Acc], SubTreeAcc0}
         end,
     WrappedFoldObjFun = preflist_wrapper_fun(FoldObjFun, IndexNs),
@@ -1165,6 +1211,7 @@ handle_call({ping, RequestTime}, _From, State) ->
 handle_cast({put, IndexN, Bucket, Key, Clock, PrevClock, BinaryObj}, State) ->
     % Setup
     TreeCaches = State#state.tree_caches,
+    KFF = State#state.key_filter,
     BinaryKey = aae_util:make_binarykey(Bucket, Key),
     PrevClock0 =
         case PrevClock of
@@ -1190,21 +1237,26 @@ handle_cast({put, IndexN, Bucket, Key, Clock, PrevClock, BinaryObj}, State) ->
     % Update the TreeCache associated with the Key (should a cache exist for
     % that store)
     State0 =
-        case lists:keyfind(IndexN, 1, TreeCaches) of
-            false ->
+        case
+            {
+                lists:keyfind(IndexN, 1, TreeCaches),
+                aae_util:apply_key_filter(KFF, {Bucket, Key})
+            }
+        of
+            {false, _} ->
                 % Note that this will eventually end up in the Tree Cache if in
                 % the future the IndexN combination is added to the list of
                 % responsible preflists
                 handle_unexpected_key(
-                    Bucket,
-                    Key,
-                    IndexN,
-                    TreeCaches,
-                    State#state.log_levels
+                    Bucket, Key, IndexN, TreeCaches, State#state.log_levels
                 ),
                 State#state{next_rebuild = os:timestamp()};
-            {IndexN, TreeCache} ->
+            {{IndexN, TreeCache}, true} ->
                 ok = aae_treecache:cache_alter(TreeCache, BinaryKey, CH, OH),
+                State;
+            {_, false} ->
+                % i.e. the key is in a bucket that is to be excluded from the
+                % tree cache
                 State
         end,
 
@@ -1316,13 +1368,13 @@ code_change(_OldVsn, State, _Extra) ->
 %%%============================================================================
 
 -spec foldobjects_buildtrees(
-    list(responsible_preflist()), aae_util:log_levels()
+    list(responsible_preflist()), aae_util:log_levels(), key_filter_fun()
 ) ->
     {aae_keystore:fold_fun(), list()}.
 %% @doc
 %% Return an object fold fun for building hashtrees, with an initialised
 %% accumulator
-foldobjects_buildtrees(IndexNs, LogLevels) ->
+foldobjects_buildtrees(IndexNs, LogLevels, KFF) ->
     InitMapFun =
         fun(IndexN) ->
             {IndexN, leveled_tictac:new_tree(IndexN, ?TREE_SIZE)}
@@ -1331,25 +1383,32 @@ foldobjects_buildtrees(IndexNs, LogLevels) ->
 
     FoldObjectsFun =
         fun(B, K, V, Acc) ->
-            {preflist, IndexN} = lists:keyfind(preflist, 1, V),
-            {hash, Hash} = lists:keyfind(hash, 1, V),
-            BinK = aae_util:make_binarykey(B, K),
-            BinExtractFun = fun(_BK, _V) -> {BinK, {is_hash, Hash}} end,
-            case lists:keyfind(IndexN, 1, Acc) of
-                {IndexN, Tree} ->
-                    Tree0 =
-                        leveled_tictac:add_kv(
-                            Tree,
-                            {null},
-                            {null},
-                            % BinExtractfun will ignore this dummy key and
-                            % value and substitute its own pre-defined values
-                            % to generate segment ID and hash
-                            BinExtractFun
-                        ),
-                    lists:keyreplace(IndexN, 1, Acc, {IndexN, Tree0});
+            case aae_util:apply_key_filter(KFF, {B, K}) of
+                true ->
+                    {preflist, IndexN} = lists:keyfind(preflist, 1, V),
+                    {hash, Hash} = lists:keyfind(hash, 1, V),
+                    BinK = aae_util:make_binarykey(B, K),
+                    BinExtractFun =
+                        fun(_BK, _V) -> {BinK, {is_hash, Hash}} end,
+                    case lists:keyfind(IndexN, 1, Acc) of
+                        {IndexN, Tree} ->
+                            Tree0 =
+                                leveled_tictac:add_kv(
+                                    Tree,
+                                    {null},
+                                    {null},
+                                    % BinExtractfun will ignore this dummy
+                                    % key and value and substitute its own
+                                    % pre-defined values to generate
+                                    % segment ID and hash
+                                    BinExtractFun
+                                ),
+                            lists:keyreplace(IndexN, 1, Acc, {IndexN, Tree0});
+                        false ->
+                            aae_util:log(aae14, [IndexN], LogLevels),
+                            Acc
+                    end;
                 false ->
-                    aae_util:log(aae14, [IndexN], LogLevels),
                     Acc
             end
         end,

@@ -324,6 +324,9 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
     ReturnFun = fun(R) -> RPid ! {result, R} end,
     RepairFun = fun(_KL) -> null end,
 
+    %% Add a key filter fun that never matches
+    KFF = fun({B, _K}) -> B =/= <<"SkipThisBucket">> end,
+
     {ok, Cntrl1} =
         aae_controller:aae_start(
             {parallel, StoreType},
@@ -332,7 +335,9 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
             [{2, 0}, {2, 1}],
             VnodePath1,
             SplitF,
-            [warn, error, critical]
+            [warn, error, critical],
+            [],
+            KFF
         ),
     {ok, Cntrl2} =
         aae_controller:aae_start(
@@ -342,7 +347,9 @@ dual_store_compare_tester(InitialKeyCount, StoreType) ->
             [{3, 0}, {3, 1}, {3, 2}],
             VnodePath2,
             SplitF,
-            [warn, error, critical]
+            [warn, error, critical],
+            [],
+            KFF
         ),
 
     initial_load(InitialKeyCount, Cntrl1, Cntrl2),
