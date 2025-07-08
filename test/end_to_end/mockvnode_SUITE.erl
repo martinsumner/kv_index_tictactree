@@ -10,7 +10,10 @@
     loadexchangeandrebuild_stbucketko/1,
     loadexchangeandrebuild_tuplebucketko/1,
     loadexchangeandrebuild_stbucketso/1,
-    loadexchangeandrebuild_tuplebucketso/1
+    loadexchangeandrebuild_tuplebucketso/1,
+    keyfiltertest_tuplebucketko/1,
+    keyfiltertest_tuplebucketso/1,
+    keyfiltertest_stbucketko/1
 ]).
 
 all() ->
@@ -23,7 +26,10 @@ all() ->
         loadexchangeandrebuild_stbucketso,
         loadexchangeandrebuild_tuplebucketso,
         loadexchangeandrebuild_stbucketko,
-        loadexchangeandrebuild_tuplebucketko
+        loadexchangeandrebuild_tuplebucketko,
+        keyfiltertest_tuplebucketko,
+        keyfiltertest_tuplebucketso,
+        keyfiltertest_stbucketko
     ].
 
 -include("testutil.hrl").
@@ -81,13 +87,31 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
             lists:nth(Idx + 1, IndexNs)
         end,
 
+    GetBucketFun =
+        fun(I) ->
+            case TupleBuckets of
+                true ->
+                    {?BUCKET_TYPE, integer_to_binary(I)};
+                false ->
+                    integer_to_binary(I)
+            end
+        end,
+    Bucket1 = GetBucketFun(1),
+    Bucket2 = GetBucketFun(2),
+    Bucket3 = GetBucketFun(3),
+    Bucket4 = GetBucketFun(4),
+
     % Start up to two mock vnodes
     % - VNN is a native vnode (where the AAE process will not keep a parallel
     % key store)
     % - VNP is a parallel vnode (where a separate AAE key store is required
     % to be kept in parallel)
-    {ok, VNN} = mock_kv_vnode:open(MockPathN, native, IndexNs, PreflistFun),
-    {ok, VNP} = mock_kv_vnode:open(MockPathP, PType, IndexNs, PreflistFun),
+    {ok, VNN} = mock_kv_vnode:open(
+        MockPathN, native, IndexNs, PreflistFun, none
+    ),
+    {ok, VNP} = mock_kv_vnode:open(
+        MockPathP, PType, IndexNs, PreflistFun, none
+    ),
 
     RPid = self(),
     LogNotRepairFun =
@@ -122,19 +146,6 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     true = ExchangeState0 == root_compare,
 
     io:format("Same exchange - now using tree compare~n"),
-    GetBucketFun =
-        fun(I) ->
-            case TupleBuckets of
-                true ->
-                    {?BUCKET_TYPE, integer_to_binary(I)};
-                false ->
-                    integer_to_binary(I)
-            end
-        end,
-    Bucket1 = GetBucketFun(1),
-    Bucket2 = GetBucketFun(2),
-    Bucket3 = GetBucketFun(3),
-    Bucket4 = GetBucketFun(4),
 
     {ok, _TC_P0, TC_GUID0} =
         aae_exchange:start(
@@ -178,47 +189,8 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
 
     RehashList = lists:sublist(ObjList, 700, 10),
 
-    PutFun =
-        fun(Store1, Store2) ->
-            fun(Object) ->
-                PL = PreflistFun(null, Object#r_object.key),
-                mock_kv_vnode:put(Store1, Object, PL, [Store2])
-            end
-        end,
-    DeleteFun =
-        fun(Stores) ->
-            fun(Object) ->
-                PL = PreflistFun(null, Object#r_object.key),
-                lists:foreach(
-                    fun(Store) ->
-                        mock_kv_vnode:backend_delete(
-                            Store,
-                            Object#r_object.bucket,
-                            Object#r_object.key,
-                            PL
-                        )
-                    end,
-                    Stores
-                )
-            end
-        end,
-    RehashFun =
-        fun(Stores) ->
-            fun(Object) ->
-                PL = PreflistFun(null, Object#r_object.key),
-                lists:foreach(
-                    fun(Store) ->
-                        mock_kv_vnode:rehash(
-                            Store,
-                            Object#r_object.bucket,
-                            Object#r_object.key,
-                            PL
-                        )
-                    end,
-                    Stores
-                )
-            end
-        end,
+    {PutFun, DeleteFun, RehashFun} =
+        testutil:get_modify_functions(PreflistFun),
 
     LogProgress("T1"),
     io:format("Load objects into both stores~n"),
@@ -415,8 +387,12 @@ mock_vnode_loadexchangeandrebuild_tester(TupleBuckets, PType) ->
     % Between startup and shutdown the next_rebuild will be rescheduled to
     % a different time, as the look at the last rebuild time and schedule
     % forward from there.
-    {ok, VNNa} = mock_kv_vnode:open(MockPathN, native, IndexNs, PreflistFun),
-    {ok, VNPa} = mock_kv_vnode:open(MockPathP, PType, IndexNs, PreflistFun),
+    {ok, VNNa} = mock_kv_vnode:open(
+        MockPathN, native, IndexNs, PreflistFun, none
+    ),
+    {ok, VNPa} = mock_kv_vnode:open(
+        MockPathP, PType, IndexNs, PreflistFun, none
+    ),
     {RebuildNa, false} = mock_kv_vnode:rebuild(VNNa, false),
     {RebuildPa, false} = mock_kv_vnode:rebuild(VNPa, false),
     io:format("Next rebuild vnn ~w vnp ~w~n", [RebuildNa, RebuildPa]),
@@ -1046,13 +1022,21 @@ mock_vnode_coveragefolder(Type, InitialKeyCount, TupleBuckets) ->
     % Open four vnodes to take two of the preflists each
     % - this is intended to replicate a ring-size=4, n-val=2 ring
     {ok, VNN1} =
-        mock_kv_vnode:open(MockPathN1, Type, [{1, 2}, {0, 2}], PreflistFun),
+        mock_kv_vnode:open(
+            MockPathN1, Type, [{1, 2}, {0, 2}], PreflistFun, none
+        ),
     {ok, VNN2} =
-        mock_kv_vnode:open(MockPathN2, Type, [{2, 2}, {1, 2}], PreflistFun),
+        mock_kv_vnode:open(
+            MockPathN2, Type, [{2, 2}, {1, 2}], PreflistFun, none
+        ),
     {ok, VNN3} =
-        mock_kv_vnode:open(MockPathN3, Type, [{3, 2}, {2, 2}], PreflistFun),
+        mock_kv_vnode:open(
+            MockPathN3, Type, [{3, 2}, {2, 2}], PreflistFun, none
+        ),
     {ok, VNN4} =
-        mock_kv_vnode:open(MockPathN4, Type, [{0, 2}, {3, 2}], PreflistFun),
+        mock_kv_vnode:open(
+            MockPathN4, Type, [{0, 2}, {3, 2}], PreflistFun, none
+        ),
 
     % Mapping of preflists to [Primary, Secondary] vnodes
     RingN =
@@ -1280,6 +1264,299 @@ mock_vnode_coveragefolder(Type, InitialKeyCount, TupleBuckets) ->
     ok = mock_kv_vnode:close(VNN2),
     ok = mock_kv_vnode:close(VNN3),
     ok = mock_kv_vnode:close(VNN4),
+    RootPath = testutil:reset_filestructure().
+
+keyfiltertest_tuplebucketso(_Config) ->
+    key_filter_tester(true, parallel_so).
+
+keyfiltertest_tuplebucketko(_Config) ->
+    key_filter_tester(true, parallel_ko).
+
+keyfiltertest_stbucketko(_Config) ->
+    key_filter_tester(false, parallel_ko).
+
+key_filter_tester(TupleBuckets, PType) ->
+    % Load up two vnodes with same data, with the data in each node split
+    % across 3 partitions (n=1).
+    %
+    % The purpose if to perform exchanges to first highlight no differences,
+    % and then once a difference is created, discover any difference
+    TestStartPoint = os:timestamp(),
+    LogProgress =
+        fun(Point) ->
+            io:format(
+                "Test reached point ~s in ~w s~n",
+                [
+                    Point,
+                    timer:now_diff(os:timestamp(), TestStartPoint) div
+                        1000
+                ]
+            )
+        end,
+
+    LogProgress("T0"),
+    InitialKeyCount = 60000,
+    RootPath = testutil:reset_filestructure(),
+    MockPathN = filename:join(RootPath, "mock_native/"),
+    MockPathP = filename:join(RootPath, "mock_parallel/"),
+
+    IndexNs = [{1, 3}, {2, 3}, {3, 3}],
+    PreflistFun =
+        fun(_B, K) ->
+            Idx = erlang:phash2(K) rem length(IndexNs),
+            lists:nth(Idx + 1, IndexNs)
+        end,
+
+    GetBucketFun =
+        fun(I) ->
+            case TupleBuckets of
+                true ->
+                    {?BUCKET_TYPE, integer_to_binary(I)};
+                false ->
+                    integer_to_binary(I)
+            end
+        end,
+    _Bucket1 = GetBucketFun(1),
+    _Bucket2 = GetBucketFun(2),
+    Bucket3 = GetBucketFun(3),
+    _Bucket4 = GetBucketFun(4),
+
+    %% Have a Key Filter fun which will check persistent_term for membership of
+    %% a list of buckets where the key should be excluded from the key cache
+    %% If the persistent term is updated, then reset call to the filter
+    %% function will lead to a new cache being formed,
+    KFF =
+        fun
+            ({Bucket, _Key}) ->
+                CacheMap =
+                    case get(aae_cache_filter_map) of
+                        FilterMap when is_map(FilterMap) ->
+                            FilterMap;
+                        _ ->
+                            maps:new()
+                    end,
+                case maps:get(Bucket, CacheMap, not_cached) of
+                    not_cached ->
+                        BucketList = persistent_term:get(
+                            aae_cache_filter_buckets, []
+                        ),
+                        ToInclude = not lists:member(Bucket, BucketList),
+                        put(
+                            aae_cache_filter_map,
+                            maps:put(Bucket, ToInclude, CacheMap)
+                        ),
+                        ToInclude;
+                    CachedResult ->
+                        CachedResult
+                end;
+            (reset) ->
+                erase(aae_cache_filter_map),
+                ok
+        end,
+
+    % Start with bucket 3 filtered
+    ok = persistent_term:put(aae_cache_filter_buckets, [Bucket3]),
+
+    % Start up to two mock vnodes
+    % - VNN is a native vnode (where the AAE process will not keep a parallel
+    % key store)
+    % - VNP is a parallel vnode (where a separate AAE key store is required
+    % to be kept in parallel)
+    {ok, VNN} = mock_kv_vnode:open(
+        MockPathN, native, IndexNs, PreflistFun, KFF
+    ),
+    {ok, VNP} = mock_kv_vnode:open(MockPathP, PType, IndexNs, PreflistFun, KFF),
+
+    RPid = self(),
+    LogNotRepairFun =
+        fun(KL) ->
+            lists:foreach(
+                fun({{B, K}, VCCompare}) ->
+                    io:format(
+                        "Delta found in ~w ~s ~w~n",
+                        [
+                            B,
+                            binary_to_list(K),
+                            VCCompare
+                        ]
+                    )
+                end,
+                KL
+            )
+        end,
+    _NullRepairFun = fun(_KL) -> ok end,
+    ReturnFun = fun(R) -> RPid ! {result, R} end,
+
+    io:format("Exchange between empty vnodes~n"),
+    {ok, _P0, GUID0} =
+        aae_exchange:start(
+            [{exchange_vnodesendfun(VNN), IndexNs}],
+            [{exchange_vnodesendfun(VNP), IndexNs}],
+            LogNotRepairFun,
+            ReturnFun
+        ),
+    io:format("Exchange id ~s~n", [GUID0]),
+    {ExchangeState0, 0} = testutil:start_receiver(),
+    true = ExchangeState0 == root_compare,
+
+    io:format("Exchange between empty vnodes - with key_filter~n"),
+    {ok, _P1, GUID1} =
+        aae_exchange:start(
+            full,
+            [{exchange_vnodesendfun(VNN), IndexNs}],
+            [{exchange_vnodesendfun(VNP), IndexNs}],
+            LogNotRepairFun,
+            ReturnFun,
+            none,
+            [{key_filter_fun, KFF}]
+        ),
+    io:format("Exchange id ~s~n", [GUID1]),
+    {ExchangeState1, 0} = testutil:start_receiver(),
+    true = ExchangeState1 == root_compare,
+
+    ok = mock_kv_vnode:exchange_message(VNN, fetch_root, IndexNs, ReturnFun),
+    CacheRootVNNS1 = testutil:start_receiver(),
+    ok = mock_kv_vnode:exchange_message(VNP, fetch_root, IndexNs, ReturnFun),
+    CacheRootVNNP1 = testutil:start_receiver(),
+
+    ObjList = testutil:gen_riakobjects(InitialKeyCount, [], TupleBuckets),
+    {NotToCache, ToCache} =
+        lists:partition(
+            fun(Obj) -> Obj#r_object.bucket == Bucket3 end,
+            ObjList
+        ),
+
+    {PutFun, _DeleteFun, _RehashFun} =
+        testutil:get_modify_functions(PreflistFun),
+
+    LogProgress("T1"),
+    io:format("Load objects into both stores~n"),
+    PutFun1 = PutFun(VNN, VNP),
+    PutFun2 = PutFun(VNP, VNN),
+    {OL1, OL2} = lists:split(length(ToCache) div 2, ToCache),
+    ok = lists:foreach(PutFun1, OL1),
+    ok = lists:foreach(PutFun2, OL2),
+
+    {ok, _P2, GUID2} =
+        aae_exchange:start(
+            full,
+            [{exchange_vnodesendfun(VNN), IndexNs}],
+            [{exchange_vnodesendfun(VNP), IndexNs}],
+            LogNotRepairFun,
+            ReturnFun,
+            none,
+            [{key_filter_fun, KFF}]
+        ),
+    io:format("Exchange id ~s~n", [GUID2]),
+    {ExchangeState2, 0} = testutil:start_receiver(),
+    true = ExchangeState2 == root_compare,
+
+    ok = mock_kv_vnode:exchange_message(VNN, fetch_root, IndexNs, ReturnFun),
+    CacheRootVNNS2 = testutil:start_receiver(),
+    ok = mock_kv_vnode:exchange_message(VNP, fetch_root, IndexNs, ReturnFun),
+    CacheRootVNNP2 = testutil:start_receiver(),
+
+    false = CacheRootVNNS2 == CacheRootVNNS1,
+    false = CacheRootVNNP2 == CacheRootVNNP1,
+
+    LogProgress("T2"),
+    io:format("Load non-cached objects into different stores~n"),
+    PutFun1NC = PutFun(VNN, none),
+    PutFun2NC = PutFun(VNP, none),
+    {OLnc1, OLnc2} = lists:split(length(NotToCache) div 2, NotToCache),
+    ok = lists:foreach(PutFun1NC, OLnc1),
+    ok = lists:foreach(PutFun2NC, OLnc2),
+
+    {ok, _P3, GUID3} =
+        aae_exchange:start(
+            full,
+            [{exchange_vnodesendfun(VNN), IndexNs}],
+            [{exchange_vnodesendfun(VNP), IndexNs}],
+            LogNotRepairFun,
+            ReturnFun,
+            none,
+            [{key_filter_fun, KFF}]
+        ),
+    io:format("Exchange id ~s~n", [GUID3]),
+    {ExchangeState3, 0} = testutil:start_receiver(),
+    true = ExchangeState3 == root_compare,
+
+    ok = mock_kv_vnode:exchange_message(VNN, fetch_root, IndexNs, ReturnFun),
+    CacheRootVNNS3 = testutil:start_receiver(),
+    ok = mock_kv_vnode:exchange_message(VNP, fetch_root, IndexNs, ReturnFun),
+    CacheRootVNNP3 = testutil:start_receiver(),
+
+    io:format(
+        "Confirm that loading into cache-bypass bucket leaves root unchanged~n"
+    ),
+    true = CacheRootVNNS3 == CacheRootVNNS2,
+    true = CacheRootVNNP3 == CacheRootVNNP2,
+
+    LogProgress("T3"),
+
+    io:format("Prompt for a rebuild of parallel~n"),
+    % The rebuild is a rebuild of both
+    % the store and the tree in the case of the parallel vnode, and just the
+    % tree in the case of the native rebuild
+    {RebuildVNPa, true} = mock_kv_vnode:rebuild(VNP, true),
+
+    true = RebuildVNPa > os:timestamp(),
+    % next rebuild was in the future, and is still scheduled as such
+    % key thing that the ongoing rebuild status is now true (the second
+    % element of the rebuild response)
+
+    io:format("Now poll to check to see when the rebuild is complete~n"),
+    wait_for_rebuild(VNP),
+
+    % Next rebuild times should now still be in the future
+    {RebuildVNPb, false} = mock_kv_vnode:rebuild(VNP, false),
+    true = RebuildVNPb > os:timestamp(),
+
+    ok = mock_kv_vnode:exchange_message(VNP, fetch_root, IndexNs, ReturnFun),
+    CacheRootVNNP4 = testutil:start_receiver(),
+    true = CacheRootVNNP3 == CacheRootVNNP4,
+
+    LogProgress("T4"),
+    io:format("Reset the bucket filter and rebuild again~n"),
+
+    ok = mock_kv_vnode:reset_keyfilter(VNP),
+    {_RebuildVNPc, true} = mock_kv_vnode:rebuild(VNP, true),
+    wait_for_rebuild(VNP),
+
+    ok = mock_kv_vnode:exchange_message(VNP, fetch_root, IndexNs, ReturnFun),
+    CacheRootVNNP5 = testutil:start_receiver(),
+    true = CacheRootVNNP5 == CacheRootVNNP4,
+
+    LogProgress("T5"),
+    io:format("Fetch clocks from the native node - confirm unchanged~n"),
+    ok = mock_kv_vnode:exchange_message(VNN, fetch_root, IndexNs, ReturnFun),
+    CacheRootVNNS4 = testutil:start_receiver(),
+    true = CacheRootVNNP5 == CacheRootVNNS4,
+    io:format("Starting point - native ok~n"),
+
+    ok = mock_kv_vnode:exchange_message(
+        VNN, {fetch_clocks, lists:seq(1, 10000)}, IndexNs, ReturnFun
+    ),
+    FetchClocksVNNA = testutil:start_receiver(),
+
+    ok = mock_kv_vnode:exchange_message(
+        VNN, {fetch_clocks, lists:seq(1, 10000)}, IndexNs, ReturnFun
+    ),
+    FetchClocksVNNB = testutil:start_receiver(),
+
+    true = FetchClocksVNNA == FetchClocksVNNB,
+    B3Clocks =
+        lists:filter(fun({B, _K, _C}) -> B == Bucket3 end, FetchClocksVNNB),
+    true = length(B3Clocks) > 0,
+
+    ok = mock_kv_vnode:exchange_message(VNN, fetch_root, IndexNs, ReturnFun),
+    CacheRootVNNS5 = testutil:start_receiver(),
+    true = CacheRootVNNP5 == CacheRootVNNS5,
+
+    LogProgress("T5"),
+    % Shutdown and clear down files
+    ok = mock_kv_vnode:close(VNN),
+    ok = mock_kv_vnode:close(VNP),
     RootPath = testutil:reset_filestructure().
 
 fold_metabin(<<>>, MDAcc) ->

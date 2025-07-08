@@ -16,7 +16,7 @@
 ]).
 
 -export([
-    open/4,
+    open/5,
     put/4,
     read_repair/4,
     push/6,
@@ -27,6 +27,7 @@
     rebuild_complete/2,
     fold_aae/6,
     bucketlist_aae/1,
+    reset_keyfilter/1,
     close/1
 ]).
 
@@ -57,7 +58,8 @@
     aae :: parallel_so | parallel_ko | native,
     index_ns :: list(tuple()),
     root_path :: list(),
-    preflist_fun = null :: preflist_fun()
+    preflist_fun = null :: preflist_fun(),
+    key_filter = none :: aae_controller:key_filter_fun()
 }).
 
 -record(state, {
@@ -92,10 +94,16 @@
 %%% API
 %%%============================================================================
 
--spec open(list(), atom(), list(tuple()), preflist_fun() | null) -> {ok, pid()}.
+-spec open(
+    list(),
+    atom(),
+    list(tuple()),
+    preflist_fun() | null,
+    aae_controller:key_filter_fun()
+) -> {ok, pid()}.
 %% @doc
 %% Open a mock vnode
-open(Path, AAEType, IndexNs, PreflistFun) ->
+open(Path, AAEType, IndexNs, PreflistFun, KFF) ->
     gen_server:start(
         ?MODULE,
         [
@@ -103,7 +111,8 @@ open(Path, AAEType, IndexNs, PreflistFun) ->
                 aae = AAEType,
                 index_ns = IndexNs,
                 root_path = Path,
-                preflist_fun = PreflistFun
+                preflist_fun = PreflistFun,
+                key_filter = KFF
             }
         ],
         []
@@ -171,13 +180,18 @@ fold_aae(Vnode, Range, Segments, FoldObjectsFun, InitAcc, Elements) ->
         {fold_aae, Range, Segments, FoldObjectsFun, InitAcc, Elements}
     ).
 
--spec exchange_message(pid(), tuple() | atom(), list(tuple()), fun(
-    (any()) -> ok
-)) -> ok.
+-type return_fun() :: fun((any()) -> ok).
+
+-spec exchange_message(pid(), tuple() | atom(), list(tuple()), return_fun()) ->
+    ok.
 %% @doc
 %% Handle a message from an AAE exchange
 exchange_message(Vnode, Msg, IndexNs, ReturnFun) ->
     gen_server:call(Vnode, {aae, Msg, IndexNs, ReturnFun}).
+
+-spec reset_keyfilter(pid()) -> ok.
+reset_keyfilter(Pid) ->
+    gen_server:cast(Pid, reset_keyfilter).
 
 -spec bucketlist_aae(pid()) -> {async, fun(() -> list())}.
 %% @doc
@@ -261,7 +275,8 @@ init([Opts]) ->
             RP,
             fun from_aae_binary/1,
             undefined,
-            UpdBackendOpts
+            UpdBackendOpts,
+            Opts#options.key_filter
         ),
     erlang:send_after(?POKE_TIME, self(), poke),
     {ok, #state{
@@ -666,7 +681,10 @@ handle_cast({rebuild_complete, store}, State) ->
             {noreply, State}
     end;
 handle_cast({rebuild_complete, tree}, State) ->
-    {noreply, State#state{aae_rebuild = false}}.
+    {noreply, State#state{aae_rebuild = false}};
+handle_cast(reset_keyfilter, State) ->
+    ok = aae_controller:aae_reset_key_filter(State#state.aae_controller),
+    {noreply, State}.
 
 handle_info(poke, State) ->
     ok = aae_controller:aae_ping(

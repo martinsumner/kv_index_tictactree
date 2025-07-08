@@ -6,7 +6,8 @@
     put_keys/3,
     put_keys/4,
     remove_keys/3,
-    gen_riakobjects/3
+    gen_riakobjects/3,
+    get_modify_functions/1
 ]).
 -export([calc_preflist/2]).
 -export([
@@ -191,6 +192,55 @@ gen_riakobjects(Count, ObjectList, TupleBuckets) ->
         contents = [#r_content{metadata = MD, value = Value}]
     },
     gen_riakobjects(Count - 1, [Obj | ObjectList], TupleBuckets).
+
+get_modify_functions(PreflistFun) ->
+    PutFun =
+        fun(Store1, Store2) ->
+            OtherStores =
+                case Store2 of
+                    none -> [];
+                    Store2 -> [Store2]
+                end,
+            fun(Object) ->
+                PL = PreflistFun(null, Object#r_object.key),
+                mock_kv_vnode:put(Store1, Object, PL, OtherStores)
+            end
+        end,
+    DeleteFun =
+        fun(Stores) ->
+            fun(Object) ->
+                PL = PreflistFun(null, Object#r_object.key),
+                lists:foreach(
+                    fun(Store) ->
+                        mock_kv_vnode:backend_delete(
+                            Store,
+                            Object#r_object.bucket,
+                            Object#r_object.key,
+                            PL
+                        )
+                    end,
+                    Stores
+                )
+            end
+        end,
+    RehashFun =
+        fun(Stores) ->
+            fun(Object) ->
+                PL = PreflistFun(null, Object#r_object.key),
+                lists:foreach(
+                    fun(Store) ->
+                        mock_kv_vnode:rehash(
+                            Store,
+                            Object#r_object.bucket,
+                            Object#r_object.key,
+                            PL
+                        )
+                    end,
+                    Stores
+                )
+            end
+        end,
+    {PutFun, DeleteFun, RehashFun}.
 
 add_randomincrement(Clock) ->
     RandIncr = rand:uniform(100),
