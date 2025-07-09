@@ -968,11 +968,7 @@ wait_for_rebuild(Vnode) ->
                         true;
                     false ->
                         timer:sleep(Wait),
-                        {_TSN, RSN} =
-                            mock_kv_vnode:rebuild(Vnode, false),
-                        % Waiting for rebuild status to be false
-                        % on both vnodes, which would indicate
-                        % that both rebuilds have completed
+                        {_TSN, RSN} = mock_kv_vnode:rebuild(Vnode, false),
                         (not RSN)
                 end
             end,
@@ -1316,10 +1312,8 @@ key_filter_tester(TupleBuckets, PType) ->
                     integer_to_binary(I)
             end
         end,
-    _Bucket1 = GetBucketFun(1),
-    _Bucket2 = GetBucketFun(2),
     Bucket3 = GetBucketFun(3),
-    _Bucket4 = GetBucketFun(4),
+    Bucket4 = GetBucketFun(4),
 
     %% Have a Key Filter fun which will check persistent_term for membership of
     %% a list of buckets where the key should be excluded from the key cache
@@ -1430,7 +1424,9 @@ key_filter_tester(TupleBuckets, PType) ->
         testutil:get_modify_functions(PreflistFun),
 
     LogProgress("T1"),
-    io:format("Load objects into both stores~n"),
+    io:format("Load ~w tree-cached objects into both stores~n", [
+        length(ToCache)
+    ]),
     PutFun1 = PutFun(VNN, VNP),
     PutFun2 = PutFun(VNP, VNN),
     {OL1, OL2} = lists:split(length(ToCache) div 2, ToCache),
@@ -1460,7 +1456,9 @@ key_filter_tester(TupleBuckets, PType) ->
     false = CacheRootVNNP2 == CacheRootVNNP1,
 
     LogProgress("T2"),
-    io:format("Load non-cached objects into different stores~n"),
+    io:format("Load ~w non-cached objects into different stores~n", [
+        length(NotToCache)
+    ]),
     PutFun1NC = PutFun(VNN, none),
     PutFun2NC = PutFun(VNP, none),
     {OLnc1, OLnc2} = lists:split(length(NotToCache) div 2, NotToCache),
@@ -1554,6 +1552,101 @@ key_filter_tester(TupleBuckets, PType) ->
     true = CacheRootVNNP5 == CacheRootVNNS5,
 
     LogProgress("T5"),
+    io:format("Rebuild tress on native~n"),
+    {_, true} = mock_kv_vnode:rebuild(VNN, true),
+    wait_for_rebuild(VNN),
+
+    {ok, _, GUID4} =
+        aae_exchange:start(
+            [{exchange_vnodesendfun(VNN), IndexNs}],
+            [{exchange_vnodesendfun(VNP), IndexNs}],
+            LogNotRepairFun,
+            ReturnFun
+        ),
+    io:format("Exchange id ~s~n", [GUID4]),
+    {ExchangeState4, 0} = testutil:start_receiver(),
+    true = ExchangeState4 == root_compare,
+
+    % Now filter both bucket 3 and bucket 4
+    ok = persistent_term:put(aae_cache_filter_buckets, [Bucket3, Bucket4]),
+    ok = mock_kv_vnode:reset_keyfilter(VNN),
+    % Nothing initially changes - as caches built with old config
+
+    {ok, _, GUID5} =
+        aae_exchange:start(
+            [{exchange_vnodesendfun(VNN), IndexNs}],
+            [{exchange_vnodesendfun(VNP), IndexNs}],
+            LogNotRepairFun,
+            ReturnFun
+        ),
+    io:format("Exchange id ~s~n", [GUID5]),
+    {ExchangeState5, 0} = testutil:start_receiver(),
+    true = ExchangeState5 == root_compare,
+
+    io:format("Rebuild tress on native - bucket 4 also ignored~n"),
+    {_, true} = mock_kv_vnode:rebuild(VNN, true),
+    wait_for_rebuild(VNN),
+
+    io:format(
+        "Exchange should mainly find bucket 4 - "
+        "but should overlap with some bucket 3 if we get enough results~n"
+    ),
+    {ok, _, GUID6} =
+        aae_exchange:start(
+            full,
+            [{exchange_vnodesendfun(VNN), IndexNs}],
+            [{exchange_vnodesendfun(VNP), IndexNs}],
+            LogNotRepairFun,
+            ReturnFun,
+            none,
+            [{max_results, 2048}]
+        ),
+    io:format("Exchange id ~s~n", [GUID6]),
+    {ExchangeState6, N6} = testutil:start_receiver(),
+    true = ExchangeState6 == clock_compare,
+    true = N6 > 0,
+
+    io:format("Exchange filtering out B3 should find dummy delta~n"),
+    ok = persistent_term:put(aae_cache_filter_buckets, [Bucket3]),
+    {ok, _, GUID7} =
+        aae_exchange:start(
+            full,
+            [{exchange_vnodesendfun(VNN), IndexNs}],
+            [{exchange_vnodesendfun(VNP), IndexNs}],
+            LogNotRepairFun,
+            ReturnFun,
+            none,
+            [{key_filter_fun, KFF}, {max_results, 2048}]
+        ),
+    io:format("Exchange id ~s~n", [GUID7]),
+    {ExchangeState7, N7} = testutil:start_receiver(),
+    true = ExchangeState7 == clock_compare,
+    true = N7 == 0,
+
+    io:format("Reset filter back to previous and rebuild~n"),
+    io:format(
+        "Have to rebuild parallel as well "
+        "as fetch_clocks will have `fixed` this side incorrectly too"
+    ),
+    ok = mock_kv_vnode:reset_keyfilter(VNN),
+    {_, true} = mock_kv_vnode:rebuild(VNN, true),
+    wait_for_rebuild(VNN),
+    ok = mock_kv_vnode:reset_keyfilter(VNP),
+    {_, true} = mock_kv_vnode:rebuild(VNP, true),
+    wait_for_rebuild(VNP),
+
+    {ok, _, GUID8} =
+        aae_exchange:start(
+            [{exchange_vnodesendfun(VNN), IndexNs}],
+            [{exchange_vnodesendfun(VNP), IndexNs}],
+            LogNotRepairFun,
+            ReturnFun
+        ),
+    io:format("Exchange id ~s~n", [GUID8]),
+    {ExchangeState8, 0} = testutil:start_receiver(),
+    true = ExchangeState8 == root_compare,
+
+    LogProgress("T6"),
     % Shutdown and clear down files
     ok = mock_kv_vnode:close(VNN),
     ok = mock_kv_vnode:close(VNP),
