@@ -603,6 +603,15 @@ clock_compare(timeout, State = #state{repair_fun = RepairFun}) when
         [clock_compare, State#state.exchange_id],
         State#state.log_levels
     ),
+    BucketCountFun =
+        fun({B, _K, _C}, Acc) ->
+            maps:update_with(B, fun(V) -> V + 1 end, 1, Acc)
+        end,
+    BlueBuckets =
+        lists:foldl(BucketCountFun, maps:new(), State#state.blue_acc),
+    PinkBuckets =
+        lists:foldl(BucketCountFun, maps:new(), State#state.pink_acc),
+    aae_util:log(ex012, [BlueBuckets, PinkBuckets]),
     aae_util:log(
         ex008,
         [State#state.blue_acc, State#state.pink_acc],
