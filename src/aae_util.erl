@@ -97,7 +97,7 @@
                 >>
             },
         ex004 =>
-            {info, <<"Exchange id=~s purpose=~w led to prompting  of repair_count=~w">>},
+            {info, <<"Exchange id=~s purpose=~w led to prompting of repair_count=~w">>},
         ex005 =>
             {info, <<"Exchange id=~s throttled count=~w at state=~w">>},
         ex006 =>
@@ -116,7 +116,9 @@
         ex010 =>
             {warning, <<"Exchange not_supported in exchange id=~s for colour=~w purpose=~w">>},
         ex011 =>
-            {info, <<"Filtered clocks before comparison removing blue=~w pink =~w">>},
+            {info, <<"Filtered clocks before comparison removing blue=~w pink=~w">>},
+        ex012 =>
+            {info, <<"Bucket counts for blue ~0p pink ~0p">>},
         ks001 => 
             {info, <<"Key Store loading with id=~w has reached deferred count=~w">>},
         ks002 =>
