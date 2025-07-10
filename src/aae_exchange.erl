@@ -229,7 +229,8 @@
     | {scan_timeout, non_neg_integer()}
     | {log_levels, aae_util:log_levels()}
     | {max_results, non_neg_integer()}
-    | {purpose, atom()}.
+    | {purpose, atom()}
+    | {key_filter_fun, aae_controller:key_filter_fun()}.
 -type options() :: list(option_item()).
 -type send_message() ::
     fetch_root
