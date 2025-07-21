@@ -59,7 +59,7 @@
     index_ns :: list(tuple()),
     root_path :: list(),
     preflist_fun = null :: preflist_fun(),
-    key_filter = none :: aae_controller:key_filter_fun()
+    key_filter = none :: aae_controller:key_include_fun()
 }).
 
 -record(state, {
@@ -99,7 +99,7 @@
     atom(),
     list(tuple()),
     preflist_fun() | null,
-    aae_controller:key_filter_fun()
+    aae_controller:key_include_fun()
 ) -> {ok, pid()}.
 %% @doc
 %% Open a mock vnode

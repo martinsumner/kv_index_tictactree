@@ -196,7 +196,7 @@
     scan_timeout = ?SCAN_TIMEOUT_MS :: non_neg_integer(),
     max_results = ?MAX_RESULTS :: pos_integer(),
     purpose :: atom() | undefined,
-    key_filter_fun = none :: aae_controller:key_filter_fun()
+    key_filter = none :: aae_controller:key_include_fun()
 }).
 
 -type branch_results() :: list({integer(), binary()}).
@@ -230,7 +230,7 @@
     | {log_levels, aae_util:log_levels()}
     | {max_results, non_neg_integer()}
     | {purpose, atom()}
-    | {key_filter_fun, aae_controller:key_filter_fun()}.
+    | {key_filter, aae_controller:key_include_fun()}.
 -type options() :: list(option_item()).
 -type send_message() ::
     fetch_root
@@ -620,7 +620,7 @@ clock_compare(timeout, State = #state{repair_fun = RepairFun}) when
     ),
     FilterFun =
         fun({B, K, _VC}) ->
-            aae_util:apply_key_filter(State#state.key_filter_fun, {B, K})
+            aae_util:maybe_include_key(State#state.key_filter, {B, K})
         end,
     FilteredBlues = lists:filter(FilterFun, State#state.blue_acc),
     FilteredPinks = lists:filter(FilterFun, State#state.pink_acc),
@@ -905,10 +905,10 @@ process_options([{purpose, Purpose} | Tail], State) when
     is_atom(Purpose)
 ->
     process_options(Tail, State#state{purpose = Purpose});
-process_options([{key_filter_fun, KFF} | Tail], State) when
-    is_function(KFF, 1)
+process_options([{key_filter, KIF} | Tail], State) when
+    is_function(KIF, 1)
 ->
-    process_options(Tail, State#state{key_filter_fun = KFF}).
+    process_options(Tail, State#state{key_filter = KIF}).
 
 -spec trigger_next(
     any(),

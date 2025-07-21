@@ -1402,7 +1402,7 @@ key_filter_tester(TupleBuckets, PType) ->
             LogNotRepairFun,
             ReturnFun,
             none,
-            [{key_filter_fun, KFF}]
+            [{key_filter, KFF}]
         ),
     io:format("Exchange id ~s~n", [GUID1]),
     {ExchangeState1, 0} = testutil:start_receiver(),
@@ -1441,7 +1441,7 @@ key_filter_tester(TupleBuckets, PType) ->
             LogNotRepairFun,
             ReturnFun,
             none,
-            [{key_filter_fun, KFF}]
+            [{key_filter, KFF}]
         ),
     io:format("Exchange id ~s~n", [GUID2]),
     {ExchangeState2, 0} = testutil:start_receiver(),
@@ -1473,7 +1473,7 @@ key_filter_tester(TupleBuckets, PType) ->
             LogNotRepairFun,
             ReturnFun,
             none,
-            [{key_filter_fun, KFF}]
+            [{key_filter, KFF}]
         ),
     io:format("Exchange id ~s~n", [GUID3]),
     {ExchangeState3, 0} = testutil:start_receiver(),
@@ -1616,7 +1616,7 @@ key_filter_tester(TupleBuckets, PType) ->
             LogNotRepairFun,
             ReturnFun,
             none,
-            [{key_filter_fun, KFF}, {max_results, 2048}]
+            [{key_filter, KFF}, {max_results, 2048}]
         ),
     io:format("Exchange id ~s~n", [GUID7]),
     {ExchangeState7, N7} = testutil:start_receiver(),

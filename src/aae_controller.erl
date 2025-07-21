@@ -98,7 +98,7 @@
     runner_queue = [] :: list(runner_work()),
     queue_backlog = false :: boolean(),
     block_next_put = false :: boolean(),
-    key_filter = none :: key_filter_fun()
+    key_filter = none :: key_include_fun()
 }).
 
 -record(options, {
@@ -110,7 +110,7 @@
     root_path :: list(),
     log_levels :: aae_util:log_levels(),
     leveled_options :: aae_keystore:leveled_options(),
-    key_filter = none :: key_filter_fun()
+    key_filter = none :: key_include_fun()
 }).
 
 -define(IS_DEF(Term), Term =/= undefined).
@@ -165,7 +165,7 @@
             binary()
         }
     ).
--type key_filter_fun() ::
+-type key_include_fun() ::
     none |
     fun(({aae_keystore:bucket(), aae_keystore:key()}|reset) -> boolean()).
 %% erlfmt:ignore-end
@@ -183,7 +183,7 @@
     version_vector/0,
     clock_hash/0,
     runner_work/0,
-    key_filter_fun/0
+    key_include_fun/0
 ]).
 
 %%%============================================================================
@@ -225,7 +225,7 @@ aae_start(
     fun((term()) -> tuple()),
     aae_util:log_levels() | undefined,
     aae_keystore:leveled_options(),
-    key_filter_fun()
+    key_include_fun()
 ) -> {ok, pid()}.
 %% @doc
 %% Start an AAE controller
@@ -736,7 +736,7 @@ handle_call(get_object_splitfun, _From, State = #state{object_splitfun = A}) ->
 handle_call({set_object_splitfun, A}, _From, State) ->
     {reply, ok, State#state{object_splitfun = A}};
 handle_call(reset_key_filter, _From, State) ->
-    {reply, aae_util:apply_key_filter(State#state.key_filter, reset), State};
+    {reply, aae_util:maybe_include_key(State#state.key_filter, reset), State};
 handle_call({prompt_nextrebuild, SecsFromNow}, _From, State) ->
     {Mega, Sec, Micros} = os:timestamp(),
     {reply, ok, State#state{next_rebuild = {Mega, Sec + SecsFromNow, Micros}}};
@@ -1033,7 +1033,7 @@ handle_call(
             {PL, T, SegMap} = lists:keyfind(PL, 1, SubTreeAcc),
             {SegID, HashAcc} = lists:keyfind(SegID, 1, SegMap),
             SubTreeAcc0 =
-                case aae_util:apply_key_filter(KFF, {B, K}) of
+                case aae_util:maybe_include_key(KFF, {B, K}) of
                     true ->
                         BinK = aae_util:make_binarykey(B, K),
                         {_, HashToAdd} =
@@ -1240,7 +1240,7 @@ handle_cast({put, IndexN, Bucket, Key, Clock, PrevClock, BinaryObj}, State) ->
         case
             {
                 lists:keyfind(IndexN, 1, TreeCaches),
-                aae_util:apply_key_filter(KFF, {Bucket, Key})
+                aae_util:maybe_include_key(KFF, {Bucket, Key})
             }
         of
             {false, _} ->
@@ -1368,13 +1368,13 @@ code_change(_OldVsn, State, _Extra) ->
 %%%============================================================================
 
 -spec foldobjects_buildtrees(
-    list(responsible_preflist()), aae_util:log_levels(), key_filter_fun()
+    list(responsible_preflist()), aae_util:log_levels(), key_include_fun()
 ) ->
     {aae_keystore:fold_fun(), list()}.
 %% @doc
 %% Return an object fold fun for building hashtrees, with an initialised
 %% accumulator
-foldobjects_buildtrees(IndexNs, LogLevels, KFF) ->
+foldobjects_buildtrees(IndexNs, LogLevels, KIF) ->
     InitMapFun =
         fun(IndexN) ->
             {IndexN, leveled_tictac:new_tree(IndexN, ?TREE_SIZE)}
@@ -1383,7 +1383,7 @@ foldobjects_buildtrees(IndexNs, LogLevels, KFF) ->
 
     FoldObjectsFun =
         fun(B, K, V, Acc) ->
-            case aae_util:apply_key_filter(KFF, {B, K}) of
+            case aae_util:maybe_include_key(KIF, {B, K}) of
                 true ->
                     {preflist, IndexN} = lists:keyfind(preflist, 1, V),
                     {hash, Hash} = lists:keyfind(hash, 1, V),

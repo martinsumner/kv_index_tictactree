@@ -16,7 +16,7 @@
     make_binarykey/2,
     safe_open/1,
     filter_log_levels/1,
-    apply_key_filter/2,
+    maybe_include_key/2,
     check_rootpath/1
 ]).
 
@@ -234,16 +234,16 @@ make_binarykey({Type, Bucket}, Key) when
 make_binarykey(Bucket, Key) when is_binary(Bucket), is_binary(Key) ->
     <<Bucket/binary, Key/binary>>.
 
--spec apply_key_filter(
-    aae_controller:key_filter_fun(),
+-spec maybe_include_key(
+    aae_controller:key_include_fun(),
     {aae_keystore:bucket(), aae_keystore:key()} | reset
 ) ->
     boolean().
-apply_key_filter(none, _Input) ->
+maybe_include_key(none, _Input) ->
     true;
-apply_key_filter(KeyFilterFun, {Bucket, Key}) ->
+maybe_include_key(KeyFilterFun, {Bucket, Key}) ->
     KeyFilterFun({Bucket, Key});
-apply_key_filter(KeyFilterFun, reset) ->
+maybe_include_key(KeyFilterFun, reset) ->
     KeyFilterFun(reset).
 
 %%%============================================================================
