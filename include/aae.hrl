@@ -10,3 +10,7 @@
 %%%============================================================================
 -define(HEAD_TAG, h).
 -define(RIAK_TAG, o_rkv).
+
+-if(?OTP_RELEASE < 26).
+-type dynamic() :: any().
+-endif.
