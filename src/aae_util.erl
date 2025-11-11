@@ -181,7 +181,13 @@ log(LogReference, Subs) ->
 log(LogReference, Subs, undefined) ->
     log(LogReference, Subs, ?DEFAULT_LOG_LEVELS);
 log(LogReference, Subs, LogLevels) ->
-    leveled_log:log(LogReference, Subs, LogLevels, ?LOGBASE, tictacaae).
+    leveled_log:log(
+        LogReference,
+        Subs,
+        LogLevels,
+        ?LOGBASE,
+        [background, tictacaae]
+    ).
 
 -spec log_timer(
     atom(), list(), erlang:timestamp(), aae_util:log_levels()
@@ -190,7 +196,12 @@ log_timer(LogReference, Subs, StartTime, undefined) ->
     log_timer(LogReference, Subs, StartTime, ?DEFAULT_LOG_LEVELS);
 log_timer(LogReference, Subs, StartTime, LogLevels) ->
     leveled_log:log_timer(
-        LogReference, Subs, StartTime, LogLevels, ?LOGBASE, tictacaae
+        LogReference,
+        Subs,
+        StartTime,
+        LogLevels,
+        ?LOGBASE,
+        [background, tictacaae]
     ).
 
 -spec filter_log_levels(list()) -> list(leveled_log:log_level()).
