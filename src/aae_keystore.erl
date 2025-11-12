@@ -93,8 +93,7 @@
     load_store :: pid() | undefined,
     load_guid :: list() | undefined,
     backend_opts = [] :: list(),
-    trim_count = 0 :: integer(),
-    log_levels :: aae_util:log_levels()
+    trim_count = 0 :: integer()
 }).
 
 -record(manifest, {
@@ -545,15 +544,14 @@ init([Opts]) ->
             RPOpt when is_list(RPOpt) ->
                 aae_util:check_rootpath(RPOpt)
         end,
-    LogLevels =
-        case aae_util:get_opt(log_levels, Opts) of
-            LLOpt when is_list(LLOpt) ->
-                aae_util:filter_log_levels(LLOpt);
-            undefined ->
-                undefined
-        end,
+    case aae_util:get_opt(log_levels, Opts) of
+        LLOpt when is_list(LLOpt) ->
+            aae_util:set_loglevel(LLOpt);
+        undefined ->
+            ok
+    end,
     Manifest0 =
-        case open_manifest(RootPath, LogLevels) of
+        case open_manifest(RootPath) of
             false ->
                 GUID = leveled_util:generate_uuid(),
                 #manifest{current_guid = GUID};
@@ -578,15 +576,14 @@ init([Opts]) ->
                 end
             ),
 
-            ok = store_manifest(RootPath, Manifest1, LogLevels),
+            ok = store_manifest(RootPath, Manifest1),
             {ok, parallel, #state{
                 store = Store,
                 store_type = StoreType,
                 root_path = RootPath,
                 current_guid = Manifest0#manifest.current_guid,
                 last_rebuild = LastRebuild,
-                backend_opts = BackendOpts0,
-                log_levels = LogLevels
+                backend_opts = BackendOpts0
             }};
         {true, StoreType, BackendPid} when
             ?IS_NATIVE(StoreType), is_pid(BackendPid)
@@ -596,8 +593,7 @@ init([Opts]) ->
                 store_type = StoreType,
                 root_path = RootPath,
                 current_guid = Manifest0#manifest.current_guid,
-                last_rebuild = Manifest0#manifest.last_rebuild,
-                log_levels = LogLevels
+                last_rebuild = Manifest0#manifest.last_rebuild
             }}
     end.
 
@@ -615,9 +611,7 @@ loading(
         LoadCount1 div ?CHANGEQ_LOGFREQ > LoadCount0 div ?CHANGEQ_LOGFREQ,
     case ToLog of
         true ->
-            aae_util:log(
-                ks004, [State#state.id, LoadCount1], State#state.log_levels
-            );
+            ?STD_LOG(ks004, [State#state.id, LoadCount1]);
         false ->
             ok
     end,
@@ -735,18 +729,15 @@ loading({mput, ObjectSpecs}, State = #state{store_type = StoreType}) when
         ObjectCount1 div ?CHANGEQ_LOGFREQ > ObjectCount0 div ?CHANGEQ_LOGFREQ,
     case ToLog of
         true ->
-            aae_util:log(
-                ks001, [State#state.id, ObjectCount1], State#state.log_levels
-            );
+            ?STD_LOG(ks001, [State#state.id, ObjectCount1]);
         false ->
             ok
     end,
     {next_state, loading, State#state{change_queue_counter = ObjectCount1}};
 loading({prompt, rebuild_complete}, State) ->
-    aae_util:log(
+    ?STD_LOG(
         ks008,
-        [State#state.change_queue_counter, State#state.load_counter],
-        State#state.log_levels
+        [State#state.change_queue_counter, State#state.load_counter]
     ),
     store_prompt(self(), queue_complete),
     {next_state, loading, State#state{
@@ -766,16 +757,13 @@ loading({prompt, queue_complete}, State = #state{store_type = StoreType}) when
             GUID = State#state.load_guid,
             LoadStore = State#state.load_store,
             LastRebuild = os:timestamp(),
-            aae_util:log(
-                ks007, [rebuild_complete, GUID], State#state.log_levels
-            ),
+            ?STD_LOG(ks007, [rebuild_complete, GUID]),
             ok = store_manifest(
                 State#state.root_path,
                 #manifest{
                     current_guid = GUID,
                     last_rebuild = LastRebuild
-                },
-                State#state.log_levels
+                }
             ),
             ok = delete_store(StoreType, State#state.store),
             ok = disk_log:close(State#state.load_disklog),
@@ -810,7 +798,7 @@ parallel({prompt, rebuild_start}, State = #state{root_path = RP}) when
     RP =/= undefined
 ->
     GUID = leveled_util:generate_uuid(),
-    aae_util:log(ks007, [rebuild_start, GUID], State#state.log_levels),
+    ?STD_LOG(ks007, [rebuild_start, GUID]),
     {ok, Store} = open_store(
         State#state.store_type,
         State#state.backend_opts,
@@ -822,8 +810,7 @@ parallel({prompt, rebuild_start}, State = #state{root_path = RP}) when
         #manifest{
             current_guid = State#state.current_guid,
             pending_guid = GUID
-        },
-        State#state.log_levels
+        }
     ),
     {ok, LoadLog} =
         disk_log:open([
@@ -839,21 +826,20 @@ parallel({prompt, rebuild_start}, State = #state{root_path = RP}) when
 
 native({prompt, rebuild_start}, State) ->
     GUID = leveled_util:generate_uuid(),
-    aae_util:log(ks007, [rebuild_start, GUID], State#state.log_levels),
+    ?STD_LOG(ks007, [rebuild_start, GUID]),
     {next_state, native, State#state{current_guid = GUID}};
 native({prompt, rebuild_complete}, State = #state{root_path = RP}) when
     RP =/= undefined
 ->
     GUID = State#state.current_guid,
-    aae_util:log(ks007, [rebuild_complete, GUID], State#state.log_levels),
+    ?STD_LOG(ks007, [rebuild_complete, GUID]),
     LastRebuild = os:timestamp(),
     ok = store_manifest(
         RP,
         #manifest{
             current_guid = GUID,
             last_rebuild = LastRebuild
-        },
-        State#state.log_levels
+        }
     ),
     {next_state, native, State#state{last_rebuild = LastRebuild}}.
 
@@ -872,7 +858,8 @@ handle_sync_event(ping, _From, StateName, State) ->
     {reply, pong, StateName, State}.
 
 handle_event({log_level, LogLevels}, StateName, State) ->
-    {next_state, StateName, State#state{log_levels = LogLevels}}.
+    ok = aae_util:set_loglevel(LogLevels),
+    {next_state, StateName, State}.
 
 handle_info(_Msg, StateName, State) ->
     {next_state, StateName, State}.
@@ -885,8 +872,7 @@ terminate(normal, StateName, State = #state{root_path = RP}) when
         #manifest{
             current_guid = State#state.current_guid,
             last_rebuild = State#state.last_rebuild
-        },
-        State#state.log_levels
+        }
     );
 terminate(_Reason, _StateName, _State) ->
     ok.
@@ -1536,28 +1522,28 @@ range_check({key_range, Bucket, StartKey, EndKey}, Bucket, Key) ->
 range_check(_Range, _B, _K) ->
     false.
 
--spec open_manifest(list(), aae_util:log_levels()) -> {ok, manifest()} | false.
+-spec open_manifest(list()) -> {ok, manifest()} | false.
 %% @doc
 %% Open the manifest file, check the CRC and return the active folder
 %% reference
-open_manifest(RootPath, LogLevels) ->
+open_manifest(RootPath) ->
     FN = filename:join(RootPath, ?MANIFEST_FN ++ ?COMLPETE_EXT),
     case aae_util:safe_open(FN) of
         {ok, BinaryContents} ->
             M = binary_to_term(BinaryContents),
-            aae_util:log(ks005, [M#manifest.current_guid], LogLevels),
+            ?STD_LOG(ks005, [M#manifest.current_guid]),
             {ok, M};
         {error, Reason} ->
-            aae_util:log(ks002, [RootPath, Reason], LogLevels),
+            ?STD_LOG(ks002, [RootPath, Reason]),
             false
     end.
 
--spec store_manifest(list(), manifest(), aae_util:log_levels()) -> ok.
+-spec store_manifest(list(), manifest()) -> ok.
 %% @doc
 %% Store tham manifest file, adding a CRC, and ensuring it is readable before
 %% returning
-store_manifest(RootPath, Manifest, LogLevels) ->
-    aae_util:log(ks003, [Manifest#manifest.current_guid], LogLevels),
+store_manifest(RootPath, Manifest) ->
+    ?STD_LOG(ks003, [Manifest#manifest.current_guid]),
     ManBin = term_to_binary(Manifest),
     CRC32 = erlang:crc32(ManBin),
     PFN = filename:join(RootPath, ?MANIFEST_FN ++ ?PENDING_EXT),
@@ -1577,7 +1563,7 @@ clear_pendingpath(Manifest, RootPath) ->
             Manifest;
         GUID ->
             PendingPath = filename:join(RootPath, GUID),
-            aae_util:log(ks006, [PendingPath]),
+            ?STD_LOG(ks006, [PendingPath]),
             Manifest#manifest{pending_guid = undefined}
     end.
 
@@ -1617,13 +1603,13 @@ empty_buildandclose_tester(StoreType) ->
     {ok, {never, true}, Store0} =
         store_parallelstart(RootPath, StoreType, undefined, ?LEVELED_DEFAULTS),
 
-    {ok, Manifest0} = open_manifest(RootPath, undefined),
+    {ok, Manifest0} = open_manifest(RootPath),
     {parallel, CurrentGUID} = store_currentstatus(Store0),
     ?assertMatch(CurrentGUID, Manifest0#manifest.current_guid),
     ?assertMatch(none, Manifest0#manifest.shutdown_guid),
 
     ok = store_close(Store0),
-    {ok, Manifest1} = open_manifest(RootPath, undefined),
+    {ok, Manifest1} = open_manifest(RootPath),
     ?assertMatch(CurrentGUID, Manifest1#manifest.current_guid),
 
     {ok, {never, true}, Store1} =
@@ -1637,22 +1623,19 @@ bad_manifest_test() ->
     RootPath = "test/keystore1/",
     ok = filelib:ensure_dir(RootPath),
     aae_util:clean_subdir(RootPath),
-    ?assertMatch(false, open_manifest(RootPath, undefined)),
+    ?assertMatch(false, open_manifest(RootPath)),
     Manifest = #manifest{current_guid = "aaa-111"},
-    ok = store_manifest(RootPath, Manifest, undefined),
-    ?assertMatch({ok, Manifest}, open_manifest(RootPath, [info])),
+    ok = store_manifest(RootPath, Manifest),
+    ?assertMatch({ok, Manifest}, open_manifest(RootPath)),
     ManifestFN = filename:join(RootPath, ?MANIFEST_FN ++ ?COMLPETE_EXT),
     {ok, Bin0} = file:read_file(ManifestFN),
     Bin1 = aae_util:flip_byte(Bin0, 0, byte_size(Bin0)),
     ok = file:delete(ManifestFN),
     ok = file:write_file(ManifestFN, Bin1),
-    ?assertMatch(false, open_manifest(RootPath, undefined)),
+    ?assertMatch(false, open_manifest(RootPath)),
     ok = file:delete(ManifestFN),
     ok = file:write_file(ManifestFN, Bin0),
-    ?assertMatch(
-        {ok, Manifest},
-        open_manifest(RootPath, [warning, error, critical])
-    ),
+    ?assertMatch({ok, Manifest}, open_manifest(RootPath)),
     aae_util:clean_subdir(RootPath).
 
 empty_manifest_test() ->
@@ -1661,7 +1644,7 @@ empty_manifest_test() ->
     aae_util:clean_subdir(RootPath),
     ManifestFN = filename:join(RootPath, ?MANIFEST_FN ++ ?COMLPETE_EXT),
     ok = file:write_file(ManifestFN, <<>>),
-    ?assertMatch(false, open_manifest(RootPath, undefined)),
+    ?assertMatch(false, open_manifest(RootPath)),
     aae_util:clean_subdir(RootPath).
 
 leveled_so_load_test_() ->
@@ -2103,7 +2086,7 @@ big_load_tester(StoreType) ->
                     {true, M};
                 false ->
                     timer:sleep(100),
-                    {ok, PMan0} = open_manifest(RootPath, undefined),
+                    {ok, PMan0} = open_manifest(RootPath),
                     {not (PMan0#manifest.pending_guid == undefined), PMan0}
             end
         end,

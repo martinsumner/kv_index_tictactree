@@ -192,7 +192,6 @@
     prethrottle_branches = 0 :: non_neg_integer(),
     prethrottle_leaves = 0 :: non_neg_integer(),
     transition_pause_ms = ?TRANSITION_PAUSE_MS :: pos_integer(),
-    log_levels :: aae_util:log_levels(),
     scan_timeout = ?SCAN_TIMEOUT_MS :: non_neg_integer(),
     max_results = ?MAX_RESULTS :: pos_integer(),
     purpose :: atom() | undefined,
@@ -238,9 +237,8 @@
     | {fetch_clocks, list(non_neg_integer())}
     | {merge_tree_range, filters()}
     | {fetch_clocks_range, filters()}.
--type send_fun() :: fun(
-    (send_message(), list(tuple()) | all, blue | pink) -> ok
-).
+-type send_fun() ::
+    fun((send_message(), list(tuple()) | all, blue | pink) -> ok).
 -type input_list() :: [{send_fun(), list(tuple()) | all}].
 % The Blue List and the Pink List are made up of:
 % - a SendFun, which should  be a 3-arity function, taking a preflist,
@@ -337,10 +335,9 @@ init([
         exchange_filters = Filters
     },
     State0 = process_options(Opts, State),
-    aae_util:log(
+    ?STD_LOG(
         ex001,
-        [ExChID, PinkTarget + BlueTarget, State0#state.purpose],
-        State0#state.log_levels
+        [ExChID, PinkTarget + BlueTarget, State0#state.purpose]
     ),
     InitState =
         case Type of
@@ -350,10 +347,9 @@ init([
     {ok, InitState, State0, 0}.
 
 prepare_full_exchange(timeout, State) ->
-    aae_util:log(
+    ?STD_LOG(
         ex006,
-        [prepare_tree_exchange, State#state.exchange_id],
-        State#state.log_levels
+        [prepare_tree_exchange, State#state.exchange_id]
     ),
     trigger_next(
         fetch_root,
@@ -368,10 +364,9 @@ prepare_full_exchange(timeout, State) ->
 prepare_partial_exchange(
     timeout, State = #state{exchange_filters = Filters}
 ) when Filters =/= none ->
-    aae_util:log(
+    ?STD_LOG(
         ex006,
-        [prepare_partial_exchange, State#state.exchange_id],
-        State#state.log_levels
+        [prepare_partial_exchange, State#state.exchange_id]
     ),
     Filters = State#state.exchange_filters,
     ScanTimeout = filtered_timeout(Filters, State#state.scan_timeout),
@@ -389,10 +384,9 @@ prepare_partial_exchange(
 tree_compare(timeout, State = #state{exchange_filters = Filters}) when
     Filters =/= none
 ->
-    aae_util:log(
+    ?STD_LOG(
         ex006,
-        [root_compare, State#state.exchange_id],
-        State#state.log_levels
+        [root_compare, State#state.exchange_id]
     ),
     DirtyLeaves = compare_trees(State#state.blue_acc, State#state.pink_acc),
     TreeCompares = State#state.tree_compares + 1,
@@ -447,8 +441,7 @@ tree_compare(timeout, State = #state{exchange_filters = Filters}) when
                 StillDirtyLeaves,
                 State#state.max_results,
                 tree_compare,
-                State#state.exchange_id,
-                State#state.log_levels
+                State#state.exchange_id
             ),
             % TODO - select_ids doesn't account for TreeSize
             Filters0 =
@@ -474,11 +467,7 @@ tree_compare(timeout, State = #state{exchange_filters = Filters}) when
     end.
 
 root_compare(timeout, State) ->
-    aae_util:log(
-        ex006,
-        [root_compare, State#state.exchange_id],
-        State#state.log_levels
-    ),
+    ?STD_LOG(ex006, [root_compare, State#state.exchange_id]),
     DirtyBranches = compare_roots(State#state.blue_acc, State#state.pink_acc),
     RootCompares = State#state.root_compares + 1,
     {BranchIDs, Reduction} =
@@ -514,8 +503,7 @@ root_compare(timeout, State) ->
                 BranchIDs,
                 State#state.max_results,
                 root_confirm,
-                State#state.exchange_id,
-                State#state.log_levels
+                State#state.exchange_id
             ),
             trigger_next(
                 {fetch_branches, BranchesToFetch},
@@ -534,11 +522,7 @@ root_compare(timeout, State) ->
     end.
 
 branch_compare(timeout, State) ->
-    aae_util:log(
-        ex006,
-        [branch_compare, State#state.exchange_id],
-        State#state.log_levels
-    ),
+    ?STD_LOG(ex006, [branch_compare, State#state.exchange_id]),
     DirtySegments = compare_branches(
         State#state.blue_acc, State#state.pink_acc
     ),
@@ -576,8 +560,7 @@ branch_compare(timeout, State) ->
                 SegmentIDs,
                 State#state.max_results,
                 branch_confirm,
-                State#state.exchange_id,
-                State#state.log_levels
+                State#state.exchange_id
             ),
 
             trigger_next(
@@ -599,11 +582,7 @@ branch_compare(timeout, State) ->
 clock_compare(timeout, State = #state{repair_fun = RepairFun}) when
     ?IS_DEF(RepairFun)
 ->
-    aae_util:log(
-        ex006,
-        [clock_compare, State#state.exchange_id],
-        State#state.log_levels
-    ),
+    ?STD_LOG(ex006, [clock_compare, State#state.exchange_id]),
     BucketCountFun =
         fun({B, _K, _C}, Acc) ->
             maps:update_with(B, fun(V) -> V + 1 end, 1, Acc)
@@ -612,48 +591,36 @@ clock_compare(timeout, State = #state{repair_fun = RepairFun}) when
         lists:foldl(BucketCountFun, maps:new(), State#state.blue_acc),
     PinkBuckets =
         lists:foldl(BucketCountFun, maps:new(), State#state.pink_acc),
-    aae_util:log(ex012, [BlueBuckets, PinkBuckets]),
-    aae_util:log(
-        ex008,
-        [State#state.blue_acc, State#state.pink_acc],
-        State#state.log_levels
-    ),
+    ?STD_LOG(ex012, [BlueBuckets, PinkBuckets]),
+    ?STD_LOG(ex008, [State#state.blue_acc, State#state.pink_acc]),
     FilterFun =
         fun({B, K, _VC}) ->
             aae_util:maybe_include_key(State#state.key_filter, {B, K})
         end,
     FilteredBlues = lists:filter(FilterFun, State#state.blue_acc),
     FilteredPinks = lists:filter(FilterFun, State#state.pink_acc),
-    aae_util:log(
+    ?STD_LOG(
         ex011,
         [
             length(State#state.blue_acc) - length(FilteredBlues),
             length(State#state.pink_acc) - length(FilteredPinks)
-        ],
-        State#state.log_levels
+        ]
     ),
     RepairKeys = compare_clocks(FilteredBlues, FilteredPinks),
-    aae_util:log(
+    ?STD_LOG(
         ex004,
-        [State#state.exchange_id, State#state.purpose, length(RepairKeys)],
-        State#state.log_levels
+        [State#state.exchange_id, State#state.purpose, length(RepairKeys)]
     ),
     RepairFun(RepairKeys),
     {stop, normal, State#state{key_deltas = RepairKeys}}.
 
 waiting_all_results({reply, not_supported, Colour}, State) ->
-    aae_util:log(
-        ex010,
-        [State#state.exchange_id, Colour, State#state.purpose],
-        State#state.log_levels
-    ),
+    ?STD_LOG(ex010, [State#state.exchange_id, Colour, State#state.purpose]),
     {stop, normal, State#state{pending_state = not_supported}};
 waiting_all_results({reply, {error, Reason}, _Colour}, State) ->
     waiting_all_results({error, Reason}, State);
 waiting_all_results({reply, Result, Colour}, State) ->
-    aae_util:log(
-        ex007, [Colour, State#state.exchange_id], State#state.log_levels
-    ),
+    ?STD_LOG(ex007, [Colour, State#state.exchange_id]),
     {PC, PT} = State#state.pink_returns,
     {BC, BT} = State#state.blue_returns,
     MergeFun = State#state.merge_fun,
@@ -696,7 +663,7 @@ waiting_all_results(UnexpectedResponse, State) ->
     {PC, PT} = State#state.pink_returns,
     {BC, BT} = State#state.blue_returns,
     MissingCount = PT + BT - (PC + BC),
-    aae_util:log(
+    ?STD_LOG(
         ex002,
         [
             UnexpectedResponse,
@@ -704,8 +671,7 @@ waiting_all_results(UnexpectedResponse, State) ->
             MissingCount,
             State#state.exchange_id,
             State#state.purpose
-        ],
-        State#state.log_levels
+        ]
     ),
     ReplyState =
         case UnexpectedResponse of
@@ -735,7 +701,7 @@ terminate(normal, StateName, State = #state{reply_fun = ReplyFun}) when
                     StateName == root_compare;
                     StateName == branch_compare
                 ->
-                    aae_util:log(
+                    ?STD_LOG(
                         ex003,
                         [
                             State#state.purpose,
@@ -746,8 +712,7 @@ terminate(normal, StateName, State = #state{reply_fun = ReplyFun}) when
                             State#state.root_compares,
                             State#state.branch_compares,
                             length(State#state.key_deltas)
-                        ],
-                        State#state.log_levels
+                        ]
                     );
                 BrokenState ->
                     EstDamage =
@@ -756,7 +721,7 @@ terminate(normal, StateName, State = #state{reply_fun = ReplyFun}) when
                             State#state.prethrottle_leaves,
                             State#state.max_results
                         ),
-                    aae_util:log(
+                    ?STD_LOG(
                         ex003,
                         [
                             State#state.purpose,
@@ -767,14 +732,13 @@ terminate(normal, StateName, State = #state{reply_fun = ReplyFun}) when
                             State#state.root_compares,
                             State#state.branch_compares,
                             length(State#state.key_deltas)
-                        ],
-                        State#state.log_levels
+                        ]
                     )
             end;
         partial ->
             case StateName of
                 tree_compare ->
-                    aae_util:log(
+                    ?STD_LOG(
                         ex009,
                         [
                             State#state.purpose,
@@ -784,11 +748,10 @@ terminate(normal, StateName, State = #state{reply_fun = ReplyFun}) when
                             0,
                             State#state.tree_compares,
                             length(State#state.key_deltas)
-                        ],
-                        State#state.log_levels
+                        ]
                     );
                 BrokenState ->
-                    aae_util:log(
+                    ?STD_LOG(
                         ex009,
                         [
                             State#state.purpose,
@@ -798,8 +761,7 @@ terminate(normal, StateName, State = #state{reply_fun = ReplyFun}) when
                             State#state.prethrottle_leaves,
                             State#state.tree_compares,
                             length(State#state.key_deltas)
-                        ],
-                        State#state.log_levels
+                        ]
                     )
             end
     end,
@@ -892,7 +854,8 @@ process_options([{transition_pause_ms, PauseMS} | Tail], State) when
 process_options([{log_levels, LogLevels} | Tail], State) when
     is_list(LogLevels)
 ->
-    process_options(Tail, State#state{log_levels = LogLevels});
+    aae_util:set_loglevel(LogLevels),
+    process_options(Tail, State);
 process_options([{scan_timeout, Timeout} | Tail], State) when
     is_integer(Timeout)
 ->
@@ -1148,8 +1111,7 @@ intersect_ids(IDs0, IDs1) ->
     list(integer()),
     pos_integer(),
     atom(),
-    list(),
-    aae_util:log_levels()
+    list()
 ) -> list(integer()).
 %% @doc
 %% Select a cluster of IDs if the list of IDs is smaller than the maximum
@@ -1158,15 +1120,11 @@ intersect_ids(IDs0, IDs1) ->
 %% results.  However, if we always get the same list, then concurrent exchanges
 %% will wastefully correct the same data - so randomly chose one of the better
 %% lists
-select_ids(IDList, MaxOutput, StateName, ExchangeID, LogLevels) when
+select_ids(IDList, MaxOutput, StateName, ExchangeID) when
     length(IDList) > MaxOutput
 ->
     IDList0 = lists:sort(IDList),
-    aae_util:log(
-        ex005,
-        [ExchangeID, length(IDList0), StateName],
-        LogLevels
-    ),
+    ?STD_LOG(ex005, [ExchangeID, length(IDList0), StateName]),
     IDList1 =
         lists:sublist(IDList0, 1 + length(IDList0) - MaxOutput),
     IDList2 =
@@ -1195,7 +1153,7 @@ select_ids(IDList, MaxOutput, StateName, ExchangeID, LogLevels) when
     {_ChosenSpace, ChosenIdx} =
         lists:nth(rand:uniform(length(Selections)), Selections),
     lists:sublist(IDList0, ChosenIdx, MaxOutput);
-select_ids(IDList, _MaxOutput, _StateName, _ExchangeID, _LogLevels) ->
+select_ids(IDList, _MaxOutput, _StateName, _ExchangeID) ->
     lists:sort(IDList).
 
 -spec jitter_pause(pos_integer()) -> pos_integer().
@@ -1220,7 +1178,9 @@ filtered_timeout(
     {filter, _B, KeyRange, _TS, SegFilter, ModRange, _HM},
     ScanTimeout
 ) ->
-    case ((KeyRange == all) and (SegFilter == all) and (ModRange == all)) of
+    case
+        ((KeyRange == all) andalso (SegFilter == all) andalso (ModRange == all))
+    of
         true ->
             ?UNFILTERED_SCAN_TIMEOUT_MS;
         false ->
@@ -1246,10 +1206,10 @@ refine_clock(Clock) ->
 
 select_id_test() ->
     L0 = [1, 2, 3],
-    ?assertMatch(L0, select_ids(L0, 3, root_confirm, "t0", undefined)),
+    ?assertMatch(L0, select_ids(L0, 3, root_confirm, "t0")),
     L1 = [3, 2, 1],
-    ?assertMatch(L0, select_ids(L1, 3, root_confirm, "t0", undefined)),
-    ?assertMatch(2, length(select_ids(L1, 2, root_confirm, "t0", undefined))).
+    ?assertMatch(L0, select_ids(L1, 3, root_confirm, "t0")),
+    ?assertMatch(2, length(select_ids(L1, 2, root_confirm, "t0"))).
 
 select_best_id_rand_test() ->
     L2 = [1, 2, 3, 5, 16, 17, 18],
@@ -1264,8 +1224,7 @@ select_best_id_rand_test() ->
                             L2,
                             3,
                             root_confirm,
-                            "r3",
-                            undefined
+                            "r3"
                         )
                     of
                         [1, 2, 3] ->
@@ -1284,12 +1243,12 @@ select_best_id_rand_test() ->
 
 select_id_withties_test() ->
     L0 = lists:seq(1, 1000),
-    RL = select_ids(L0, 32, root_confirm, "t0.0", undefined),
+    RL = select_ids(L0, 32, root_confirm, "t0.0"),
     ?assertMatch(32, length(RL)),
     Select100 =
         lists:map(
             fun(_I) ->
-                hd(select_ids(L0, 32, root_confirm, "t0.1", undefined))
+                hd(select_ids(L0, 32, root_confirm, "t0.1"))
             end,
             lists:seq(1, 100)
         ),

@@ -28,7 +28,19 @@
 -define(ROOT_PATH, "test/").
 
 init_per_suite(Config) ->
-    LogTemplate = [time, " log_level=", level, " ", msg, "\n"],
+    LogTemplate =
+        [
+            time,
+            " [",
+            level,
+            "] ",
+            {pid, [pid, "@"], []},
+            {mfa, [mfa, ":"], []},
+            {line, [line, ":"], []},
+            " ",
+            msg,
+            "\n"
+        ],
     LogFormatter =
         {
             logger_formatter,
@@ -38,7 +50,7 @@ init_per_suite(Config) ->
             }
         },
     {suite, SUITEName} = lists:keyfind(suite, 1, Config),
-    FileName = "leveled_" ++ SUITEName ++ "_ct.log",
+    FileName = "kvtictac_" ++ SUITEName ++ "_ct.log",
     LogConfig =
         #{
             config =>
