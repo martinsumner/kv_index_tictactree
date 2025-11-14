@@ -8,8 +8,9 @@
 -include("aae.hrl").
 
 -export([
-    log/2,
-    log_timer/3,
+    log/4,
+    log_timer/5,
+    get_log/1,
     get_opt/2,
     get_opt/3,
     make_binarykey/2,
@@ -169,19 +170,27 @@
 %%% External functions
 %%%============================================================================
 
--spec log(atom(), list()) -> list().
-log(LogReference, Subs) ->
+-spec get_log(atom()) -> {log_level(), binary()}.
+get_log(LogRef) ->
+    maps:get(LogRef, ?LOGBASE).
+
+-spec log(log_level(), atom(), leveled_log:log_options(), list()) -> list().
+log(LogLevel, LogRef, LogOpts, Subs) ->
     leveled_log:log(
-        LogReference,
+        LogLevel,
+        LogRef,
+        LogOpts,
         Subs,
         ?LOGBASE,
         [background, tictacaae]
     ).
 
--spec log_timer(atom(), list(), erlang:timestamp()) -> list().
-log_timer(LogReference, Subs, StartTime) ->
+-spec log_timer(log_level(), atom(), leveled_log:log_options(), list(), erlang:timestamp()) -> list().
+log_timer(LogLevel, LogRef, LogOpts, Subs, StartTime) ->
     leveled_log:log_timer(
-        LogReference,
+        LogLevel,
+        LogRef,
+        LogOpts,
         Subs,
         StartTime,
         ?LOGBASE,

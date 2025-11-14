@@ -26,17 +26,64 @@
 }).
 
 -define(STD_LOG(LogRef, Subs),
-    erlang:apply(
-        logger,
-        macro_log,
-        [?LOG_LOCATION | aae_util:log(LogRef, Subs)]
+    ?STD_LOG_INT(
+        element(1, aae_util:get_log(LogRef)),
+        LogRef,
+        Subs,
+        leveled_log:get_opts()
     )
 ).
 
+-define(STD_LOG_INT(LogLevel, LogRef, Subs, LogOpts),
+    case
+        logger:allow(LogLevel, ?MODULE) andalso
+            leveled_log:should_i_log(LogLevel, LogRef, LogOpts)
+    of
+        true ->
+            erlang:apply(
+                logger,
+                macro_log,
+                [
+                    ?LOG_LOCATION
+                    | aae_util:log(LogLevel, LogRef, LogOpts, Subs)
+                ]
+            );
+        false ->
+            ok
+    end
+).
+
 -define(TMR_LOG(LogRef, Subs, StartTime),
-    erlang:apply(
-        logger,
-        macro_log,
-        [?LOG_LOCATION | aae_util:log_timer(LogRef, Subs, StartTime)]
+    ?TMR_LOG_INT(
+        element(1, aae_util:get_log(LogRef)),
+        LogRef,
+        Subs,
+        leveled_log:get_opts(),
+        StartTime
     )
+).
+
+-define(TMR_LOG_INT(LogLevel, LogRef, Subs, LogOpts, StartTime),
+    case
+        logger:allow(LogLevel, ?MODULE) andalso
+            leveled_log:should_i_log(LogLevel, LogRef, LogOpts)
+    of
+        true ->
+            erlang:apply(
+                logger,
+                macro_log,
+                [
+                    ?LOG_LOCATION
+                    | aae_util:log_timer(
+                        LogLevel,
+                        LogRef,
+                        LogOpts,
+                        Subs,
+                        StartTime
+                    )
+                ]
+            );
+        false ->
+            ok
+    end
 ).
