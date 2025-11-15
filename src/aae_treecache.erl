@@ -329,14 +329,11 @@ handle_cast({mark_dirtysegments, SegmentList, FoldGUID}, State) ->
     end;
 handle_cast({replace_dirtysegments, SegmentMap, FoldGUID}, State) ->
     ChangeSegmentFoldFun =
-        fun({SegID, NewHash}, TreeAcc) ->
-            case lists:member(SegID, State#state.dirty_segments) of
+        fun({SID, NewHash}, TreeAcc) ->
+            case lists:member(SID, State#state.dirty_segments) of
                 true ->
-                    ?STD_LOG(
-                        c0006,
-                        [State#state.partition_id, SegID, NewHash]
-                    ),
-                    leveled_tictac:alter_segment(SegID, NewHash, TreeAcc);
+                    ?STD_LOG(c0006, [State#state.partition_id, SID, NewHash]),
+                    leveled_tictac:alter_segment(SID, NewHash, TreeAcc);
                 false ->
                     TreeAcc
             end

@@ -335,10 +335,7 @@ init([
         exchange_filters = Filters
     },
     State0 = process_options(Opts, State),
-    ?STD_LOG(
-        ex001,
-        [ExChID, PinkTarget + BlueTarget, State0#state.purpose]
-    ),
+    ?STD_LOG(ex001, [ExChID, PinkTarget + BlueTarget, State0#state.purpose]),
     InitState =
         case Type of
             full -> prepare_full_exchange;
@@ -347,10 +344,7 @@ init([
     {ok, InitState, State0, 0}.
 
 prepare_full_exchange(timeout, State) ->
-    ?STD_LOG(
-        ex006,
-        [prepare_tree_exchange, State#state.exchange_id]
-    ),
+    ?STD_LOG(ex006, [prepare_tree_exchange, State#state.exchange_id]),
     trigger_next(
         fetch_root,
         root_compare,
@@ -364,10 +358,7 @@ prepare_full_exchange(timeout, State) ->
 prepare_partial_exchange(
     timeout, State = #state{exchange_filters = Filters}
 ) when Filters =/= none ->
-    ?STD_LOG(
-        ex006,
-        [prepare_partial_exchange, State#state.exchange_id]
-    ),
+    ?STD_LOG(ex006, [prepare_partial_exchange, State#state.exchange_id]),
     Filters = State#state.exchange_filters,
     ScanTimeout = filtered_timeout(Filters, State#state.scan_timeout),
     TreeSize = element(?FILTERIDX_TRS, Filters),
@@ -384,10 +375,7 @@ prepare_partial_exchange(
 tree_compare(timeout, State = #state{exchange_filters = Filters}) when
     Filters =/= none
 ->
-    ?STD_LOG(
-        ex006,
-        [root_compare, State#state.exchange_id]
-    ),
+    ?STD_LOG(ex006, [root_compare, State#state.exchange_id]),
     DirtyLeaves = compare_trees(State#state.blue_acc, State#state.pink_acc),
     TreeCompares = State#state.tree_compares + 1,
     {StillDirtyLeaves, Reduction} =
@@ -579,10 +567,12 @@ branch_compare(timeout, State) ->
             )
     end.
 
-clock_compare(timeout, State = #state{repair_fun = RepairFun}) when
+clock_compare(
+    timeout, State = #state{repair_fun = RepairFun, exchange_id = ExId}
+) when
     ?IS_DEF(RepairFun)
 ->
-    ?STD_LOG(ex006, [clock_compare, State#state.exchange_id]),
+    ?STD_LOG(ex006, [clock_compare, ExId]),
     BucketCountFun =
         fun({B, _K, _C}, Acc) ->
             maps:update_with(B, fun(V) -> V + 1 end, 1, Acc)
@@ -599,18 +589,11 @@ clock_compare(timeout, State = #state{repair_fun = RepairFun}) when
         end,
     FilteredBlues = lists:filter(FilterFun, State#state.blue_acc),
     FilteredPinks = lists:filter(FilterFun, State#state.pink_acc),
-    ?STD_LOG(
-        ex011,
-        [
-            length(State#state.blue_acc) - length(FilteredBlues),
-            length(State#state.pink_acc) - length(FilteredPinks)
-        ]
-    ),
+    IgnoreBlue = length(State#state.blue_acc) - length(FilteredBlues),
+    IgnorePink = length(State#state.pink_acc) - length(FilteredPinks),
+    ?STD_LOG(ex011, [IgnoreBlue, IgnorePink]),
     RepairKeys = compare_clocks(FilteredBlues, FilteredPinks),
-    ?STD_LOG(
-        ex004,
-        [State#state.exchange_id, State#state.purpose, length(RepairKeys)]
-    ),
+    ?STD_LOG(ex004, [ExId, State#state.purpose, length(RepairKeys)]),
     RepairFun(RepairKeys),
     {stop, normal, State#state{key_deltas = RepairKeys}}.
 

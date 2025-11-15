@@ -851,7 +851,9 @@ handle_call({rebuild_trees, IndexNs, PreflistFun, OnlyIfBroken}, _From, State) -
                     FinishFun =
                         fun(FoldTreeCaches) ->
                             lists:foreach(FinishTreeFun, FoldTreeCaches),
-                            ?TMR_LOG(aae13, [], SW)
+                            MSduration =
+                                timer:now_diff(os:timestamp(), SW) div 1000,
+                            ?STD_LOG(aae13, [MSduration])
                         end,
 
                     % The IndexNs and TreeCaches supported by the controller

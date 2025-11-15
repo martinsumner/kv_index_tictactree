@@ -36,7 +36,6 @@ init_per_suite(Config) ->
             "] ",
             {pid, [pid, "@"], []},
             {mfa, [mfa, ":"], []},
-            {line, [line, ":"], []},
             " ",
             msg,
             "\n"
@@ -60,21 +59,9 @@ init_per_suite(Config) ->
                 }
         },
 
-    LogFilter =
-        fun(LogEvent, LogType) ->
-            Meta = maps:get(meta, LogEvent),
-            case maps:get(log_type, Meta, not_found) of
-                LogType ->
-                    LogEvent;
-                _ ->
-                    ignore
-            end
-        end,
-
     ok = logger:add_handler(logfile, logger_std_h, LogConfig),
     ok = logger:set_handler_config(logfile, formatter, LogFormatter),
     ok = logger:set_handler_config(logfile, level, info),
-    ok = logger:add_handler_filter(logfile, type_filter, {LogFilter, backend}),
 
     ok = logger:set_handler_config(default, level, notice),
     ok = logger:set_handler_config(cth_log_redirect, level, notice),

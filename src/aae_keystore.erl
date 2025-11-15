@@ -734,11 +734,11 @@ loading({mput, ObjectSpecs}, State = #state{store_type = StoreType}) when
             ok
     end,
     {next_state, loading, State#state{change_queue_counter = ObjectCount1}};
-loading({prompt, rebuild_complete}, State) ->
-    ?STD_LOG(
-        ks008,
-        [State#state.change_queue_counter, State#state.load_counter]
-    ),
+loading(
+    {prompt, rebuild_complete},
+    State = #state{change_queue_counter = CQC, load_counter = LC})
+->
+    ?STD_LOG(ks008, [CQC, LC]),
     store_prompt(self(), queue_complete),
     {next_state, loading, State#state{
         load_counter = 0, load_continuation = start

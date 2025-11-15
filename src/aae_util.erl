@@ -9,7 +9,6 @@
 
 -export([
     log/4,
-    log_timer/5,
     get_log/1,
     get_opt/2,
     get_opt/3,
@@ -75,7 +74,7 @@
         aae12 =>
             {info, <<"Received rebuild store for parallel store ~w">>},
         aae13 =>
-            {info, <<"Completed tree rebuild">>},
+            {info, <<"Completed tree rebuild with rebuild_time_ms=~w">>},
         aae14 =>
             {debug, <<"Mismatch finding unexpected IndexN in fold of ~w">>},
         aae15 =>
@@ -181,18 +180,6 @@ log(LogLevel, LogRef, LogOpts, Subs) ->
         LogRef,
         LogOpts,
         Subs,
-        ?LOGBASE,
-        [background, tictacaae]
-    ).
-
--spec log_timer(log_level(), atom(), leveled_log:log_options(), list(), erlang:timestamp()) -> list().
-log_timer(LogLevel, LogRef, LogOpts, Subs, StartTime) ->
-    leveled_log:log_timer(
-        LogLevel,
-        LogRef,
-        LogOpts,
-        Subs,
-        StartTime,
         ?LOGBASE,
         [background, tictacaae]
     ).
