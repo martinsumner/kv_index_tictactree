@@ -28,7 +28,18 @@
 -define(ROOT_PATH, "test/").
 
 init_per_suite(Config) ->
-    LogTemplate = [time, " log_level=", level, " ", msg, "\n"],
+    LogTemplate =
+        [
+            time,
+            " [",
+            level,
+            "] ",
+            {pid, [pid, "@"], []},
+            {mfa, [mfa, ":"], []},
+            " ",
+            msg,
+            "\n"
+        ],
     LogFormatter =
         {
             logger_formatter,
@@ -38,7 +49,7 @@ init_per_suite(Config) ->
             }
         },
     {suite, SUITEName} = lists:keyfind(suite, 1, Config),
-    FileName = "leveled_" ++ SUITEName ++ "_ct.log",
+    FileName = "kvtictac_" ++ SUITEName ++ "_ct.log",
     LogConfig =
         #{
             config =>
@@ -48,21 +59,9 @@ init_per_suite(Config) ->
                 }
         },
 
-    LogFilter =
-        fun(LogEvent, LogType) ->
-            Meta = maps:get(meta, LogEvent),
-            case maps:get(log_type, Meta, not_found) of
-                LogType ->
-                    LogEvent;
-                _ ->
-                    ignore
-            end
-        end,
-
     ok = logger:add_handler(logfile, logger_std_h, LogConfig),
     ok = logger:set_handler_config(logfile, formatter, LogFormatter),
     ok = logger:set_handler_config(logfile, level, info),
-    ok = logger:add_handler_filter(logfile, type_filter, {LogFilter, backend}),
 
     ok = logger:set_handler_config(default, level, notice),
     ok = logger:set_handler_config(cth_log_redirect, level, notice),

@@ -49,7 +49,6 @@
     active_fold :: string() | undefined,
     change_queue = [] :: list() | redacted,
     queued_changes = 0 :: non_neg_integer(),
-    log_levels :: aae_util:log_levels(),
     safe_save = false :: boolean()
 }).
 
@@ -202,16 +201,15 @@ init([Opts]) ->
             IgnoreOpt when is_boolean(IgnoreOpt) ->
                 IgnoreOpt
         end,
-    LogLevels =
-        case aae_util:get_opt(log_levels, Opts) of
-            LLOpt when is_list(LLOpt) ->
-                aae_util:filter_log_levels(LLOpt);
-            undefined ->
-                undefined
-        end,
+    case aae_util:get_opt(log_levels, Opts) of
+        LLOpt when is_list(LLOpt) ->
+            aae_util:set_loglevel(LLOpt);
+        undefined ->
+            ok
+    end,
     RootPath0 = filename:join(RootPath, flatten_id(PartitionID)) ++ "/",
     {StartTree, SaveSQN, IsRestored} =
-        case {open_from_disk(RootPath0, LogLevels), IgnoreDisk} of
+        case {open_from_disk(RootPath0), IgnoreDisk} of
             % Always run open_from_disk even if the result is to be ignored,
             % as any files present must still be cleared
             {{Tree, SQN}, false} when Tree =/= none ->
@@ -223,7 +221,7 @@ init([Opts]) ->
                     false
                 }
         end,
-    aae_util:log(c0005, [IsRestored, PartitionID], LogLevels),
+    ?STD_LOG(c0005, [IsRestored, PartitionID]),
     process_flag(trap_exit, true),
     {ok,
         #state{
@@ -232,7 +230,6 @@ init([Opts]) ->
             is_restored = IsRestored,
             root_path = RootPath0,
             partition_id = PartitionID,
-            log_levels = LogLevels,
             safe_save = IsRestored or IgnoreDisk
         },
         hibernate}.
@@ -253,7 +250,7 @@ handle_call(close, _From, State) ->
     case {State#state.safe_save, State#state.tree, State#state.root_path} of
         {true, Tree, RP} when Tree =/= undefined, RP =/= undefined ->
             save_to_disk(
-                RP, State#state.save_sqn, Tree, State#state.log_levels
+                RP, State#state.save_sqn, Tree
             );
         _ ->
             ok
@@ -309,9 +306,7 @@ handle_cast({complete_load, Tree}, State = #state{loading = Loading}) when
             )
         end,
     Tree0 = lists:foldr(LoadFun, Tree, State#state.change_queue),
-    aae_util:log(
-        c0008, [length(State#state.change_queue)], State#state.log_levels
-    ),
+    ?STD_LOG(c0008, [length(State#state.change_queue)]),
     {noreply,
         State#state{
             loading = false,
@@ -334,15 +329,11 @@ handle_cast({mark_dirtysegments, SegmentList, FoldGUID}, State) ->
     end;
 handle_cast({replace_dirtysegments, SegmentMap, FoldGUID}, State) ->
     ChangeSegmentFoldFun =
-        fun({SegID, NewHash}, TreeAcc) ->
-            case lists:member(SegID, State#state.dirty_segments) of
+        fun({SID, NewHash}, TreeAcc) ->
+            case lists:member(SID, State#state.dirty_segments) of
                 true ->
-                    aae_util:log(
-                        c0006,
-                        [State#state.partition_id, SegID, NewHash],
-                        State#state.log_levels
-                    ),
-                    leveled_tictac:alter_segment(SegID, NewHash, TreeAcc);
+                    ?STD_LOG(c0006, [State#state.partition_id, SID, NewHash]),
+                    leveled_tictac:alter_segment(SID, NewHash, TreeAcc);
                 false ->
                     TreeAcc
             end
@@ -360,10 +351,11 @@ handle_cast({replace_dirtysegments, SegmentMap, FoldGUID}, State) ->
             {noreply, State}
     end;
 handle_cast(destroy, State) ->
-    aae_util:log(c0004, [State#state.partition_id], State#state.log_levels),
+    ?STD_LOG(c0004, [State#state.partition_id]),
     {stop, normal, State};
 handle_cast({log_levels, LogLevels}, State) ->
-    {noreply, State#state{log_levels = LogLevels}}.
+    ok = aae_util:set_loglevel(LogLevels),
+    {noreply, State}.
 
 handle_info(_Info, State) ->
     {stop, normal, State}.
@@ -399,19 +391,16 @@ flatten_id({Index, N}) ->
 flatten_id(ID) ->
     integer_to_list(ID).
 
--spec save_to_disk(
-    list(), integer(), leveled_tictac:tictactree(), aae_util:log_levels()
-) ->
-    ok.
+-spec save_to_disk(list(), integer(), leveled_tictac:tictactree()) -> ok.
 %% @doc
 %% Save the TreeCache to disk, with a checksum so thatit can be
 %% validated on read.
-save_to_disk(RootPath, SaveSQN, TreeCache, LogLevels) ->
+save_to_disk(RootPath, SaveSQN, TreeCache) ->
     Serialised = term_to_binary(leveled_tictac:export_tree(TreeCache)),
     CRC32 = erlang:crc32(Serialised),
     ok = filelib:ensure_dir(RootPath),
     PendingName = integer_to_list(SaveSQN) ++ ?PENDING_EXT,
-    aae_util:log(c0003, [RootPath, PendingName], LogLevels),
+    ?STD_LOG(c0003, [RootPath, PendingName]),
     ok = file:write_file(
         filename:join(RootPath, PendingName),
         <<CRC32:32/integer, Serialised/binary>>,
@@ -424,22 +413,19 @@ save_to_disk(RootPath, SaveSQN, TreeCache, LogLevels) ->
         ),
     ok.
 
--spec open_from_disk(
-    list(), aae_util:log_levels()
-) ->
-    {leveled_tictac:tictactree() | none, integer()}.
+-spec open_from_disk(list()) -> {leveled_tictac:tictactree() | none, integer()}.
 %% @doc
 %% Open most recently saved TicTac tree cache file on disk, deleting all
 %% others both used and unused - to save an out of date tree from being used
 %% following a subsequent crash
-open_from_disk(RootPath, LogLevels) ->
+open_from_disk(RootPath) ->
     ok = filelib:ensure_dir(RootPath),
     {ok, Filenames} = file:list_dir(RootPath),
     FileFilterFun =
         fun(FN, FinalFiles) ->
             case filename:extension(FN) of
                 ?PENDING_EXT ->
-                    aae_util:log(c0001, [FN], LogLevels),
+                    ?STD_LOG(c0001, [FN]),
                     ok = file:delete(filename:join(RootPath, FN)),
                     FinalFiles;
                 ?FINAL_EXT ->
@@ -470,7 +456,7 @@ open_from_disk(RootPath, LogLevels) ->
                         HeadSQN + 1
                     };
                 {error, Reason} ->
-                    aae_util:log(c0002, [FileToUse, Reason], LogLevels),
+                    ?STD_LOG(c0002, [FileToUse, Reason]),
                     {none, 1}
             end
     end.
@@ -554,8 +540,8 @@ setup_savedcaches(RootPath) ->
         {<<"V2">>},
         fun({K}, {V}) -> {K, V} end
     ),
-    ok = save_to_disk(RootPath, 1, Tree1, undefined),
-    ok = save_to_disk(RootPath, 2, Tree2, undefined),
+    ok = save_to_disk(RootPath, 1, Tree1),
+    ok = save_to_disk(RootPath, 2, Tree2),
     Tree2.
 
 clean_saveopen_test() ->
@@ -570,13 +556,13 @@ clean_saveopen_test() ->
     ok = file:write_file(UnrelatedFN, <<"no_delete">>),
 
     {Tree3, SaveSQN} =
-        case open_from_disk(RootPath, undefined) of
+        case open_from_disk(RootPath) of
             {OT3, OT3SQN} when OT3 =/= none ->
                 {OT3, OT3SQN}
         end,
     ?assertMatch(3, SaveSQN),
     ?assertMatch([], leveled_tictac:find_dirtyleaves(Tree2, Tree3)),
-    ?assertMatch({none, 1}, open_from_disk(RootPath, undefined)),
+    ?assertMatch({none, 1}, open_from_disk(RootPath)),
 
     ?assertMatch({ok, <<"no_delete">>}, file:read_file(UnrelatedFN)),
     ?assertMatch({error, enoent}, file:read_file(NextFN)),
@@ -671,7 +657,7 @@ corrupt_save_tester() ->
     BrokenCacheCheckFun =
         fun(BrokenCache) ->
             ok = file:write_file(BestFN, BrokenCache),
-            R = open_from_disk(RootPath, undefined),
+            R = open_from_disk(RootPath),
             ?assertMatch({none, 1}, R)
         end,
     ok = lists:foreach(BrokenCacheCheckFun, BrokenCaches),

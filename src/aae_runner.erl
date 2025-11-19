@@ -6,6 +6,8 @@
 
 -behaviour(gen_server).
 
+-include("aae.hrl").
+
 -export([
     init/1,
     handle_call/3,
@@ -25,8 +27,7 @@
     result_size = 0 :: integer(),
     query_count = 0 :: integer(),
     query_time = 0 :: integer(),
-    aae_controller :: pid() | undefined,
-    log_levels :: aae_util:log_levels()
+    aae_controller :: pid() | undefined
 }).
 
 -define(LOG_FREQUENCY, 10).
@@ -61,8 +62,8 @@ runner_stop(Runner) ->
 %%%============================================================================
 
 init([LogLevels, Controller]) ->
-    {ok, #state{log_levels = LogLevels, aae_controller = Controller},
-        ?PROMPT_MILLISECONDS}.
+    ok = aae_util:set_loglevel(LogLevels),
+    {ok, #state{aae_controller = Controller}, ?PROMPT_MILLISECONDS}.
 
 handle_call(close, _From, State) ->
     {stop, normal, ok, State}.
@@ -74,12 +75,12 @@ handle_cast({work, Folder, ReturnFun, SizeFun}, State) ->
     State0 =
         try Folder() of
             query_backlog ->
-                aae_util:log(r0002, [], State#state.log_levels),
+                ?STD_LOG(r0002, []),
                 ReturnFun({error, query_backlog}),
                 State;
             Results ->
                 QueryTime = timer:now_diff(os:timestamp(), SW),
-                aae_util:log(r0003, [QueryTime], State#state.log_levels),
+                ?STD_LOG(r0003, [QueryTime]),
                 RS0 = State#state.result_size + SizeFun(Results),
                 QT0 = State#state.query_time + QueryTime,
                 QC0 = State#state.query_count + 1,
@@ -88,8 +89,7 @@ handle_cast({work, Folder, ReturnFun, SizeFun}, State) ->
                         RS0,
                         QT0,
                         QC0,
-                        ?LOG_FREQUENCY,
-                        State#state.log_levels
+                        ?LOG_FREQUENCY
                     ),
 
                 ReturnFun(Results),
@@ -101,14 +101,14 @@ handle_cast({work, Folder, ReturnFun, SizeFun}, State) ->
                 }
         catch
             Error:Pattern ->
-                aae_util:log(r0005, [Error, Pattern], State#state.log_levels),
+                ?STD_LOG(r0005, [Error, Pattern]),
                 ReturnFun({error, Error}),
                 State
         end,
     {noreply, State0, 0}.
 
 handle_info(timeout, State = #state{aae_controller = C}) when C =/= undefined ->
-    aae_util:log(r0004, [], State#state.log_levels),
+    ?STD_LOG(r0004, []),
     ok = aae_controller:aae_runnerprompt(C),
     {noreply, State}.
 
@@ -117,8 +117,7 @@ terminate(_Reason, State) ->
         State#state.result_size,
         State#state.query_time,
         State#state.query_count,
-        1,
-        State#state.log_levels
+        1
     ),
     ok.
 
@@ -129,10 +128,10 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%============================================================================
 
-maybe_log(RS_Acc, QT_Acc, QC_Acc, LogFreq, _LogLs) when QC_Acc < LogFreq ->
+maybe_log(RS_Acc, QT_Acc, QC_Acc, LogFreq) when QC_Acc < LogFreq ->
     {RS_Acc, QT_Acc, QC_Acc};
-maybe_log(RS_Acc, QT_Acc, QC_Acc, _LogFreq, LogLs) ->
-    aae_util:log(r0001, [RS_Acc, QT_Acc, QC_Acc], LogLs),
+maybe_log(RS_Acc, QT_Acc, QC_Acc, _LogFreq) ->
+    ?STD_LOG(r0001, [RS_Acc, QT_Acc, QC_Acc]),
     {0, 0, 0}.
 
 %%%============================================================================
@@ -142,7 +141,6 @@ maybe_log(RS_Acc, QT_Acc, QC_Acc, _LogFreq, LogLs) ->
 -ifdef(TEST).
 
 -include_lib("eunit/include/eunit.hrl").
--include_lib("kv_index_tictactree/include/aae.hrl").
 
 runner_fail_test() ->
     {ok, R} = runner_start(undefined),

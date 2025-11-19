@@ -8,14 +8,13 @@
 -include("aae.hrl").
 
 -export([
-    log/2,
-    log/3,
-    log_timer/4,
+    log/4,
+    get_log/1,
     get_opt/2,
     get_opt/3,
     make_binarykey/2,
     safe_open/1,
-    filter_log_levels/1,
+    set_loglevel/1,
     maybe_include_key/2,
     check_rootpath/1
 ]).
@@ -30,11 +29,12 @@
 -export([get_segmentid/2]).
 -endif.
 
--define(DEFAULT_LOG_LEVELS, [warning, error, critical]).
-
--type log_levels() :: list(leveled_log:log_level()) | undefined.
+-type log_level() :: debug | info | warning | error | critical.
+-type log_levels() :: list(log_level()) | undefined.
 
 -export_type([log_levels/0]).
+
+-define(DOMAIN, [background, tictacaae]).
 
 %% erlfmt:ignore-begin
 -define(LOGBASE,
@@ -76,7 +76,7 @@
         aae12 =>
             {info, <<"Received rebuild store for parallel store ~w">>},
         aae13 =>
-            {info, <<"Completed tree rebuild">>},
+            {info, <<"Completed tree rebuild with rebuild_time_ms=~w">>},
         aae14 =>
             {debug, <<"Mismatch finding unexpected IndexN in fold of ~w">>},
         aae15 =>
@@ -171,34 +171,50 @@
 %%% External functions
 %%%============================================================================
 
--spec log(atom(), list()) -> term().
-%% @doc
-%% Pick the log out of the logbase based on the reference
-log(LogReference, Subs) ->
-    log(LogReference, Subs, undefined).
+-spec get_log(atom()) -> {log_level(), binary()}.
+get_log(LogRef) ->
+    maps:get(LogRef, ?LOGBASE).
 
--spec log(atom(), list(), aae_util:log_levels()) -> term().
-log(LogReference, Subs, undefined) ->
-    log(LogReference, Subs, ?DEFAULT_LOG_LEVELS);
-log(LogReference, Subs, LogLevels) ->
-    leveled_log:log(LogReference, Subs, LogLevels, ?LOGBASE, tictacaae).
-
--spec log_timer(
-    atom(), list(), erlang:timestamp(), aae_util:log_levels()
-) -> term().
-log_timer(LogReference, Subs, StartTime, undefined) ->
-    log_timer(LogReference, Subs, StartTime, ?DEFAULT_LOG_LEVELS);
-log_timer(LogReference, Subs, StartTime, LogLevels) ->
-    leveled_log:log_timer(
-        LogReference, Subs, StartTime, LogLevels, ?LOGBASE, tictacaae
+-spec log(log_level(), atom(), leveled_log:log_options(), list()) -> list().
+log(LogLevel, LogRef, LogOpts, Subs) ->
+    leveled_log:log(
+        LogLevel,
+        LogRef,
+        LogOpts,
+        Subs,
+        ?LOGBASE,
+        ?DOMAIN
     ).
 
--spec filter_log_levels(list()) -> list(leveled_log:log_level()).
-filter_log_levels(Inputs) ->
-    lists:filter(
-        fun(I) -> lists:member(I, [debug, info, warning, error, critical]) end,
-        Inputs
-    ).
+-spec set_loglevel(list() | undefined) -> ok.
+set_loglevel(undefined) ->
+    ok;
+set_loglevel(Inputs) when Inputs =/= undefined ->
+    LogLevel =
+        lists:foldl(
+            fun(Check, Acc) ->
+                case {Check, Acc} of
+                    {_, none} ->
+                        case {Check, lists:member(Check, Inputs)} of
+                            {_Check, true} ->
+                                Check;
+                            {critical, false} ->
+                                % no valid input - set to info
+                                info;
+                            {_Check, false} ->
+                                none
+                        end;
+                    {_, Level} when Level /= none ->
+                        Level
+                end
+            end,
+            none,
+            [debug, info, warning, error, critical]
+        ),
+    case LogLevel of
+        LogLevel when LogLevel /= none ->
+            leveled_log:set_loglevel(LogLevel)
+    end.
 
 -spec check_rootpath(list()) -> string().
 check_rootpath(RootPath) ->
@@ -338,6 +354,20 @@ clean_subdir(DirPath) ->
 -ifdef(TEST).
 
 -include_lib("eunit/include/eunit.hrl").
+
+get_loglevel() ->
+    element(2, leveled_log:get_opts()).
+
+set_loglevel_test() ->
+    ?assertMatch(error, get_loglevel()),
+    ok = set_loglevel([debug]),
+    ?assertMatch(debug, get_loglevel()),
+    ok = set_loglevel([nonsense]),
+    ?assertMatch(info, get_loglevel()),
+    ok = set_loglevel([warning, error, critical]),
+    ?assertMatch(warning, get_loglevel()),
+    ok = set_loglevel([nonsense, critical]),
+    ?assertMatch(critical, get_loglevel()).
 
 get_segmentid(B, K) ->
     Seg32 = leveled_tictac:keyto_segment32(make_binarykey(B, K)),
