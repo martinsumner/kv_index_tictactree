@@ -34,6 +34,8 @@
 
 -export_type([log_levels/0]).
 
+-define(DOMAIN, [background, tictacaae]).
+
 %% erlfmt:ignore-begin
 -define(LOGBASE,
     #{
@@ -181,7 +183,7 @@ log(LogLevel, LogRef, LogOpts, Subs) ->
         LogOpts,
         Subs,
         ?LOGBASE,
-        [background, tictacaae]
+        ?DOMAIN
     ).
 
 -spec set_loglevel(list() | undefined) -> ok.
